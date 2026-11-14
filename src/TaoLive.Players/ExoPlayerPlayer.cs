@@ -17,17 +17,31 @@ public sealed class ExoPlayerPlayer : IPlayer
 {
     private readonly Forwarder _forwarder;
     private readonly AndroidX.Media3.ExoPlayer.IExoPlayer _player;
+    private readonly Android.OS.Handler _main;
+    private readonly Func<TaoLive.Model.SourceEndpoint, Task<string?>>? _streamResolver;
     private bool _firstFrameRaisedThisPlay;
     private IntPtr _surfaceHandle;
     private bool _hasSurface;
 
-    public ExoPlayerPlayer(Android.Content.Context context)
+    /// <summary>
+    /// 取流注入点（2.0 W4 口径）：API 取票口端点播前经 resolver 换真实流（频道号+运行时取票），
+    /// 直连端点原样放行。null=全部直连。解析失败按 OnError 交会话备源自救，契约不变。
+    /// 频道上下文（缓存键/整表行匹配名）由壳层在 Play 前设置。
+    /// </summary>
+    public ExoPlayerPlayer(Android.Content.Context context,
+        Func<TaoLive.Model.SourceEndpoint, Task<string?>>? streamResolver = null)
     {
         ArgumentNullException.ThrowIfNull(context);
         _forwarder = new Forwarder(this);
         _player = new AndroidX.Media3.ExoPlayer.ExoPlayer.Builder(context).Build()!;
         _player.AddListener(_forwarder);
+        _main = new Android.OS.Handler(Android.OS.Looper.MainLooper!);
+        _streamResolver = streamResolver;
     }
+
+    /// <summary>频道上下文：缓存键与整表行匹配名（nmtv/gxtv 按 name 定位），Play 前由壳层设置。</summary>
+    public string? CurrentChannelKey { get; set; }
+    public string? CurrentChannelName { get; set; }
 
     // —— 事件出口（契约语义，供会话层订阅）——
 
@@ -40,9 +54,35 @@ public sealed class ExoPlayerPlayer : IPlayer
     {
         ArgumentNullException.ThrowIfNull(params_);
         _firstFrameRaisedThisPlay = false;
+        if (_streamResolver is null)
+        {
+            StartMedia(params_.Endpoint.Url);
+            return;
+        }
+        // 取票口：异步换真实流，回到主线程再挂 MediaItem（ExoPlayer 要求在其创建线程调用）
+        var channelKey = CurrentChannelKey;
+        var channelName = CurrentChannelName;
+        var pending = params_;
+        _ = Task.Run(async () =>
+        {
+            string? url = null;
+            try { url = await _streamResolver(pending.Endpoint).ConfigureAwait(false); }
+            catch { url = null; }
+            _main.Post(() =>
+            {
+                if (string.IsNullOrEmpty(url))
+                    HandleError("RESOLVE_FAILED", $"取流失败（{channelName ?? channelKey ?? "channel"}）");
+                else
+                    StartMedia(url);
+            });
+        });
+    }
+
+    private void StartMedia(string url)
+    {
         var builder = new AndroidX.Media3.Common.MediaItem.Builder()
-            .SetUri(Android.Net.Uri.Parse(params_.Endpoint.Url));
-        if (IsHls(params_.Endpoint.Url))
+            .SetUri(Android.Net.Uri.Parse(url));
+        if (IsHls(url))
         {
             builder.SetMimeType(AndroidX.Media3.Common.MimeTypes.ApplicationHls);
         }

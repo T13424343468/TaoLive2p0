@@ -22,5 +22,7 @@
     <ProjectReference Include="../TaoLive.Model/TaoLive.Model.csproj" />
     <ProjectReference Include="../TaoLive.Foundation/TaoLive.Foundation.csproj" />
     <ProjectReference Include="../TaoLive.Session/TaoLive.Session.csproj" />
+    <ProjectReference Include="../TaoLive.Players/TaoLive.Players.csproj" />
+    <ProjectReference Include="../TaoLive.Catalog/TaoLive.Catalog.csproj" />
   </ItemGroup>
 </Project>

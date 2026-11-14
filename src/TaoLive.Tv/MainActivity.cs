@@ -1,19 +1,289 @@
+using System.Text;
 using Android.App;
+using Android.Graphics;
 using Android.OS;
+using Android.Runtime;
+using Android.Views;
+using Android.Widget;
+using Microsoft.Extensions.DependencyInjection;
+using TaoLive.Catalog;
+using TaoLive.Foundation;
+using TaoLive.Model;
+using TaoLive.Players;
+using TaoLive.Session;
 
 namespace TaoLive.Tv;
 
 /// <summary>
-/// 电视净壳入口（M1 W1：只立壳不塞业务；播放页与列表页接线 W5 班）。
-/// label=TaoLive 特征关：见 AndroidManifest（老板可见特征，终验必查）。
+/// 电视端主入口（2.0 W5 接线）：频道列表（编号+分类，电视优先）+ 播放页 SurfaceView，
+/// 接会话层（AddTaoLiveSession）与 ExoPlayer 内核（老板 2026-11-15 03:37 换向令）。
+/// 操作逻辑沿一期：频道号直达（遥控器数字键）、上下键换台、返回键回列表；
+/// 界面样式一期保留（纯文字列表，无花哨横幅）。label=TaoLive 特征关见 AndroidManifest。
 /// </summary>
 [Activity(Label = "TaoLive", MainLauncher = true)]
 public class MainActivity : Activity
 {
+    private IServiceProvider _services = default!;
+    private PlaybackSessionManager _manager = default!;
+    private ExoPlayerPlayer _player = default!;
+    private readonly IReadOnlyList<Channel> _channels = ChannelTable.Build();
+
+    private FrameLayout _root = default!;
+    private ListView _list = default!;
+    private FrameLayout _playerPage = default!;
+    private SurfaceView _surface = default!;
+    private TextView _toast = default!;
+    private readonly Handler _main = new(Looper.MainLooper!);
+    private bool _onPlayerPage;
+    private int _currentIndex;
+    private string _digits = "";
+    private Java.Lang.Runnable? _digitCommit;
+    private bool _watchdogRunning;
+    private Java.Lang.Runnable _toastHide = default!;
+
     protected override void OnCreate(Bundle? savedInstanceState)
     {
         base.OnCreate(savedInstanceState);
-        // W1 净壳：无 UI 资源时仅落空布局占位；W5 班接列表页与播放页
-        SetContentView(Android.Resource.Layout.SimpleListItem1);
+
+        var resolver = new TicketResolver();
+        _player = new ExoPlayerPlayer(this, endpoint => resolver.ResolveAsync(endpoint,
+            _player?.CurrentChannelKey ?? "", _player?.CurrentChannelName ?? ""));
+        _services = new ServiceCollection()
+            .AddSingleton<IPlayer>(_player)
+            .AddSingleton<IClock, SystemClock>()
+            .AddSingleton<IMainThreadDispatcher>(new AndroidMainThreadDispatcher(_main))
+            .AddTaoLiveSession()
+            .BuildServiceProvider();
+        _manager = _services.GetRequiredService<PlaybackSessionManager>();
+
+        Window.AddFlags(WindowManagerFlags.KeepScreenOn);
+        BuildRoot();
+        SetContentView(_root);
+        ShowList();
+    }
+
+    protected override void OnDestroy()
+    {
+        _manager.Current?.DetachSurface();
+        base.OnDestroy();
+    }
+
+    // —— 视图 ————————————————————————————————————————————
+
+    private void BuildRoot()
+    {
+        _root = new FrameLayout(this);
+        _root.SetBackgroundColor(Color.Rgb(8, 10, 14));
+
+        _toastHide = new Java.Lang.Runnable(() =>
+            _toast.Visibility = ViewStates.Invisible);
+
+        _list = new ListView(this) { CacheColorHint = Color.Transparent };
+        _list.Adapter = new ChannelListAdapter(this, _channels);
+        _list.ItemClick += (_, e) => PlayAt(e.Position);
+        _root.AddView(_list, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.MatchParent));
+
+        _playerPage = new FrameLayout(this) { Visibility = ViewStates.Gone };
+        _surface = new SurfaceView(this);
+        _playerPage.AddView(_surface, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.MatchParent));
+        _toast = new TextView(this) { Gravity = GravityFlags.Center };
+        _toast.SetTextColor(Color.White);
+        _toast.TextSize = 34;
+        _toast.SetBackgroundColor(Color.Argb(170, 0, 0, 0));
+        _toast.SetPadding(28, 14, 28, 14);
+        _playerPage.AddView(_toast, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WrapContent, ViewGroup.LayoutParams.WrapContent)
+        { Gravity = GravityFlags.Center });
+        _root.AddView(_playerPage, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.MatchParent));
+    }
+
+    private void ShowList()
+    {
+        _manager.Current?.DetachSurface();
+        _playerPage.Visibility = ViewStates.Gone;
+        _list.Visibility = ViewStates.Visible;
+        _onPlayerPage = false;
+    }
+
+    private void ShowPlayer()
+    {
+        _list.Visibility = ViewStates.Gone;
+        _playerPage.Visibility = ViewStates.Visible;
+        _onPlayerPage = true;
+        EnsureWatchdog();
+        // 播放页已就绪而 Surface 早已创建（返回再进场景）：补挂输出面
+        if (_surface.Holder?.Surface != null && _surface.Holder.Surface.IsValid)
+            _manager.Current?.AttachSurface(_surface.Holder.Surface.Handle);
+    }
+
+    // —— 播放接线 ————————————————————————————————————————————
+
+    private void PlayAt(int index)
+    {
+        if (index < 0 || index >= _channels.Count) return;
+        _currentIndex = index;
+        SwitchToCurrent();
+        ShowPlayer();
+    }
+
+    private void SwitchToCurrent()
+    {
+        var ch = _channels[_currentIndex];
+        // 频道上下文先进内核（缓存键+整表行匹配名），再进会话（ChangeChannel 内即触发取票）
+        _player.CurrentChannelKey = ch.Id;
+        _player.CurrentChannelName = ch.Name;
+        if (_manager.Current is { } cur && cur.CurrentChannel?.Id == ch.Id)
+        {
+            cur.ChangeChannel(ch); // 同频道原地重起播（切回口径）
+        }
+        else
+        {
+            _manager.SwitchTo(ch);
+        }
+        ShowToast(ch.Name);
+    }
+
+    private void AttachSurfaceIfShown()
+    {
+        if (_onPlayerPage && _surface.Holder?.Surface is { IsValid: true } surface)
+            _manager.Current?.AttachSurface(surface.Handle);
+    }
+
+    private sealed class SurfaceHook(MainActivity owner) : Java.Lang.Object, ISurfaceHolderCallback2
+    {
+        public void SurfaceCreated(ISurfaceHolder holder) => owner.AttachSurfaceIfShown();
+
+        public void SurfaceChanged(ISurfaceHolder holder, Format format, int width, int height) { }
+
+        public void SurfaceDestroyed(ISurfaceHolder holder) =>
+            owner._manager.Current?.DetachSurface();
+
+        public void SurfaceRedrawNeeded(ISurfaceHolder holder) { }
+    }
+
+    // —— 看门狗泵（会话层 Tick：缓冲超时/卡流自救） ——————————————————
+
+    private void EnsureWatchdog()
+    {
+        if (_watchdogRunning) return;
+        _watchdogRunning = true;
+        Pump();
+        void Pump()
+        {
+            _main.PostDelayed(() =>
+            {
+                if (_onPlayerPage) _manager.Tick();
+                Pump();
+            }, 3000);
+        }
+    }
+
+    // —— 遥控器键位（一期操作逻辑：数字直达、上下换台、返回回列表） ——
+
+    public override bool OnKeyDown([GeneratedEnum] Keycode keyCode, KeyEvent? e)
+    {
+        switch (keyCode)
+        {
+            case Keycode.DpadUp when _onPlayerPage:
+                PlayAt(Neighbor(-1));
+                return true;
+            case Keycode.DpadDown when _onPlayerPage:
+                PlayAt(Neighbor(+1));
+                return true;
+            case Keycode.Back or Keycode.Escape when _onPlayerPage:
+                ShowList();
+                return true;
+            case >= Keycode.Num0 and <= Keycode.Num9 when _onPlayerPage:
+                FeedDigit((int)keyCode - (int)Keycode.Num0);
+                return true;
+        }
+        return base.OnKeyDown(keyCode, e);
+    }
+
+    private int Neighbor(int delta)
+    {
+        var i = (_currentIndex + delta) % _channels.Count;
+        return i < 0 ? i + _channels.Count : i;
+    }
+
+    private void FeedDigit(int d)
+    {
+        _digits = (_digits + d.ToString()).TrimStart('0');
+        ShowToast(_digits);
+        _digitCommit?.Dispose();
+        _digitCommit = new Java.Lang.Runnable(() =>
+        {
+            if (string.IsNullOrEmpty(_digits)) return;
+            var number = int.Parse(_digits);
+            _digits = "";
+            // 编号=列表顺序（一期口径：编号永久直达）
+            if (number >= 1 && number <= _channels.Count) PlayAt(number - 1);
+            else ShowToast($"无此频道 {number}");
+        });
+        _main.PostDelayed(_digitCommit, 1200);
+    }
+
+    private static void HideToastCore() { }
+
+    private void ShowToast(string text)
+    {
+        _toast.Text = text;
+        _toast.Visibility = ViewStates.Visible;
+        _main.RemoveCallbacks(_toastHide);
+        _main.PostDelayed(_toastHide, 2200);
+    }
+
+    // —— 列表适配器：分类头 + 编号台名（一期样式：纯文字，编号在左） ——
+
+    private sealed class Row(string title, bool isHeader)
+    {
+        public readonly string Title = title;
+        public readonly bool IsHeader = isHeader;
+    }
+
+    private sealed class ChannelListAdapter(Context ctx, IReadOnlyList<Channel> channels) : BaseAdapter
+    {
+        private readonly List<Row> _rows = BuildRows(channels);
+
+        private static List<Row> BuildRows(IReadOnlyList<Channel> channels)
+        {
+            var rows = new List<Row>();
+            foreach (var cat in ChannelTable.CategoryOrder)
+            {
+                var group = channels.Where(c => c.Category == cat).ToList();
+                if (group.Count == 0) continue;
+                rows.Add(new Row(cat, true));
+                rows.AddRange(group.Select(ch => new Row($"{channels.IndexOf(ch) + 1}  {ch.Name}", false)));
+            }
+            return rows;
+        }
+
+        public override int Count => _rows.Count;
+        public override Java.Lang.Object GetItem(int position) => new Java.Lang.String(_rows[position].Title);
+        public override long GetItemId(int position) => position;
+        public override View GetView(int position, View? convertView, ViewGroup? parent)
+        {
+            var row = _rows[position];
+            TextView tv;
+            if (convertView is TextView existing)
+            {
+                tv = existing;
+            }
+            else
+            {
+                tv = new TextView(ctx)
+                {
+                    TextSize = row.IsHeader ? 18f : 26f,
+                };
+                tv.SetPadding(40, 22, 40, 22);
+            }
+            tv.Text = row.Title;
+            tv.SetTextColor(Color.White);
+            tv.SetBackgroundColor(row.IsHeader ? Color.Argb(255, 20, 24, 32) : Color.Transparent);
+            return tv;
+        }
     }
 }
