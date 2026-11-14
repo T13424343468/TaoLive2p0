@@ -116,12 +116,10 @@ public class SessionFailoverTests
     }
 
     [Fact]
-    public void Change_channel_during_reconnecting_currently_throws()
+    public void Change_channel_during_reconnecting_succeeds()
     {
-        // ⚠ 已知缺陷（不代改，报告已交）：ChangeChannel 允许从 Reconnecting 进入（Stop+归 Idle），
-        // 但 Transition 矩阵缺 (Reconnecting → Idle) 合法迁移 → 卡流中间态换台必抛
-        // InvalidOperationException。壳层上下键换台若打在 Reconnecting 窗口即崩。
-        // 修复方向：矩阵补 (Reconnecting, Idle) => true（对齐类注释契约），本用例断言改为正向。
+        // BUG-1 已修（2026-11-15）：Transition 矩阵补 (Reconnecting → Idle)，
+        // 卡流中间态换台不再抛——壳层上下键打在 Reconnecting 窗口安全。
         var clock = new FixedClock(T0);
         var player = new LoggingPlayer();
         var session = new PlaybackSession(player, clock);
@@ -132,9 +130,9 @@ public class SessionFailoverTests
         session.NotifyStalled();
         Assert.Equal(PlaybackState.Reconnecting, session.State);
 
-        Assert.Throws<InvalidOperationException>(() => session.ChangeChannel(ch2));
-        // 缺陷锁定后当前状态仍为 Reconnecting（未受污染）
-        Assert.Equal(PlaybackState.Reconnecting, session.State);
+        session.ChangeChannel(ch2); // 不抛，正常走换台次序
+        Assert.Equal(PlaybackState.Buffering, session.State);
+        Assert.Equal(ch2, session.CurrentChannel);
     }
 
     [Fact]
@@ -194,10 +192,9 @@ public class SessionManagerTests
     }
 
     [Fact]
-    public void Same_channel_switch_during_reconnecting_currently_throws()
+    public void Same_channel_switch_during_reconnecting_succeeds()
     {
-        // ⚠ 同上缺陷：Reconnecting 中同频道切回（原地重起播）也走 ChangeChannel → 崩。
-        // 报告已交，修复后本用例改正向断言（复用会话 + FailoverCount 归零）。
+        // BUG-1 已修：Reconnecting 中同频道切回（原地重起播）不再抛，复用会话不新建。
         var clock = new FixedClock(T0);
         var players = new List<LoggingPlayer>();
         var manager = new PlaybackSessionManager(() =>
@@ -213,8 +210,9 @@ public class SessionManagerTests
         manager.TryGet("cctv1")!.NotifyFirstFrame();
         manager.TryGet("cctv1")!.NotifyStalled();
 
-        Assert.Throws<InvalidOperationException>(() => manager.SwitchTo(ch));
-        Assert.Single(players); // 不新建会话（异常发生在复用会话上）
+        var reused = manager.SwitchTo(ch); // 不抛，复用会话原地重起播
+        Assert.Same(first, reused);
+        Assert.Single(players); // 不新建会话
     }
 
     [Fact]

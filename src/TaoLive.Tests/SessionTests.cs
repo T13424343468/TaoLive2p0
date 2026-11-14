@@ -147,7 +147,7 @@ public class SessionTests
     [Theory]
     [InlineData(PlaybackState.Idle, PlaybackState.Playing)]
     [InlineData(PlaybackState.Failed, PlaybackState.Playing)]
-    [InlineData(PlaybackState.Reconnecting, PlaybackState.Idle)]
+    // (Reconnecting → Idle) 自 BUG-1 修复起为合法迁移，移出非法表（SessionFailoverTests 正向覆盖）
     [InlineData(PlaybackState.Playing, PlaybackState.Buffering)]
     public void Illegal_transitions_throw(PlaybackState jumpFrom, PlaybackState jumpTo)
     {

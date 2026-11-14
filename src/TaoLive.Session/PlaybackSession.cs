@@ -85,6 +85,8 @@ public sealed class PlaybackSession
             (PlaybackState.Playing, PlaybackState.Idle) => true,
             (PlaybackState.Reconnecting, PlaybackState.Buffering) => true,
             (PlaybackState.Reconnecting, PlaybackState.Failed) => true,
+            // BUG-1（测试分身 2026-11-15 报告）：卡流窗口换台必经 Stop→Idle，矩阵补齐合法迁移
+            (PlaybackState.Reconnecting, PlaybackState.Idle) => true,
             (PlaybackState.Failed, PlaybackState.Buffering) => true,
             (PlaybackState.Failed, PlaybackState.Idle) => true,
             _ => false,

@@ -32,6 +32,7 @@ public class MainActivity : Activity
     private FrameLayout _root = default!;
     private ListView _list = default!;
     private FrameLayout _playerPage = default!;
+    private readonly SwitchDebouncer _debouncer = new();
     private SurfaceView _surface = default!;
     private TextView _toast = default!;
     private readonly Handler _main = new(Looper.MainLooper!);
@@ -63,8 +64,29 @@ public class MainActivity : Activity
         // 备源耗尽提示（一期口径：全源不可达时明确提示，不静默装死；OK 键重试）
         _manager.SessionStateChanged += (_, e) =>
         {
-            if (e.State == PlaybackState.Failed) ShowToast($"{e.Session.CurrentChannel?.Name}\n信号中断，按 OK 重试");
+            if (e.State == PlaybackState.Failed)
+                ShowToast(TaoLive.Session.SwitchHud.AllLinesFailed);
+            else if (e.State == PlaybackState.Buffering)
+            {
+                // 换台过渡：铺底色遮罩（一期 SwitchRevealPolicy 口径，新流就绪才亮）
+                if (SwitchRevealPolicy.ShouldVeilOnSwitch(_surface.Holder?.Surface != null))
+                {
+                    _surface.Visibility = ViewStates.Invisible;
+                    ShowToast(TaoLive.Session.SwitchHud.Connecting);
+                }
+            }
+            else if (e.State == PlaybackState.Playing)
+            {
+                if (SwitchRevealPolicy.ShouldReveal(true)) _surface.Visibility = ViewStates.Visible;
+            }
         };
+
+        // 开机预热（W8：取票口预取进 5 分钟缓存，换台零等待；退避账挂账不烧请求）
+        _ = Task.Run(async () =>
+        {
+            try { await new ChannelWarmer(resolver).WarmAllAsync(ChannelTable.Build()); }
+            catch { /* 预热失败不影响播放 */ }
+        });
 
         Window!.AddFlags(WindowManagerFlags.KeepScreenOn);
         BuildRoot();
@@ -223,10 +245,10 @@ public class MainActivity : Activity
         switch (keyCode)
         {
             case Keycode.DpadUp when _onPlayerPage:
-                PlayAt(Neighbor(-1));
+                DebouncedSwitch(Neighbor(-1));
                 return true;
             case Keycode.DpadDown when _onPlayerPage:
-                PlayAt(Neighbor(+1));
+                DebouncedSwitch(Neighbor(+1));
                 return true;
             case Keycode.DpadCenter or Keycode.Enter when _onPlayerPage:
                 // 备源耗尽（Failed）时 OK=原地重试；播放中暂无动作
@@ -247,10 +269,21 @@ public class MainActivity : Activity
 
     public override bool OnKeyLongPress([GeneratedEnum] Keycode keyCode, KeyEvent? e)
     {
-        // 列表页长按 OK = 收藏/取消收藏（一期口径）；短按交 ListView 原生点击
-        if (keyCode is Keycode.DpadCenter or Keycode.Enter && !_onPlayerPage)
+        if (keyCode is Keycode.DpadCenter or Keycode.Enter)
         {
-            ToggleFavoriteSelected();
+            if (!_onPlayerPage)
+            {
+                // 列表页长按 OK = 收藏/取消收藏（一期口径）；短按交 ListView 原生点击
+                ToggleFavoriteSelected();
+                return true;
+            }
+            // 播放页长按 OK = 切下一线路（W8 换线路入口，环形轮转）
+            if (_manager.Current is { LineCount: > 1 } session)
+            {
+                var next = (session.CurrentLineIndex + 1) % session.LineCount;
+                session.SwitchLine(next);
+                ShowToast(TaoLive.Session.SwitchHud.LineSwitching(next));
+            }
             return true;
         }
         return base.OnKeyLongPress(keyCode, e);
@@ -287,6 +320,23 @@ public class MainActivity : Activity
     {
         var i = (_currentIndex + delta) % _channels.Count;
         return i < 0 ? i + _channels.Count : i;
+    }
+
+    /// <summary>换台去抖入口（W8 SwitchDebouncer 口径）：窗口内连按取末次按键，停稳才真切。</summary>
+    private void DebouncedSwitch(int index)
+    {
+        if (index < 0 || index >= _channels.Count) return;
+        var ch = _channels[index];
+        _debouncer.Tap(Environment.TickCount64, ch.Id);
+        ShowToast(ch.Name);
+        _main.PostDelayed(() =>
+        {
+            if (!_debouncer.HasTarget || !_debouncer.IsDue(Environment.TickCount64)) return;
+            var key = _debouncer.Target;
+            _debouncer.Clear();
+            var idx = _channels.ToList().FindIndex(c => c.Id == key);
+            if (idx >= 0) PlayAt(idx);
+        }, SwitchDebouncer.WindowMs + 20);
     }
 
     private void FeedDigit(int d)
