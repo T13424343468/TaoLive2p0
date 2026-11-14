@@ -327,11 +327,11 @@ public class MainActivity : Activity
     {
         if (index < 0 || index >= _channels.Count) return;
         var ch = _channels[index];
-        _debouncer.Tap(Environment.TickCount64, ch.Id);
+        _debouncer.Tap(System.Environment.TickCount64, ch.Id);
         ShowToast(ch.Name);
         _main.PostDelayed(() =>
         {
-            if (!_debouncer.HasTarget || !_debouncer.IsDue(Environment.TickCount64)) return;
+            if (!_debouncer.HasTarget || !_debouncer.IsDue(System.Environment.TickCount64)) return;
             var key = _debouncer.Target;
             _debouncer.Clear();
             var idx = _channels.ToList().FindIndex(c => c.Id == key);
