@@ -13,8 +13,8 @@
   <!-- LibVLC 绑定：W2 班启用；本班仅保证结构可 restore，不编译进壳 -->
   <!--
   <ItemGroup>
-    <PackageReference Include="LibVLCSharp" Version="3.9.7" />
-    <PackageReference Include="VideoLAN.LibVLC.Android" Version="3.6.2" />
+    <PackageReference Include="LibVLCSharp" Version="3.10.2" />
+    <PackageReference Include="VideoLAN.LibVLC.Android" Version="3.6.5" />
   </ItemGroup>
   -->
 </Project>
