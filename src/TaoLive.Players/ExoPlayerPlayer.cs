@@ -33,7 +33,7 @@ public sealed class ExoPlayerPlayer : IPlayer
     {
         ArgumentNullException.ThrowIfNull(context);
         _forwarder = new Forwarder(this);
-        _player = new AndroidX.Media3.ExoPlayer.ExoPlayer.Builder(context).Build()!;
+        _player = new AndroidX.Media3.ExoPlayer.ExoPlayerBuilder(context).Build()!;
         _player.AddListener(_forwarder);
         _main = new Android.OS.Handler(Android.OS.Looper.MainLooper!);
         _streamResolver = streamResolver;
@@ -80,13 +80,14 @@ public sealed class ExoPlayerPlayer : IPlayer
 
     private void StartMedia(string url)
     {
-        var builder = new AndroidX.Media3.Common.MediaItem.Builder()
-            .SetUri(Android.Net.Uri.Parse(url));
+        var builder = new AndroidX.Media3.Common.MediaItem.Builder();
+        builder.SetUri(Android.Net.Uri.Parse(url));
         if (IsHls(url))
         {
-            builder.SetMimeType(AndroidX.Media3.Common.MimeTypes.ApplicationHls);
+            builder.SetMimeType(AndroidX.Media3.Common.MimeTypes.ApplicationM3u8);
         }
-        _player.SetMediaItem(builder.Build()!);
+        var mediaItem = builder.Build() ?? throw new InvalidOperationException("MediaItem build returned null");
+        _player.SetMediaItem(mediaItem);
         _player.Prepare();
         _player.PlayWhenReady = true;
     }
@@ -110,8 +111,12 @@ public sealed class ExoPlayerPlayer : IPlayer
         _hasSurface = surfaceHandle != IntPtr.Zero;
         if (_hasSurface)
         {
-            var surface = new Surface(surfaceHandle);
-            _player.SetVideoSurface(surface);
+            // 壳层传入的是 Android.Views.Surface 的 Java 对象指针，需还原包装（壳层仍持有所有权，不转移）
+            var surface = Java.Lang.Object.GetObject<Android.Views.Surface>(surfaceHandle, JniHandleOwnership.DoNotTransfer);
+            if (surface is not null)
+            {
+                _player.SetVideoSurface(surface);
+            }
         }
     }
 
@@ -169,10 +174,10 @@ public sealed class ExoPlayerPlayer : IPlayer
         {
             switch (playbackState)
             {
-                case AndroidX.Media3.Common.Player.StateBuffering:
+                case AndroidX.Media3.Common.BasePlayer.InterfaceConsts.StateBuffering:
                     _owner.HandleBufferingStarted();
                     break;
-                case AndroidX.Media3.Common.Player.StateReady:
+                case AndroidX.Media3.Common.BasePlayer.InterfaceConsts.StateReady:
                     _owner.HandleReady();
                     break;
             }
