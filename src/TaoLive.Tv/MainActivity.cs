@@ -53,7 +53,7 @@ public class MainActivity : Activity
             _player?.CurrentChannelKey ?? "", _player?.CurrentChannelName ?? ""));
         _services = new ServiceCollection()
             .AddSingleton<IPlayer>(_player)
-            .AddSingleton<IClock, SystemClock>()
+            .AddSingleton<IClock, global::TaoLive.Session.SystemClock>()
             .AddSingleton<IMainThreadDispatcher>(new AndroidMainThreadDispatcher(_main))
             .AddTaoLiveSession()
             .BuildServiceProvider();
@@ -66,7 +66,7 @@ public class MainActivity : Activity
             if (e.State == PlaybackState.Failed) ShowToast($"{e.Session.CurrentChannel?.Name}\n信号中断，按 OK 重试");
         };
 
-        Window.AddFlags(WindowManagerFlags.KeepScreenOn);
+        Window!.AddFlags(WindowManagerFlags.KeepScreenOn);
         BuildRoot();
         SetContentView(_root);
         ShowList();
@@ -89,7 +89,7 @@ public class MainActivity : Activity
             _toast.Visibility = ViewStates.Invisible);
 
         _list = new ListView(this) { CacheColorHint = Color.Transparent };
-        _list.Adapter = new ChannelListAdapter(this, _channels);
+        _list.Adapter = new ChannelListAdapter(this, _channels, _favorites);
         _list.ItemClick += (_, e) =>
         {
             // 行→频道→列表索引（收藏组行也指向同一频道，编号直达语义不变）
@@ -264,8 +264,9 @@ public class MainActivity : Activity
             .SetPositiveButton("确定", (_, _) => Finish())
             .SetNegativeButton("取消", (_, _) => { })
             .Create();
+        if (dialog is null) return;
         dialog.Show();
-        dialog.GetButton((int)DialogButtonType.Positive)!.RequestFocus();
+        dialog.GetButton((int)DialogButtonType.Positive)?.RequestFocus();
     }
 
     private void ToggleFavoriteSelected()
@@ -323,10 +324,20 @@ public class MainActivity : Activity
         public readonly Channel? Channel = channel;
     }
 
-    private sealed class ChannelListAdapter(Context ctx, IReadOnlyList<Channel> channels) : BaseAdapter
+    private sealed class ChannelListAdapter : BaseAdapter
     {
-        private HashSet<string> _favorites = new();
-        private List<Row> _rows = BuildRows(channels, _favorites);
+        private readonly Context _ctx;
+        private readonly IReadOnlyList<Channel> _channels;
+        private HashSet<string> _favorites;
+        private List<Row> _rows;
+
+        public ChannelListAdapter(Context ctx, IReadOnlyList<Channel> channels, HashSet<string> favorites)
+        {
+            _ctx = ctx;
+            _channels = channels;
+            _favorites = favorites;
+            _rows = BuildRows(channels, favorites);
+        }
 
         private static List<Row> BuildRows(IReadOnlyList<Channel> channels, HashSet<string> favorites)
         {
@@ -343,9 +354,19 @@ public class MainActivity : Activity
                 var group = channels.Where(c => c.Category == cat).ToList();
                 if (group.Count == 0) continue;
                 rows.Add(new Row(cat, true, null));
-                rows.AddRange(group.Select(ch => new Row($"{channels.IndexOf(ch) + 1}  {ch.Name}", false, ch)));
+                // 编号=整表顺序（一期口径：编号永久直达）
+                rows.AddRange(group.Select(ch => new Row($"{IndexOfChannel(channels, ch) + 1}  {ch.Name}", false, ch)));
             }
             return rows;
+        }
+
+        private static int IndexOfChannel(IReadOnlyList<Channel> list, Channel c)
+        {
+            for (var i = 0; i < list.Count; i++)
+            {
+                if (list[i].Id == c.Id) return i;
+            }
+            return -1;
         }
 
         /// <summary>行对应的频道；分类头行返回空。</summary>
@@ -356,7 +377,7 @@ public class MainActivity : Activity
         public void Refresh(HashSet<string> favorites)
         {
             _favorites = favorites;
-            _rows = BuildRows(channels, favorites);
+            _rows = BuildRows(_channels, favorites);
             NotifyDataSetChanged();
         }
 
@@ -373,7 +394,7 @@ public class MainActivity : Activity
             }
             else
             {
-                tv = new TextView(ctx)
+                tv = new TextView(_ctx)
                 {
                     TextSize = row.IsHeader ? 18f : 26f,
                 };
