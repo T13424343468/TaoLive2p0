@@ -5,7 +5,7 @@
     android:versionName="2.0.0">
   <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="36" />
   <uses-permission android:name="android.permission.INTERNET" />
-  <application android:label="TaoLive" >
+  <application android:label="TaoLive" android:icon="@mipmap/ic_launcher">
     <activity android:name="TaoLive.Phone.MainActivity" android:exported="true">
       <intent-filter>
         <action android:name="android.intent.action.MAIN" />
