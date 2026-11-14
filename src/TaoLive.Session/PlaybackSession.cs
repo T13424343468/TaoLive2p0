@@ -51,6 +51,12 @@ public sealed class PlaybackSession
     public SourceEndpoint? CurrentEndpoint =>
         _endpointIndex >= 0 && _endpointIndex < _queue.Count ? _queue[_endpointIndex] : null;
 
+    /// <summary>本频道线路数（手动换线路用，2.0 W8）；未起播为 0。</summary>
+    public int LineCount => _queue.Count;
+
+    /// <summary>当前线路序号（0 基）；未起播为 -1。</summary>
+    public int CurrentLineIndex => _endpointIndex;
+
     /// <summary>本会话累计断流自救切换次数；换台归零。</summary>
     public int FailoverCount { get; private set; }
 
@@ -143,6 +149,37 @@ public sealed class PlaybackSession
         FailoverCount = 0;
         Transition(PlaybackState.Buffering, "change channel");
         _player.Play(new PlaybackParams(channel, _queue[0], _preferLowLatency));
+        ReattachSurface();
+    }
+
+    /// <summary>
+    /// 手动换线路（2.0 W8）：切到本频道指定序号的源端点（0 基），顺序契约与换台一致：
+    /// 停旧流 → 状态归 Idle → 起播新线路 → 重挂 Surface。
+    /// 播放中选同一路为无害操作；未起播先抛异常（先有台才有线路）。
+    /// </summary>
+    public void SwitchLine(int endpointIndex)
+    {
+        if (_channel is null)
+        {
+            throw new InvalidOperationException("SwitchLine requires a started channel");
+        }
+        if (endpointIndex < 0 || endpointIndex >= _queue.Count)
+        {
+            throw new ArgumentOutOfRangeException(nameof(endpointIndex));
+        }
+        if (endpointIndex == _endpointIndex && _state == PlaybackState.Playing)
+        {
+            return; // 同线无操作：不打断在播画面
+        }
+        if (_state is PlaybackState.Playing or PlaybackState.Buffering or PlaybackState.Reconnecting)
+        {
+            _player.Stop();
+            Transition(PlaybackState.Idle, "line switch");
+        }
+        _endpointIndex = endpointIndex;
+        FailoverCount = 0;
+        Transition(PlaybackState.Buffering, "manual line switch");
+        _player.Play(new PlaybackParams(_channel, _queue[endpointIndex], _preferLowLatency));
         ReattachSurface();
     }
 
