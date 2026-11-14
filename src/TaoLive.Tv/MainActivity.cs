@@ -258,15 +258,16 @@ public class MainActivity : Activity
 
     private void ConfirmExit()
     {
-        var dialog = new AlertDialog.Builder(this)
-            .SetTitle("TaoLive")
-            .SetMessage("确定退出吗？")
-            .SetPositiveButton("确定", (_, _) => Finish())
-            .SetNegativeButton("取消", (_, _) => { })
-            .Create();
+        var builder = new AlertDialog.Builder(this);
+        builder.SetTitle("TaoLive");
+        builder.SetMessage("确定退出吗？");
+        builder.SetPositiveButton("确定", (_, _) => Finish());
+        builder.SetNegativeButton("取消", (_, _) => { });
+        var dialog = builder.Create();
         if (dialog is null) return;
         dialog.Show();
-        dialog.GetButton((int)DialogButtonType.Positive)?.RequestFocus();
+        var ok = dialog.GetButton((int)DialogButtonType.Positive);
+        ok?.RequestFocus();
     }
 
     private void ToggleFavoriteSelected()
