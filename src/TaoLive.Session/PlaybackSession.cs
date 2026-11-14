@@ -4,26 +4,64 @@ using TaoLive.Model;
 namespace TaoLive.Session;
 
 /// <summary>
-/// 单个播放会话：一台会话一个状态机，状态只能经 Transition 改变，
-/// 外部只读不写（封装口径，tao-code-standard 〇·八.1）。
+/// 单个播放会话：一个频道一个会话，会话内一个状态机，
+/// 状态只能经 Transition 改变，外部只读不写（封装口径，tao-code-standard 〇·八.1）。
 /// 时钟注入可测（Tests 快拍不真等）。
+/// 换台顺序（契约）：DetachSurface → Stop 旧源 → 状态归 Idle → 选新源 → 起播 → 重挂 Surface。
+/// 断流自救：内核 OnError 或起播超时 → 依频道备源列表顺序切下一路重起播，不崩；
+/// 全部备源耗尽则停在 Failed 并发 AllSourcesFailed 事件，由上层决定重试或放弃。
+/// 被换下的会话（Supersede）不再响应内核事件，避免共享内核时旧会话抢自救。
 /// </summary>
 public sealed class PlaybackSession
 {
     private readonly IPlayer _player;
     private readonly IClock _clock;
     private PlaybackState _state = PlaybackState.Idle;
+    private List<SourceEndpoint> _queue = new();
+    private int _endpointIndex = -1;
+    private Channel? _channel;
+    private IntPtr _surfaceHandle;
+    private bool _hasSurface;
+    private bool _active = true;
+    private DateTimeOffset? _reconnectingSinceUtc;
+    private bool _preferLowLatency;
 
     public PlaybackSession(IPlayer player, IClock clock)
     {
         _player = player ?? throw new ArgumentNullException(nameof(player));
         _clock = clock ?? throw new ArgumentNullException(nameof(clock));
-        _player.OnError += (_, e) => Transition(PlaybackState.Failed, $"player error: {e.Code}");
+        _player.OnError += (_, e) => OnPlayerError(e.Code);
+        _player.OnFirstFrame += (_, _) => NotifyFirstFrame();
     }
+
+    /// <summary>起播超时（看门狗阈值）：缓冲超过此时长即视为断流，走备源切换。</summary>
+    public static TimeSpan DefaultOpenTimeout { get; } = TimeSpan.FromSeconds(15);
+
+    /// <summary>本会话的起播超时阈值，测试可调。</summary>
+    public TimeSpan OpenTimeout { get; set; } = DefaultOpenTimeout;
 
     public PlaybackState State => _state;
 
     public DateTimeOffset? StartedAtUtc { get; private set; }
+
+    /// <summary>当前会话所属频道；从未起播过则为空。</summary>
+    public Channel? CurrentChannel => _channel;
+
+    /// <summary>当前正在拉取的源端点；未起播为空。</summary>
+    public SourceEndpoint? CurrentEndpoint =>
+        _endpointIndex >= 0 && _endpointIndex < _queue.Count ? _queue[_endpointIndex] : null;
+
+    /// <summary>本会话累计断流自救切换次数；换台归零。</summary>
+    public int FailoverCount { get; private set; }
+
+    /// <summary>状态迁移完成事件（迁移成功后触发，含换台与自救引发的迁移）。</summary>
+    public event EventHandler<PlaybackState>? StateChanged;
+
+    /// <summary>断流自救切换事件：From 为切出源，To 为切入源，Attempt 从 1 计。</summary>
+    public event EventHandler<FailoverEventArgs>? Failover;
+
+    /// <summary>备源耗尽：本频道全部源都试败，会话停在 Failed。</summary>
+    public event EventHandler<AllSourcesFailedEventArgs>? AllSourcesFailed;
 
     /// <summary>受控迁移：仅允许状态机矩阵内的跳转，非法跳转抛异常不静默。</summary>
     public void Transition(PlaybackState next, string? reason = null)
@@ -35,6 +73,7 @@ public sealed class PlaybackSession
             (PlaybackState.Buffering, PlaybackState.Playing) => true,
             (PlaybackState.Buffering, PlaybackState.Reconnecting) => true,
             (PlaybackState.Buffering, PlaybackState.Failed) => true,
+            (PlaybackState.Buffering, PlaybackState.Idle) => true,
             (PlaybackState.Playing, PlaybackState.Reconnecting) => true,
             (PlaybackState.Playing, PlaybackState.Failed) => true,
             (PlaybackState.Playing, PlaybackState.Idle) => true,
@@ -54,20 +93,78 @@ public sealed class PlaybackSession
             // 起播计时刻：首播与失败重试都算新一轮，StartedAtUtc 以本次缓冲起点为准。
             StartedAtUtc = _clock.UtcNow;
         }
+        if (next != PlaybackState.Reconnecting)
+        {
+            _reconnectingSinceUtc = null;
+        }
         _state = next;
+        StateChanged?.Invoke(this, next);
     }
 
     /// <summary>起播入口：Idle/Failed 均可发起新一轮播放。</summary>
     public void Start(PlaybackParams p)
     {
+        ArgumentNullException.ThrowIfNull(p);
         if (_state != PlaybackState.Idle && _state != PlaybackState.Failed)
         {
             throw new InvalidOperationException($"Start only legal from Idle/Failed, got {_state}");
         }
+        _active = true;
+        _channel = p.Channel;
+        _queue = p.Channel.Sources.Where(s => s.IsValid).ToList();
+        _endpointIndex = _queue.FindIndex(s => s.Url == p.Endpoint.Url);
+        _preferLowLatency = p.PreferLowLatency;
         Transition(PlaybackState.Buffering, "start requested");
         _player.Play(p);
+        ReattachSurface();
     }
 
+    /// <summary>
+    /// 换台：一个频道一个会话的入口。顺序按类注释契约；
+    /// 频道无任何合法源则抛参数异常，会话状态不变。
+    /// </summary>
+    public void ChangeChannel(Channel channel)
+    {
+        ArgumentNullException.ThrowIfNull(channel);
+        if (!channel.IsValid)
+        {
+            throw new ArgumentException($"Channel {channel.Id} has no valid sources", nameof(channel));
+        }
+        DetachSurface();
+        if (_state is PlaybackState.Playing or PlaybackState.Buffering or PlaybackState.Reconnecting)
+        {
+            _player.Stop();
+            Transition(PlaybackState.Idle, "channel switch");
+        }
+        _active = true;
+        _channel = channel;
+        _queue = channel.Sources.Where(s => s.IsValid).ToList();
+        _endpointIndex = 0;
+        FailoverCount = 0;
+        Transition(PlaybackState.Buffering, "change channel");
+        _player.Play(new PlaybackParams(channel, _queue[0], _preferLowLatency));
+        ReattachSurface();
+    }
+
+    /// <summary>接输出面：会话记住句柄，换台/自救重起播后自动重挂。契约见 IPlayer。</summary>
+    public void AttachSurface(IntPtr surfaceHandle)
+    {
+        _surfaceHandle = surfaceHandle;
+        _hasSurface = true;
+        _player.AttachSurface(surfaceHandle);
+    }
+
+    /// <summary>摘输出面：换源/换台/退出前必调，重复调用无害。</summary>
+    public void DetachSurface()
+    {
+        if (_hasSurface)
+        {
+            _player.DetachSurface();
+            _hasSurface = false;
+        }
+    }
+
+    /// <summary>首帧落地：Buffering 到 Playing 的唯一正门。</summary>
     public void NotifyFirstFrame()
     {
         if (_state == PlaybackState.Buffering)
@@ -76,11 +173,89 @@ public sealed class PlaybackSession
         }
     }
 
+    /// <summary>播放中卡流：进入换台中间态，等待看门狗决策。</summary>
     public void NotifyStalled()
     {
         if (_state == PlaybackState.Playing)
         {
             Transition(PlaybackState.Reconnecting, "watchdog stall");
+            _reconnectingSinceUtc = _clock.UtcNow;
+        }
+    }
+
+    /// <summary>
+    /// 看门狗泵：缓冲超时或卡流超时即断流自救。返回是否触发了迁移。
+    /// 生产由壳层定时器或管理器 Tick 驱动，测试注入 FixedClock 后手动泵。
+    /// </summary>
+    public bool CheckWatchdog()
+    {
+        if (_state == PlaybackState.Buffering
+            && StartedAtUtc is { } started
+            && _clock.UtcNow - started >= OpenTimeout)
+        {
+            Transition(PlaybackState.Failed, "open timeout");
+            TryFailover("open timeout");
+            return true;
+        }
+        if (_state == PlaybackState.Reconnecting
+            && _reconnectingSinceUtc is { } stalled
+            && _clock.UtcNow - stalled >= OpenTimeout)
+        {
+            Transition(PlaybackState.Failed, "stall timeout");
+            TryFailover("stall timeout");
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>被管理器换下：停内核、摘面、状态归 Idle，此后不再响应内核事件。</summary>
+    public void Supersede()
+    {
+        _active = false;
+        DetachSurface();
+        if (_state is PlaybackState.Playing or PlaybackState.Buffering or PlaybackState.Reconnecting)
+        {
+            _player.Stop();
+            Transition(PlaybackState.Idle, "superseded");
+        }
+    }
+
+    private void OnPlayerError(string code)
+    {
+        if (!_active)
+        {
+            return;
+        }
+        if (_state is not (PlaybackState.Buffering or PlaybackState.Playing or PlaybackState.Reconnecting))
+        {
+            return;
+        }
+        Transition(PlaybackState.Failed, $"player error {code}");
+        TryFailover("player error");
+    }
+
+    private void TryFailover(string reason)
+    {
+        var next = _endpointIndex + 1;
+        if (_channel is null || next >= _queue.Count)
+        {
+            AllSourcesFailed?.Invoke(this, new AllSourcesFailedEventArgs(_channel?.Id ?? string.Empty, reason));
+            return;
+        }
+        var from = _queue[_endpointIndex];
+        _endpointIndex = next;
+        FailoverCount++;
+        Transition(PlaybackState.Buffering, $"failover after {reason}");
+        _player.Play(new PlaybackParams(_channel, _queue[next], _preferLowLatency));
+        ReattachSurface();
+        Failover?.Invoke(this, new FailoverEventArgs(from, _queue[next], FailoverCount, reason));
+    }
+
+    private void ReattachSurface()
+    {
+        if (_hasSurface)
+        {
+            _player.AttachSurface(_surfaceHandle);
         }
     }
 }
@@ -89,4 +264,25 @@ public sealed class PlaybackSession
 public interface IClock
 {
     DateTimeOffset UtcNow { get; }
+}
+
+/// <summary>断流自救切换事件参数。</summary>
+public sealed class FailoverEventArgs(
+    SourceEndpoint from,
+    SourceEndpoint to,
+    int attempt,
+    string reason)
+    : EventArgs
+{
+    public SourceEndpoint From { get; } = from;
+    public SourceEndpoint To { get; } = to;
+    public int Attempt { get; } = attempt;
+    public string Reason { get; } = reason;
+}
+
+/// <summary>备源耗尽事件参数。</summary>
+public sealed class AllSourcesFailedEventArgs(string channelId, string reason) : EventArgs
+{
+    public string ChannelId { get; } = channelId;
+    public string Reason { get; } = reason;
 }
