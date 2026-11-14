@@ -1,0 +1,51 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TaoLive.Model", "src\TaoLive.Model\TaoLive.Model.csproj", "{A0000001-0000-0000-0000-000000000001}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TaoLive.Foundation", "src\TaoLive.Foundation\TaoLive.Foundation.csproj", "{A0000002-0000-0000-0000-000000000002}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TaoLive.Session", "src\TaoLive.Session\TaoLive.Session.csproj", "{A0000003-0000-0000-0000-000000000003}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TaoLive.Players", "src\TaoLive.Players\TaoLive.Players.csproj", "{A0000004-0000-0000-0000-000000000004}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TaoLive.Tv", "src\TaoLive.Tv\TaoLive.Tv.csproj", "{A0000005-0000-0000-0000-000000000005}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TaoLive.Phone", "src\TaoLive.Phone\TaoLive.Phone.csproj", "{A0000006-0000-0000-0000-000000000006}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "TaoLive.Tests", "src\TaoLive.Tests\TaoLive.Tests.csproj", "{A0000007-0000-0000-0000-000000000007}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{A0000001-0000-0000-0000-000000000001}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A0000001-0000-0000-0000-000000000001}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A0000001-0000-0000-0000-000000000001}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A0000001-0000-0000-0000-000000000001}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A0000002-0000-0000-0000-000000000002}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A0000002-0000-0000-0000-000000000002}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A0000002-0000-0000-0000-000000000002}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A0000002-0000-0000-0000-000000000002}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A0000003-0000-0000-0000-0000-000000000003}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A0000003-0000-0000-0000-0000-000000000003}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A0000003-0000-0000-0000-0000-000000000003}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A0000003-0000-0000-0000-0000-000000000003}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A0000004-0000-0000-0000-000000000004}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A0000004-0000-0000-0000-000000000004}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A0000004-0000-0000-0000-000000000004}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A0000004-0000-0000-0000-000000000004}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A0000005-0000-0000-0000-000000000005}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A0000005-0000-0000-0000-000000000005}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A0000006-0000-0000-0000-000000000006}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A0000006-0000-0000-0000-000000000006}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A0000007-0000-0000-0000-0000-000000000007}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A0000007-0000-0000-0000-0000-000000000007}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A0000007-0000-0000-0000-0000-000000000007}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A0000007-0000-0000-0000-0000-000000000007}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal
