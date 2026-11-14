@@ -44,16 +44,17 @@ jobs:
       - name: Badging anchor check
         run: |
           ANDROID_HOME=$RUNNER_TEMP/android-sdk
-          if [ ! -d "$ANDROID_HOME" ]; then
+          CLT=$ANDROID_HOME/cmdline-tools/latest
+          if [ ! -x "$CLT/bin/sdkmanager" ]; then
             mkdir -p $ANDROID_HOME/cmdline-tools
             curl -sSL -o /tmp/clt.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
             unzip -q /tmp/clt.zip -d $ANDROID_HOME/cmdline-tools
             mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest
-            echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null || true
-            $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "build-tools;34.0.0" > /dev/null
           fi
+          echo "y" | $CLT/bin/sdkmanager --licenses > /dev/null || true
+          [ -x "$(find $ANDROID_HOME -name aapt2 | head -1)" ] || $CLT/bin/sdkmanager "build-tools;34.0.0" > /dev/null
           AAPT2=$(find $ANDROID_HOME -name aapt2 | head -1)
-          [ -n "$AAPT2" ] || { echo "aapt2 not found"; exit 1; }
+          [ -n "$AAPT2" ] || { echo "aapt2 not found after sdkmanager"; exit 1; }
           $AAPT2 dump badging TaoLive.apk | grep -E "^package|application-label" | head -5
           BADGE=$($AAPT2 dump badging TaoLive.apk | grep -E "^package" | head -1)
           echo "$BADGE"
