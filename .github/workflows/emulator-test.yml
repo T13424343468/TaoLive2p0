@@ -52,7 +52,7 @@ jobs:
             mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest
           fi
           echo "y" | $CLT/bin/sdkmanager --licenses > /dev/null || true
-          [ -x "$(find $ANDROID_HOME -name aapt2 | head -1)" ] || $CLT/bin/sdkmanager "build-tools;34.0.0" > /dev/null
+          [ -x "$(find $ANDROID_HOME -name aapt2 | head -1)" ] || $CLT/bin/sdkmanager --sdk_root=$ANDROID_HOME "build-tools;34.0.0"
           AAPT2=$(find $ANDROID_HOME -name aapt2 | head -1)
           [ -n "$AAPT2" ] || { echo "aapt2 not found after sdkmanager"; exit 1; }
           $AAPT2 dump badging TaoLive.apk | grep -E "^package|application-label" | head -5
