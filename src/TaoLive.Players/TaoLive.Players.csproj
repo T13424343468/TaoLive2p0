@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TaoLive.Model/TaoLive.Model.csproj" />
+    <ProjectReference Include="../TaoLive.Foundation/TaoLive.Foundation.csproj" />
+  </ItemGroup>
+  <!-- LibVLC 绑定：W2 班启用；本班仅保证结构可 restore，不编译进壳 -->
+  <!--
+  <ItemGroup>
+    <PackageReference Include="LibVLCSharp" Version="3.9.7" />
+    <PackageReference Include="VideoLAN.LibVLC.Android" Version="3.6.2" />
+  </ItemGroup>
+  -->
+</Project>
