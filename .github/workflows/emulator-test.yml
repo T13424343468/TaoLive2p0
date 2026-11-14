@@ -52,8 +52,12 @@ jobs:
             echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null || true
             $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "build-tools;34.0.0" > /dev/null
           fi
-          AAPT=$(find $ANDROID_HOME -name aapt2 -path "*34.0.0*" | head -1)
-          $AAPT dump badging TaoLive.apk | grep -E "^package|application-label" | head -5
+          AAPT2=$(find $ANDROID_HOME -name aapt2 | head -1)
+          [ -n "$AAPT2" ] || { echo "aapt2 not found"; exit 1; }
+          $AAPT2 dump badging TaoLive.apk | grep -E "^package|application-label" | head -5
+          BADGE=$($AAPT2 dump badging TaoLive.apk | grep -E "^package" | head -1)
+          echo "$BADGE"
+          echo "$BADGE" | grep -q "com.taolive.tv" || { echo "BADGING ANCHOR MISMATCH"; exit 1; }
 
   install-and-launch:
     runs-on: ubuntu-24.04
