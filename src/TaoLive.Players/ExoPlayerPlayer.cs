@@ -155,14 +155,17 @@ public sealed class ExoPlayerPlayer : IPlayer
     private static bool IsHls(string url) =>
         url.Contains(".m3u8", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>内核事件桥：仅重写契约需要的回调，其余事件按契约未定义语义不映射。</summary>
-    private sealed class Forwarder : AndroidX.Media3.Common.PlayerListener
+    /// <summary>
+    /// 内核事件桥：实现 Media3 Player.Listener 绑定接口（IPlayerListener，全默认方法，
+    /// 只重写契约需要的两个回调，其余按契约未定义语义不映射）。
+    /// </summary>
+    private sealed class Forwarder : Java.Lang.Object, AndroidX.Media3.Common.IPlayerListener
     {
         private readonly ExoPlayerPlayer _owner;
 
-        public Forwarder(ExoPlayerPlayer owner) => _owner = owner;
+        public Forwarder(ExoPlayerPlayer owner) : base() => _owner = owner;
 
-        public override void OnPlaybackStateChanged(int playbackState)
+        public void OnPlaybackStateChanged(int playbackState)
         {
             switch (playbackState)
             {
@@ -175,7 +178,7 @@ public sealed class ExoPlayerPlayer : IPlayer
             }
         }
 
-        public override void OnPlayerError(AndroidX.Media3.Common.PlaybackException error)
+        public void OnPlayerError(AndroidX.Media3.Common.PlaybackException? error)
         {
             var code = error?.ErrorCodeName ?? "UNKNOWN";
             var message = error?.Message ?? "unknown playback error";
