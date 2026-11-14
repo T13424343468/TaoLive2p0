@@ -16,13 +16,7 @@ public static class ServiceCollectionExtensions
             var player = sp.GetRequiredService<IPlayer>();
             var clock = sp.GetService<IClock>() ?? new SystemClock();
             var dispatcher = sp.GetService<IMainThreadDispatcher>() ?? new ImmediateMainThreadDispatcher();
-            return new PlaybackSessionManager(() => new PlaybackSession(player, clock));
-        });
-        services.AddSingleton<PlaybackSession>(sp =>
-        {
-            var player = sp.GetRequiredService<IPlayer>();
-            var clock = sp.GetService<IClock>() ?? new SystemClock();
-            return new PlaybackSession(player, clock);
+            return new PlaybackSessionManager(() => new PlaybackSession(player, clock), dispatcher);
         });
         return services;
     }
