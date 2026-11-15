@@ -112,7 +112,7 @@ public partial class MainActivity : Activity
         // 持久化设置（vc53 口径）：UI 缩放档 + 后台预热开关 + 进阶调优旋钮，启动装载
         //（缩放档须在 BuildRoot 前就位，全套令牌按档位重算）
         _prefs = GetSharedPreferences("taolive_prefs", FileCreationMode.Private)!;
-        UiScale.Factor = _prefs.GetFloat("ui_scale", 8f / 27f);
+        UiScale.Factor = _prefs.GetFloat("ui_scale", 5f / 9f);
         // 收口批④开关合流：预热与预检共车道只留预检开关，预热（开机全量预热+换台邻台预取+开机默认台焐热）
         // 一律随 _precheckEnabled 同起同停——两个开关管同一条车道必出一个死开关（方案书收口批④原文）。
         _precheckEnabled = _prefs.GetBoolean("precheck_enabled", true);
