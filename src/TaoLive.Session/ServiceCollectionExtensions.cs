@@ -35,4 +35,7 @@ public static class ServiceCollectionExtensions
 public sealed class SystemClock : IClock
 {
     public DateTimeOffset UtcNow => DateTimeOffset.UtcNow;
+
+    // 单调时钟（方案书 v12 铁律：运行期计时账一律按单调钟，四镜·卡顿镜 11-15 修）
+    public long NowMs => Environment.TickCount64;
 }

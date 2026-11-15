@@ -23,8 +23,11 @@ public sealed class PlaybackSession
     private IntPtr _surfaceHandle;
     private bool _hasSurface;
     private bool _active = true;
-    private DateTimeOffset? _reconnectingSinceUtc;
     private bool _preferLowLatency;
+    // 单调计时账（方案书 v12 铁律，四镜·卡顿镜 11-15 修）：open/stall 看门狗判定一律按单调钟，
+    // 墙钟（StartedAtUtc 等）仅留展示与台账，开机校时跳变不再误触/漏触看门狗。
+    private long? _bufferingSinceMs;
+    private long? _reconnectingSinceMs;
 
     public PlaybackSession(IPlayer player, IClock clock)
     {
@@ -32,6 +35,9 @@ public sealed class PlaybackSession
         _clock = clock ?? throw new ArgumentNullException(nameof(clock));
         _player.OnError += (_, e) => OnPlayerError(e.Code);
         _player.OnFirstFrame += (_, _) => NotifyFirstFrame();
+        // 卡流自救接线（方案书 v99 四镜·卡顿镜 11-15 修）：内核缓冲事件接会话，播放中卡流进 Reconnecting 走看门狗。
+        // NotifyStalled 内部有 Playing 态守卫，起播期缓冲不误触发。
+        _player.OnBufferingStart += (_, _) => NotifyStalled();
     }
 
     /// <summary>起播超时（看门狗阈值）：缓冲超过此时长即视为断流，走备源切换。</summary>
@@ -107,12 +113,13 @@ public sealed class PlaybackSession
         }
         if (next == PlaybackState.Buffering && (_state == PlaybackState.Idle || _state == PlaybackState.Failed))
         {
-            // 起播计时刻：首播与失败重试都算新一轮，StartedAtUtc 以本次缓冲起点为准。
+            // 起播计时刻：首播与失败重试都算新一轮，StartedAtUtc 以本次缓冲起点为准（墙钟仅展示）。
             StartedAtUtc = _clock.UtcNow;
+            _bufferingSinceMs = _clock.NowMs;
         }
         if (next != PlaybackState.Reconnecting)
         {
-            _reconnectingSinceUtc = null;
+            _reconnectingSinceMs = null;
         }
         _state = next;
         StateChanged?.Invoke(this, next);
@@ -223,33 +230,33 @@ public sealed class PlaybackSession
         }
     }
 
-    /// <summary>播放中卡流：进入换台中间态，等待看门狗决策。</summary>
+    /// <summary>播放中卡流：进入换台中间态，等待看门狗决策（计时按单调钟）。</summary>
     public void NotifyStalled()
     {
         if (_state == PlaybackState.Playing)
         {
             Transition(PlaybackState.Reconnecting, "watchdog stall");
-            _reconnectingSinceUtc = _clock.UtcNow;
+            _reconnectingSinceMs = _clock.NowMs;
         }
     }
 
     /// <summary>
     /// 看门狗泵：缓冲超时或卡流超时即断流自救。返回是否触发了迁移。
-    /// 生产由壳层定时器或管理器 Tick 驱动，测试注入 FixedClock 后手动泵。
+    /// 生产由壳层定时器或管理器 Tick 驱动，测试注入 FixedClock 后手动泵。判定一律按单调钟。
     /// </summary>
     public bool CheckWatchdog()
     {
         if (_state == PlaybackState.Buffering
-            && StartedAtUtc is { } started
-            && _clock.UtcNow - started >= OpenTimeout)
+            && _bufferingSinceMs is { } started
+            && _clock.NowMs - started >= (long)OpenTimeout.TotalMilliseconds)
         {
             Transition(PlaybackState.Failed, "open timeout");
             TryFailover("open timeout");
             return true;
         }
         if (_state == PlaybackState.Reconnecting
-            && _reconnectingSinceUtc is { } stalled
-            && _clock.UtcNow - stalled >= OpenTimeout)
+            && _reconnectingSinceMs is { } stalled
+            && _clock.NowMs - stalled >= (long)OpenTimeout.TotalMilliseconds)
         {
             Transition(PlaybackState.Failed, "stall timeout");
             TryFailover("stall timeout");
@@ -344,10 +351,13 @@ public sealed class PlaybackSession
     }
 }
 
-/// <summary>时钟抽象：测试注入固定时钟，生产用系统时钟。</summary>
+/// <summary>时钟抽象：测试注入固定时钟，生产用系统时钟。NowMs 为单调毫秒（计时账铁律）。</summary>
 public interface IClock
 {
     DateTimeOffset UtcNow { get; }
+
+    /// <summary>单调时钟毫秒读数：只前进不回跳，供运行期计时账使用（开机校时跳变不影响）。</summary>
+    long NowMs { get; }
 }
 
 /// <summary>断流自救切换事件参数。</summary>

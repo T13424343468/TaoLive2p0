@@ -130,6 +130,30 @@ public class SessionTests
     }
 
     [Fact]
+    public void Kernel_buffering_event_wires_stall_selfheal()
+    {
+        // 卡流自救接线（四镜·卡顿镜 11-15 修）：内核 OnBufferingStart 在 Playing 态自动进 Reconnecting，
+        // 看门狗超时后走备源自救；起播期（Buffering 态）缓冲事件不误触发。
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer();
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8");
+        session.ChangeChannel(ch);
+        player.RaiseBufferingStart();
+        Assert.Equal(PlaybackState.Buffering, session.State);
+
+        player.RaiseFirstFrame();
+        Assert.Equal(PlaybackState.Playing, session.State);
+        player.RaiseBufferingStart();
+        Assert.Equal(PlaybackState.Reconnecting, session.State);
+
+        clock.Advance(TimeSpan.FromSeconds(16));
+        Assert.True(session.CheckWatchdog());
+        Assert.Equal(PlaybackState.Buffering, session.State);
+        Assert.Equal("https://s/b.m3u8", session.CurrentEndpoint?.Url);
+    }
+
+    [Fact]
     public void Superseded_session_stops_responding_to_player_errors()
     {
         var player = new LoggingPlayer();
