@@ -1,4 +1,5 @@
-﻿using System.Text;
+﻿using System.Collections.Concurrent;
+using System.Text;
 using System.Text.RegularExpressions;
 using TaoLive.Model;
 
@@ -19,7 +20,9 @@ public sealed class TicketResolver
         "https?://[^\"\\\\\\s]+\\.m3u8[^\"\\\\\\s]*", RegexOptions.Compiled);
 
     private readonly YspTicketService _ysp = new();
-    private readonly SemaphoreSlim _gate = new(1, 1);
+    // 按上游主机粒度单飞（vc73 审查清零 P2 修）：同上游仍串行（防重复解析/限流），
+    // 不同上游互不排队——旧全局闸让 5 秒超时的慢请求阻塞所有端点取票（换台首慢病根之一）。
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _hostGates = new();
     private readonly object _cacheGate = new();
     private readonly Dictionary<string, (string Url, long FetchedAt)> _cache = new();
     private static readonly TimeSpan RenewInterval = TimeSpan.FromMinutes(5);
@@ -48,7 +51,8 @@ public sealed class TicketResolver
         if (TryGetCache(key, now, out var cached)) return cached;
 
         var sw = System.Diagnostics.Stopwatch.StartNew(); // 取票耗时账（墙钟，仅诊断展示）
-        await _gate.WaitAsync();
+        var gate = _hostGates.GetOrAdd(uri.Host, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync().ConfigureAwait(false);
         try
         {
             now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
@@ -81,7 +85,7 @@ public sealed class TicketResolver
                 Reporter?.Invoke($"[取票] {uri.Host} 成功（耗时 {sw.ElapsedMilliseconds}ms，缓存未命中）");
             return url;
         }
-        finally { _gate.Release(); }
+        finally { gate.Release(); }
     }
 
     // ---- 缓存 -------------------------------------------------------------------

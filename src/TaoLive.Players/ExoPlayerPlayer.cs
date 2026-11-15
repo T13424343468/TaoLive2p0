@@ -180,8 +180,9 @@ public sealed class ExoPlayerPlayer : IPlayer
             // 内核走 Media3 默认头即可；将来某路源带校验需补头时，改在 ExoPlayerBuilder 构造期注入工厂，
             // 不在每次 Play 动态挂（IExoPlayer 绑定无 SetMediaSourceFactory，云闸已实锤）。
             var builder = new AndroidX.Media3.Common.MediaItem.Builder();
-            builder.SetUri(Android.Net.Uri.Parse(url));
-            if (IsHls(url))
+            var uri = Android.Net.Uri.Parse(url);
+            builder.SetUri(uri);
+            if (IsHls(uri)) // vc73 审查清零 P2：按路径判 HLS，query 带 .m3u8 的非 HLS 不再误设 MIME
             {
                 builder.SetMimeType(AndroidX.Media3.Common.MimeTypes.ApplicationM3u8);
             }
@@ -227,7 +228,8 @@ public sealed class ExoPlayerPlayer : IPlayer
         if (_hasSurface)
         {
             ReleaseWarmupSink(); // 真面就位即退哑面：解码器保持热态，换面不换码（setSurface 廉价）
-            // 壳层传入的是 Android.Views.Surface 的 Java 对象指针，需还原包装（壳层仍持有所有权，不转移）
+            // 壳层传入的是 Android.Views.Surface 的 Java 对象指针，需还原包装（壳层仍持有所有权，不转移）。
+            // Media3 契约（官方 Javadoc 原文，vc73 审查清零核验定案）：所有权在壳层，Surface 销毁须壳层摘面（DetachSurface），内核不代释。
             try
             {
                 var surface = Java.Lang.Object.GetObject<Android.Views.Surface>(surfaceHandle, JniHandleOwnership.DoNotTransfer);
@@ -408,18 +410,29 @@ public sealed class ExoPlayerPlayer : IPlayer
             _droppedAccum += Math.Max(0, droppedFrames);
             var now = Android.OS.SystemClock.ElapsedRealtime();
             if (_lastDropLogMs >= 0 && now - _lastDropLogMs < 10_000) return;
+            FlushDroppedAccum(true); // 10s 窗到点整账出
             _lastDropLogMs = now;
-            if (_droppedAccum > 0)
-                Report($"[解码] 视频丢帧累计 {_droppedAccum} 帧/10s（{Ch()}，>0 即解码跟不上或渲染欠载，慢帧证据）");
-            _droppedAccum = 0;
         }
 
         public void OnVideoDisabled(AndroidX.Media3.ExoPlayer.Analytics.AnalyticsListenerEventTime? eventTime,
             AndroidX.Media3.ExoPlayer.DecoderCounters? decoderCounters)
         {
+            // vc73 审查清零 P2：解码器停用即尾巴出账——最后一批丢帧若之后不再有丢帧事件，
+            // 10 秒窗账会滞留到下一台/下一次出账才出现，证据错台错线；停用是账期终点，立即落账。
+            FlushDroppedAccum(false);
             if (decoderCounters is null) return;
             Report($"[解码] 视频渲染器停用（{Ch()}）：缓冲丢帧 {decoderCounters.DroppedBufferCount}"
                 + $" · 跳至关键帧 {decoderCounters.DroppedToKeyframeCount} · 丢输入帧 {decoderCounters.DroppedInputBufferCount}");
+        }
+
+        /// <summary>丢帧账出账（vc73 审查清零 P2 提取共用）：攒到帧>0 即上报后清零。
+        /// windowFull=true 为 10 秒窗到点整账；false 为解码器停用的尾账补出（窗未满，防滞留错台）。</summary>
+        private void FlushDroppedAccum(bool windowFull)
+        {
+            if (_droppedAccum > 0)
+                Report($"[解码] 视频丢帧累计 {_droppedAccum} 帧（{Ch()}，>0 即解码跟不上或渲染欠载，慢帧证据，"
+                    + (windowFull ? "10s 窗整账）" : "10s 窗未满停用补出尾账）"));
+            _droppedAccum = 0;
         }
 
         public void OnAudioUnderrun(AndroidX.Media3.ExoPlayer.Analytics.AnalyticsListenerEventTime? eventTime,
@@ -440,8 +453,10 @@ public sealed class ExoPlayerPlayer : IPlayer
         }
     }
 
-    private static bool IsHls(string url) =>
-        url.Contains(".m3u8", StringComparison.OrdinalIgnoreCase);
+    /// <summary>HLS 判据（vc73 审查清零 P2 修）：按 URI 路径判断，不再对整 URL 做子串匹配——
+    /// query 带 ".m3u8" 的非 HLS 地址（如带 .m3u8 参数的防盗链签名）此前会被误设 HLS MIME。</summary>
+    private static bool IsHls(Android.Net.Uri uri) =>
+        (uri.Path ?? "").EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// 内核事件桥：实现 Media3 Player.Listener 绑定接口（IPlayerListener，全默认方法，

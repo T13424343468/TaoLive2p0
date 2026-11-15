@@ -253,9 +253,17 @@ public sealed class PlaybackSession
         AppendFallbacks();
         if (QueueOrderer is { } orderer2) _queue = orderer2(p.Channel, _queue).ToList(); // #74 健康排序：备源入队后整体重排
         _endpointIndex = _queue.FindIndex(s => s.Url == p.Endpoint.Url);
-        if (_endpointIndex < 0) _endpointIndex = 0; // 未入队端点（闪退镜黄④ 11-15）：记账归 0，防 -1 越界 TryFailover
+        if (_endpointIndex < 0)
+        {
+            // 未入队端点（闪退镜黄④ 11-15）：实际播的就是这个端点，插入队列首位=当前线——
+            // 此前只记账归 0，CurrentEndpoint/CurrentLineIndex 与真实播放流错位（vc73 审查清零 P2）。
+            _queue.Insert(0, p.Endpoint);
+            _endpointIndex = 0;
+        }
         _preferLowLatency = p.PreferLowLatency;
         _proactiveCount = 0; // vc67：新一轮起播（含 OK 重试）重给预防介入预算
+        _stallTimes.Clear(); // vc73 审查清零 P2：新一轮起播重新起账（含 OK 重试），同线重试不背旧疑点账——与换台/换线/自救清账同口径
+        _smoothnessTimes.Clear();
         _freshTicketRetried = false; // vc69：新一轮起播重记坏票重试机会
         _ticketRetrySinceMs = null;
         Transition(PlaybackState.Buffering, "start requested");
@@ -556,7 +564,7 @@ public sealed class PlaybackSession
         if (_lastFailoverAtMs is { } lastFailover
             && nowMs - lastFailover < ProactiveCooldown.TotalMilliseconds)
         {
-            _lowInventoryRounds = 0; // 冷却窗内只攒账不切，防坏线连切横跳
+            _lowInventoryRounds = 0; // vc73 审查清零 P2 修：冷却窗内不切，趋势账清零，防坏线连切横跳
             return false;
         }
         if (_proactiveCount >= ProactiveCapPerChannel)

@@ -24,7 +24,16 @@ public class SourceHealthEntry
     public string SourceId { get; set; } = "";
     public string EpgKey { get; set; } = "";
     public ChannelHealth State { get; set; } = ChannelHealth.Unknown;
-    public long CheckedAtMs { get; set; }   // 最近核验时间（Unix 毫秒，跨启动可比；0=未核验）
+
+    // 跨线程字段（vc73 审查清零 P2）：预检/播放实测线程写、选源与落盘线程读——
+    // 32 位设备上 long 直接读写会撕裂（高半字与低半字不一致），改走 Interlocked 保证原子。
+    private long _checkedAtMs; // 最近核验时间（Unix 毫秒，跨启动可比；0=未核验）
+    public long CheckedAtMs
+    {
+        get => Interlocked.Read(ref _checkedAtMs);
+        set => Interlocked.Exchange(ref _checkedAtMs, value);
+    }
+
     public int ConsecutiveFails { get; set; } // 连续失败计数（v1.0.10：达阈值自动淘汰交回重探）
     public int ConsecutiveOks { get; set; }   // 连续探活成功计数（收口批①回主源判据：预检轮次连续命中 ≥3 次才回主源；不落盘，重启从严从零计）
 }

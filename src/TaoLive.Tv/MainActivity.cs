@@ -1987,96 +1987,138 @@ public partial class MainActivity : Activity
         public override Java.Lang.Object GetItem(int position) => new Java.Lang.String(position.ToString());
         public override long GetItemId(int position) => position;
 
-        public override View GetView(int position, View? convertView, ViewGroup? parent)
+        /// <summary>行视图复用件（vc73 审查清零 P2）：行视图一次建齐挂 Tag，绑定只改文案/颜色/可见性/背景——
+        /// 旧实现每次 GetView 都 RemoveAllViews 并 new 全套子视图，低配 TV 快速滚动 GC 压力大、掉帧。
+        /// header 行与频道行同一张布局，按行型切可见性（GONE 不占位），视觉与旧逐项一致。
+        /// 派生 Java.Lang.Object：View.Tag 收 Java 对象，普通 CLR 对象挂 Tag 会炸。</summary>
+        private sealed class RowHolder : Java.Lang.Object
         {
-            var row = _rows[position];
+            public LinearLayout Line = null!;
+            public TextView Header = null!;
+            public ImageView Logo = null!;
+            public TextView Placeholder = null!;
+            public View Spacer = null!;
+            public TextView Num = null!;
+            public TextView Star = null!;
+            public TextView Name = null!;
+            public TextView Dot = null!;
+        }
+
+        private void Style(TextView tv, string color, float size)
+        {
+            tv.SetTextColor(Color.ParseColor(color));
+            tv.TextSize = size;
+            tv.SetSingleLine(true); // vc65 老板令：列表行永不换行——行内文本一律单行，超宽走省略号不折行
+        }
+
+        private RowHolder BuildRowHolder()
+        {
             var ctx = _ctx;
-            var line = convertView as LinearLayout ?? new LinearLayout(ctx) { Orientation = Orientation.Horizontal };
-            line.RemoveAllViews();
-            line.SetPadding(UiScale.Px(48), UiScale.Px(20), UiScale.Px(48), UiScale.Px(20)); // #15 尺寸令：行高随档
+            var density = ctx.Resources!.DisplayMetrics!.Density;
+            var h = new RowHolder { Line = new LinearLayout(ctx) { Orientation = Orientation.Horizontal } };
+            h.Line.SetPadding(UiScale.Px(48), UiScale.Px(20), UiScale.Px(48), UiScale.Px(20)); // #15 尺寸令：行高随档
 
-            void Style(TextView tv, string color, float size)
-            {
-                tv.SetTextColor(Color.ParseColor(color));
-                tv.TextSize = size;
-                tv.SetSingleLine(true); // vc65 老板令：列表行永不换行——行内文本一律单行，超宽走省略号不折行
-            }
+            h.Header = new TextView(ctx);
+            h.Header.Ellipsize = TextUtils.TruncateAt.End; // vc65：面板钳到半屏等极端场景走省略号，不折行
+            InkTranslucency.ApplyReadabilityShadow(h.Header);
+            h.Line.AddView(h.Header);
 
+            h.Logo = new ImageView(ctx);
+            // #61 尺寸令补漏：台标高度与首字占位块同框（40×28 基准×档位系数），ImageView 默认 FitCenter 框内等比不变形
+            h.Line.AddView(h.Logo, new LinearLayout.LayoutParams((int)(40 * density * UiScale.Scale), (int)(28 * density * UiScale.Scale))
+            { RightMargin = UiScale.Px(16), Gravity = GravityFlags.CenterVertical });
+
+            h.Placeholder = new TextView(ctx);
+            Style(h.Placeholder, InkTranslucency.TextSecondary, UiScale.Item);
+            h.Placeholder.Gravity = GravityFlags.Center;
+            h.Placeholder.SetBackgroundColor(Color.ParseColor("#3A4750"));
+            h.Line.AddView(h.Placeholder, new LinearLayout.LayoutParams((int)(40 * density * UiScale.Scale), (int)(28 * density * UiScale.Scale)) // #15 尺寸令
+            { RightMargin = UiScale.Px(16), Gravity = GravityFlags.CenterVertical });
+
+            h.Spacer = new View(ctx);
+            h.Line.AddView(h.Spacer, new LinearLayout.LayoutParams(0, 1) { RightMargin = UiScale.Px(16) }); // 无信号行行首不放台标（v4 定稿状态2）
+
+            h.Num = new TextView(ctx) { Gravity = GravityFlags.Right };
+            Style(h.Num, InkTranslucency.TextSecondary, UiScale.Item);
+            InkTranslucency.ApplyReadabilityShadow(h.Num);
+            h.Num.SetPadding(0, 0, UiScale.Px(32), 0);
+            h.Line.AddView(h.Num);
+
+            h.Star = new TextView(ctx);
+            Style(h.Star, "#F0C563", UiScale.Item);
+            InkTranslucency.ApplyReadabilityShadow(h.Star);
+            h.Star.SetPadding(0, 0, UiScale.Px(24), 0);
+            h.Line.AddView(h.Star);
+
+            h.Name = new TextView(ctx);
+            h.Name.Ellipsize = TextUtils.TruncateAt.End; // vc65：半屏钳制兜底，宁省略不折行
+            InkTranslucency.ApplyReadabilityShadow(h.Name);
+            h.Line.AddView(h.Name);
+
+            h.Dot = new TextView(ctx);
+            h.Dot.SetPadding(UiScale.Px(24), 0, 0, 0);
+            InkTranslucency.ApplyReadabilityShadow(h.Dot);
+            h.Line.AddView(h.Dot);
+            return h;
+        }
+
+        private void BindRow(RowHolder h, Row row)
+        {
+            var ctx = _ctx;
             if (row.Header != null)
             {
-                var h = new TextView(ctx) { Text = row.Header };
-                bool isNote = row.IsNote; // vc53 v22 第 15 项：空态行次色平铺，不作分组标题渲染
-                Style(h, isNote ? InkTranslucency.TextSecondary : "#A9CFEC", UiScale.Caption);
-                h.Ellipsize = TextUtils.TruncateAt.End; // vc65：面板钳到半屏等极端场景走省略号，不折行
-                InkTranslucency.ApplyReadabilityShadow(h);
-                line.AddView(h);
-                line.SetBackgroundColor(Color.Transparent);
-                return line;
+                // 分组/空态行：只有标题（vc53 v22 第 15 项：空态行次色平铺，不作分组标题渲染）
+                bool isNote = row.IsNote;
+                Style(h.Header, isNote ? InkTranslucency.TextSecondary : "#A9CFEC", UiScale.Caption);
+                h.Header.Text = row.Header;
+                h.Header.Visibility = ViewStates.Visible;
+                h.Logo.Visibility = ViewStates.Gone;
+                h.Placeholder.Visibility = ViewStates.Gone;
+                h.Spacer.Visibility = ViewStates.Gone;
+                h.Num.Visibility = ViewStates.Gone;
+                h.Star.Visibility = ViewStates.Gone;
+                h.Name.Visibility = ViewStates.Gone;
+                h.Dot.Visibility = ViewStates.Gone;
+                h.Line.SetBackgroundColor(Color.Transparent);
+                return;
             }
 
             var ch = row.Channel!;
-            var res = ctx.Resources!;
-            var density = res.DisplayMetrics!.Density;
             // B 包第 12 项：行首真实台标（vc53 同源内置资源）；无内置台标→首字占位；无信号行不放台标
             var logoRes = ChannelLogoMap.ResourceName(ch.Name);
+            bool logoResolved = false;
             if (!row.DeadOnly && logoRes != null)
             {
                 try
                 {
-                    var resId = res.GetIdentifier(logoRes, "drawable", ctx.PackageName);
+                    var resId = ctx.Resources!.GetIdentifier(logoRes, "drawable", ctx.PackageName);
                     if (resId != 0)
                     {
-                        var img = new ImageView(ctx);
-                        // #61 尺寸令补漏：台标此前高度写死 28dp 不随档（AdjustViewBounds 在固定 LayoutParams 下无效）——
-                        // 改与首字占位块同框（40×28 基准×档位系数），ImageView 默认 FitCenter 框内等比不变形
-                        img.SetImageResource(resId);
-                        line.AddView(img, new LinearLayout.LayoutParams((int)(40 * density * UiScale.Scale), (int)(28 * density * UiScale.Scale))
-                        { RightMargin = UiScale.Px(16), Gravity = GravityFlags.CenterVertical });
+                        h.Logo.SetImageResource(resId);
+                        logoResolved = true;
                     }
                 }
                 catch { /* 台标渲染失败不碍选台 */ }
             }
-            if (!row.DeadOnly && logoRes == null)
-            {
-                var ph = new TextView(ctx) { Text = ch.Name.Substring(0, 1) };
-                Style(ph, InkTranslucency.TextSecondary, UiScale.Item);
-                ph.Gravity = GravityFlags.Center;
-                ph.SetBackgroundColor(Color.ParseColor("#3A4750"));
-                line.AddView(ph, new LinearLayout.LayoutParams((int)(40 * density * UiScale.Scale), (int)(28 * density * UiScale.Scale)) // #15 尺寸令
-                { RightMargin = UiScale.Px(16), Gravity = GravityFlags.CenterVertical });
-            }
-            if (row.DeadOnly)
-            {
-                line.AddView(new View(ctx), new LinearLayout.LayoutParams(0, 1) { RightMargin = UiScale.Px(16) }); // 无信号行行首不放台标（v4 定稿状态2）
-            }
+            h.Logo.Visibility = logoResolved ? ViewStates.Visible : ViewStates.Gone;
+            // 占位条件与旧口径一致：logoRes 无资源名才用首字占位（resId 查不到时旧行为首不放任何元素）
+            h.Placeholder.Visibility = !row.DeadOnly && logoRes == null ? ViewStates.Visible : ViewStates.Gone;
+            if (h.Placeholder.Visibility == ViewStates.Visible) h.Placeholder.Text = ch.Name.Substring(0, 1);
+            h.Spacer.Visibility = row.DeadOnly ? ViewStates.Visible : ViewStates.Gone;
 
-            var num = new TextView(ctx) { Text = $"{IndexInTable(ch),3}", Gravity = GravityFlags.Right };
-            Style(num, InkTranslucency.TextSecondary, UiScale.Item);
-            InkTranslucency.ApplyReadabilityShadow(num);
-            num.SetPadding(0, 0, UiScale.Px(32), 0);
-            line.AddView(num);
+            h.Num.Text = $"{IndexInTable(ch),3}";
+            h.Num.Visibility = ViewStates.Visible;
+            h.Star.Text = _favorites.Contains(ch.Id) ? "★" : " ";
+            h.Star.Visibility = ViewStates.Visible;
 
-            var star = new TextView(ctx) { Text = _favorites.Contains(ch.Id) ? "★" : " " };
-            Style(star, "#F0C563", UiScale.Item);
-            InkTranslucency.ApplyReadabilityShadow(star);
-            star.SetPadding(0, 0, UiScale.Px(24), 0);
-            line.AddView(star);
-
-            var name = new TextView(ctx) { Text = ch.Name };
-            name.Ellipsize = TextUtils.TruncateAt.End; // vc65：半屏钳制兜底，宁省略不折行
             var isCur = _currentId() == ch.Id;
-            Style(name, isCur ? "#FFFFFF" : InkTranslucency.TextSecondary, UiScale.Item);
-            InkTranslucency.ApplyReadabilityShadow(name);
-            if (isCur)
-            {
-                line.SetBackgroundColor(InkTranslucency.CurrentRowFill(ctx)); // v1.0.9 第③项：当前台整行强调底
-                name.Typeface = Typeface.DefaultBold!;
-            }
-            else
-            {
-                line.SetBackgroundColor(Color.Transparent);
-            }
-            line.AddView(name);
+            h.Name.Text = ch.Name;
+            Style(h.Name, isCur ? "#FFFFFF" : InkTranslucency.TextSecondary, UiScale.Item);
+            h.Name.Typeface = isCur ? Typeface.DefaultBold! : Typeface.Default!; // 复用件必须显式回置，防上一行粗体残留
+            h.Line.SetBackgroundColor(isCur
+                ? InkTranslucency.CurrentRowFill(ctx) // v1.0.9 第③项：当前台整行强调底
+                : Color.Transparent);
+            h.Name.Visibility = ViewStates.Visible;
 
             // 可连状态标识（v1.0.8 预检握手）：绿点可用 · 灰点检测中/未探 · 红叉连不上
             var (mark, color) = _markOf(ch) switch
@@ -2086,12 +2128,23 @@ public partial class MainActivity : Activity
                 ChannelHealth.Checking => ("●", "#B5C4D0"),
                 _ => ("●", "#8894A0"),
             };
-            var dot = new TextView(ctx) { Text = mark };
-            Style(dot, color, UiScale.Caption);
-            InkTranslucency.ApplyReadabilityShadow(dot);
-            dot.SetPadding(UiScale.Px(24), 0, 0, 0);
-            line.AddView(dot);
-            return line;
+            h.Dot.Text = mark;
+            Style(h.Dot, color, UiScale.Caption);
+            h.Dot.Visibility = ViewStates.Visible;
+        }
+
+        public override View GetView(int position, View? convertView, ViewGroup? parent)
+        {
+            var row = _rows[position];
+            var holder = convertView?.Tag as RowHolder;
+            if (holder is null)
+            {
+                holder = BuildRowHolder(); // 首次建齐整行，此后只绑定
+                convertView = holder.Line;
+                convertView.Tag = holder;
+            }
+            BindRow(holder, row);
+            return holder.Line;
         }
 
         /// <summary>编号=整表顺序（一期口径：编号永久直达，FeedDigit 同款语义）。</summary>

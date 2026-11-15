@@ -505,6 +505,78 @@ public class SessionTests
         Assert.Equal("https://s/b2.m3u8", manager.Current.CurrentEndpoint?.Url);
         Assert.Equal(PlaybackState.Idle, manager.TryGet("cctv1")!.State);
     }
+
+    [Fact]
+    public void Start_replay_clears_proactive_suspicion_accounts()
+    {
+        // vc73 审查清零 P2：新一轮起播（含 OK 重试）重新起账——同线重试不得背走旧疑点账，
+        // 否则攒够即误切（旧实现只清 _proactiveCount，_stallTimes/_smoothnessTimes 跟随新轮）
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer { BufferedMs = 20_000 };
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8");
+        session.ChangeChannel(ch);
+        session.NotifyFirstFrame();
+        for (int i = 0; i < 3; i++) session.NotifySmoothnessSuspect(); // 旧轮疑点账攒满（若不追随即触发预防切）
+
+        session.Supersede(); // 回 Idle，模拟壳层 OK 重试前的会话处置
+        session.Start(new PlaybackParams(ch, ch.Sources[0], PreferLowLatency: false));
+        session.NotifyFirstFrame();
+        clock.Advance(TimeSpan.FromSeconds(2));
+
+        Assert.False(session.CheckProactiveFailover()); // 新轮重新起账：旧疑点不再触发
+        Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url);
+        Assert.Equal(0, session.FailoverCount);
+    }
+
+    [Fact]
+    public void Start_with_unqueued_endpoint_registers_it_as_current_line()
+    {
+        // vc73 审查清零 P2：未入队端点不再「记账归 0」——实际播的就是它，插入队列首位，
+        // CurrentEndpoint/CurrentLineIndex 与真实播放流一致，自救次序从原队列首继续
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer();
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8");
+        var stray = new SourceEndpoint("https://s/stray.m3u8", SourceKind.Cdn, 5);
+        session.Start(new PlaybackParams(ch, stray, PreferLowLatency: false));
+
+        Assert.Equal(PlaybackState.Buffering, session.State);
+        Assert.Equal("https://s/stray.m3u8", session.CurrentEndpoint?.Url);
+        Assert.Equal(0, session.CurrentLineIndex);
+
+        session.NotifyFirstFrame();
+        player.RaiseError("NET-1"); // 自救次序真实：下一线=原队列首
+        Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url);
+    }
+
+    [Fact]
+    public void Manager_begin_session_registers_on_playing_and_is_not_orphaned()
+    {
+        // vc73 审查清零 P2：Begin 是公开 API，会话取得频道（Playing）即入表——
+        // 否则 Current 易主后旧会话无人停、无 LRU/TTL，孤儿内核白烧到进程退出
+        var clock = new FixedClock(T0);
+        var players = new List<LoggingPlayer>();
+        var manager = new PlaybackSessionManager(() =>
+        {
+            var p = new LoggingPlayer();
+            players.Add(p);
+            return new PlaybackSession(p, clock);
+        });
+        var ch1 = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/a2.m3u8");
+        var ch2 = MakeChannel("cctv5", "https://s/b.m3u8", "https://s/b2.m3u8");
+
+        var custom = manager.Begin(); // W1 语义：裸建会话
+        custom.ChangeChannel(ch1);
+        Assert.Empty(manager.Sessions); // 未取得频道（未到 Playing）不入表
+        custom.NotifyFirstFrame();
+        Assert.Equal(PlaybackState.Playing, custom.State);
+        Assert.Single(manager.Sessions); // 取得频道即入表
+
+        manager.SwitchTo(ch2);
+        Assert.Equal(PlaybackState.Idle, custom.State); // 易主即被接管路径让位停机，不再孤儿
+        Assert.Contains("Stop", players[0].Log);
+    }
 }
 
 /// <summary>记录型内核桩：把指令顺序落日志，供顺序断言；事件可手动触发。</summary>

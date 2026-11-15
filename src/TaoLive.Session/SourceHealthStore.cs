@@ -88,7 +88,10 @@ public class SourceHealthStore
         }
     }
 
-    /// <summary>脏标记：3 秒内合并多次写入，后台线程统一落盘（节流防频繁 IO）。</summary>
+    /// <summary>脏标记：3 秒内合并多次写入，后台线程统一落盘（节流防频繁 IO）。
+    /// vc73 审查清零 P2 修：回调先在锁内摘 timer 再锁外落盘——快照即覆盖此前全部脏标记；
+    /// 落盘期间新到的 MarkDirty 会建新 timer，3 秒后再落，不丢脏数据（旧序先落盘后摘 timer，
+    /// 快照之后到达的写账被吞，脏数据滞留到下次写）。</summary>
     public void MarkDirty()
     {
         lock (_gate)
@@ -96,9 +99,14 @@ public class SourceHealthStore
             if (_flushTimer != null) return;
             _flushTimer = new System.Threading.Timer(_ =>
             {
-                FlushNow();
-                lock (_gate) _flushTimer?.Dispose();
-                lock (_gate) _flushTimer = null;
+                System.Threading.Timer? fired;
+                lock (_gate)
+                {
+                    fired = _flushTimer;
+                    _flushTimer = null; // 先摘：此后 MarkDirty 立即可建新 timer，快照后到账不丢
+                }
+                FlushNow(); // 锁外落盘：快照即覆盖截至摘牌时刻的全部脏标记
+                fired?.Dispose();
             }, null, FlushDebounceMs, Timeout.Infinite);
         }
     }

@@ -134,4 +134,32 @@ public class CatalogTests
         var resolved = await resolver.ResolveAsync(ep, "cd_上虞新闻综合", "上虞新闻综合");
         Assert.Equal(ep.Url, resolved);
     }
+
+    [Fact]
+    public void Device_identity_persists_atomically_and_reuses_guid()
+    {
+        // vc73 审查清零 P2：身份落盘走 tmp+move 原子写（断电不整文件损坏），
+        // 且同目录重启复用同一 guid；写完不留 .tmp 残件
+        var dir = Path.Combine(Path.GetTempPath(), "taolive-test-" + Guid.NewGuid().ToString("N"));
+        DeviceIdentity.Reset();
+        try
+        {
+            DeviceIdentity.Attach(dir);
+            var guid1 = DeviceIdentity.GetGuid();
+            Assert.Matches("^[0-9a-f]{32}$", guid1);
+            var guid2 = DeviceIdentity.GetGuid(); // 同目录再取：复用同一身份
+            Assert.Equal(guid1, guid2);
+            Assert.True(File.Exists(Path.Combine(dir, "device_guid.txt")));
+            Assert.False(File.Exists(Path.Combine(dir, "device_guid.txt.tmp"))); // 原子替换后不留残件
+
+            DeviceIdentity.Reset(); // 模拟重启（清缓存不清盘）：读盘复用
+            DeviceIdentity.Attach(dir);
+            Assert.Equal(guid1, DeviceIdentity.GetGuid());
+        }
+        finally
+        {
+            DeviceIdentity.Reset();
+            try { Directory.Delete(dir, recursive: true); } catch { /* 测试目录清理失败不碍断言 */ }
+        }
+    }
 }

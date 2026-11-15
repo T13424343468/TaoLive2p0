@@ -22,13 +22,25 @@ public static class DiagLog
         catch { return null; }
     }
 
-    /// <summary>按尾偏移读日志尾部（fix53 口径），主线程 IO 有界，不整读全文件。</summary>
+    /// <summary>按尾偏移读日志尾部（fix53 口径），主线程 IO 有界，不整读全文件。
+    /// vc73 审查清零 P2 修：字节偏移可能切进 UTF-8 多字节序列中段，起读点落在续字节（0b10xxxxxx）
+    /// 时 StreamReader 产出替换符——首字符乱码。前跳到序列首字节再交给读取器；start==0 无此问题。</summary>
     public static string ReadTail(string filePath, int maxBytes)
     {
         using var fs = new System.IO.FileStream(filePath, System.IO.FileMode.Open,
             System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite);
         var start = Math.Max(0, fs.Length - maxBytes);
         fs.Seek(start, System.IO.SeekOrigin.Begin);
+        if (start > 0)
+        {
+            // 防御性对齐：续字节必属多字节序列中段，逐字节前跳到首字节（非 0b10 前缀）为止
+            while (fs.Position < fs.Length)
+            {
+                int b = fs.ReadByte();
+                if (b < 0) break;
+                if ((b & 0xC0) != 0x80) { fs.Seek(-1, System.IO.SeekOrigin.Current); break; }
+            }
+        }
         using var reader = new System.IO.StreamReader(fs);
         return reader.ReadToEnd();
     }

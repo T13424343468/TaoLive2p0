@@ -125,7 +125,6 @@ public sealed class ChannelWarmer
 {
     private readonly TicketResolver _resolver;
     private readonly SourceBackoffLedger _backoff;
-    private readonly IReadOnlyDictionary<string, long> _lastRunMs;
     private readonly Func<long> _nowMs;
 
     /// <summary>让路间隔：预热请求之间最小间隔（生产 1500ms，测试可调小快拍）。</summary>
@@ -139,12 +138,10 @@ public sealed class ChannelWarmer
 
     public ChannelWarmer(TicketResolver resolver,
         SourceBackoffLedger? backoff = null,
-        IReadOnlyDictionary<string, long>? lastRunMs = null,
         Func<long>? nowMs = null)
     {
         _resolver = resolver ?? throw new ArgumentNullException(nameof(resolver));
         _backoff = backoff ?? new SourceBackoffLedger();
-        _lastRunMs = lastRunMs ?? new Dictionary<string, long>(StringComparer.Ordinal);
         _nowMs = nowMs ?? (() => Environment.TickCount64);
     }
 

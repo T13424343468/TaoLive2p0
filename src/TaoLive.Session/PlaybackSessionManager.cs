@@ -441,7 +441,8 @@ public sealed class PlaybackSessionManager
         }
     }
 
-    /// <summary>会话让位（老板令 #21 超龄账）：按单调钟记让位时刻，超龄清理据此判账。</summary>
+    /// <summary>会话让位（老板令 #21 超龄账）：按单调钟记让位时刻，超龄清理据此判账。
+    /// 无频道会话（CurrentChannel 为空，未取得归属台）无账可记，空操作合理（vc73 审查清零核验定案）。</summary>
     private void MarkSuperseded(PlaybackSession session)
     {
         if (session.CurrentChannel is { } ch) _supersededAtMs[ch.Id] = _monotonicMs();
@@ -469,6 +470,14 @@ public sealed class PlaybackSessionManager
             if (state == PlaybackState.Playing && session.CurrentChannel is { } playingChannel)
             {
                 _retryBackoff.Clear(playingChannel.Id); // 播放成功起播即清退避账（共账不共判据：换源断路器另有判据）
+                // Begin 会话取得频道即入表（vc73 审查清零 P2，孤儿内核封死）：Begin 是公开 API，
+                // 壳层未用≠无人用——不入表的话 Current 一旦易主，旧会话既无人停也无 LRU/TTL 兜底，
+                // 内核白烧到进程退出。TryAdd 语义：热备/切台路径已显式登记的会话不覆盖、不动账。
+                if (_sessions.TryAdd(playingChannel.Id, session))
+                {
+                    _lastUsed[playingChannel.Id] = _stamp++;
+                    EvictIfOverCapacity();
+                }
             }
             _dispatcher.Post(() => SessionStateChanged?.Invoke(this, new SessionStateEventArgs(session, state)));
         };

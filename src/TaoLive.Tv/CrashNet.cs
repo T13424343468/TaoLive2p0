@@ -16,6 +16,8 @@ public static class CrashNet
     private static readonly ConcurrentQueue<string> _pending = new();
     private static readonly System.Threading.Timer _flushTimer;
     private static int _flushing; // 单飞护栏：防上拍未落盘、下拍并发写
+    private static int _count;    // 配额计数（vc73 审查清零 P2）：Count 检查与入队非原子会略超 512，改 Interlocked 原子配额
+    private static readonly object _ioGate = new(); // 写盘互斥（vc73 审查清零 P2）：RecordNow 与后台 Flush 并发走同一文件，无共享锁会一条 IOException 被吞丢崩溃账
 
     static CrashNet()
     {
@@ -49,10 +51,16 @@ public static class CrashNet
         catch { }
     }
 
-    /// <summary>入队（有界：满了丢新条，保队列稳定不膨胀）。</summary>
+    /// <summary>入队（有界：满了丢新条，保队列稳定不膨胀）。
+    /// vc73 审查清零 P2：配额走 Interlocked 原子计数——原「先查 Count 再入队」两步非原子，
+    /// 并发下会略超 512（不致命，但口径应精确）。</summary>
     static void Enqueue(string line)
     {
-        if (_pending.Count >= QueueCapacity) return; // 队列满载=写盘长期跟不上：诊断日志可丢，不积压拖垮内存
+        if (Interlocked.Increment(ref _count) > QueueCapacity)
+        {
+            Interlocked.Decrement(ref _count); // 超配额：计数回滚，丢新条
+            return;
+        }
         _pending.Enqueue(line);
     }
 
@@ -66,6 +74,7 @@ public static class CrashNet
             var batch = new StringBuilder();
             while (_pending.TryDequeue(out var line))
             {
+                Interlocked.Decrement(ref _count); // vc73：与 Enqueue 配额计数配对，出队即减
                 batch.Append(line);
                 if (batch.Length >= 32 * 1024) break; // 单拍封顶，剩余下拍继续
             }
@@ -76,21 +85,31 @@ public static class CrashNet
         finally { Interlocked.Exchange(ref _flushing, 0); }
     }
 
-    /// <summary>写入前按轮转策略收敛历史日志（1MB 两代封顶），再追加本次内容。</summary>
+    /// <summary>写入前按轮转策略收敛历史日志（1MB 两代封顶），再追加本次内容。
+    /// vc73 审查清零 P2：轮转与追加同一把 _ioGate 互斥——RecordNow（进程即死兜底）与后台
+    /// Flush 并发走到这里，无共享锁时 File.AppendAllText 会抛 IOException，旧空吞=丢一条崩溃账；
+    /// 落在 _ioGate 后互斥串行，IOException 概率归零，仍兜 catch（失败落 Console.Error 不空吞、不抛）。</summary>
     static void WriteAndRotate(string line)
     {
         var path = LogPath();
         try
         {
-            if (File.Exists(path) && new FileInfo(path).Length >= 1024 * 1024)
+            lock (_ioGate)
             {
-                var bak = path + ".1";
-                if (File.Exists(bak)) File.Delete(bak);
-                File.Move(path, bak);
+                if (File.Exists(path) && new FileInfo(path).Length >= 1024 * 1024)
+                {
+                    var bak = path + ".1";
+                    if (File.Exists(bak)) File.Delete(bak);
+                    File.Move(path, bak);
+                }
+                File.AppendAllText(path, line);
             }
         }
-        catch { /* 轮转失败不影响本次写入 */ }
-        File.AppendAllText(path, line);
+        catch (Exception ex)
+        {
+            // 轮转/追加失败：落 Console.Error 不空吞（三.2），崩溃兜底路径仍不能抛
+            try { Console.Error.WriteLine($"[CrashNet] write failed: {ex.Message}"); } catch { }
+        }
     }
 
     static string LogPath() =>

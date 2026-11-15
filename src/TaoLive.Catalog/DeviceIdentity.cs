@@ -35,7 +35,11 @@ public static class DeviceIdentity
                     if (v.Length is 32 && v.All(Uri.IsHexDigit)) return _cached = v; // 旧文件防脏：仅收 32 位十六进制
                 }
                 var guid = Guid.NewGuid().ToString("N");
-                File.WriteAllText(path, guid);        // 原子性可接受：单次小文件，损坏按 32 位校验丢弃重生成
+                // 原子写（vc73 审查清零 P2，三.6 家法）：先写临时文件再替换——直接写目标文件断电会整文件损坏，
+                // 32 位校验兜底只是最后防线，不该当常规路径用。
+                var tmp = path + ".tmp";
+                File.WriteAllText(tmp, guid);
+                File.Move(tmp, path, overwrite: true);
                 return _cached = guid;
             }
             catch { return _cached = Guid.NewGuid().ToString("N"); } // 落盘失败不挡起播：退回随机
