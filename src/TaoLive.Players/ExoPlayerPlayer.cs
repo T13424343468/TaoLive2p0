@@ -125,6 +125,12 @@ public sealed class ExoPlayerPlayer : IPlayer
     public event EventHandler<PlayerErrorEventArgs>? OnError;
     public event EventHandler<PlayerFrameTickEventArgs>? OnFrameTick;
 
+    /// <summary>vc66 视频故障信号（老板令「根因上屏」）：视频解码器报错/视频渲染器停用即触发——
+    /// 壳层只出声守卫据此把零帧账直接判过期，快速递进自救，不等零帧窗硬等。仅诊断口径，不影响内核状态机。</summary>
+    public event EventHandler<string>? OnVideoFault;
+
+    internal void HandleVideoFault(string detail) => OnVideoFault?.Invoke(this, detail);
+
     public void Play(PlaybackParams params_)
     {
         ArgumentNullException.ThrowIfNull(params_);
@@ -369,7 +375,10 @@ public sealed class ExoPlayerPlayer : IPlayer
 
         public void OnVideoCodecError(AndroidX.Media3.ExoPlayer.Analytics.AnalyticsListenerEventTime? eventTime,
             Java.Lang.Exception? videoCodecError)
-            => Report($"[解码] 视频解码器报错（{Ch()}）：{videoCodecError?.Message}");
+        {
+            Report($"[解码] 视频解码器报错（{Ch()}）：{videoCodecError?.Message}");
+            _owner.HandleVideoFault($"视频解码器报错：{videoCodecError?.Message}"); // vc66：只出声守卫快速递进信号
+        }
 
         public void OnAudioCodecError(AndroidX.Media3.ExoPlayer.Analytics.AnalyticsListenerEventTime? eventTime,
             Exception audioCodecError)

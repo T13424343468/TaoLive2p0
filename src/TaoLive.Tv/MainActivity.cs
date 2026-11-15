@@ -149,6 +149,7 @@ public partial class MainActivity : Activity
                 resolver.ResolveAsync(endpoint, player.CurrentChannelKey ?? "", player.CurrentChannelName ?? ""));
             WireFramePulse(player); // 画面平稳埋点（方案书 v76/v20：帧回调 10Hz → 滑窗 P95 断言）
             WireVeilReveal(player); // 换台遮罩真实出画撤除（真机反馈批#11 续修 2026-11-15）
+            WireVideoFault(player); // vc66 审查修正：内核视频故障信号→只出声守卫快速递进（根因上屏）
             return player;
         }
 
@@ -160,6 +161,26 @@ public partial class MainActivity : Activity
         void WireVeilReveal(ExoPlayerPlayer player)
         {
             player.OnFrameTick += (_, _) => Shell?.VeilFrameTick(player);
+        }
+
+        // vc66 审查修正（老板审批方案第三刀「根因上屏」）：内核视频解码器报错即触发 OnVideoFault——
+        // 当前会话本内核处于 Playing 时，把零帧账直接判过期（回拨 60 秒），守卫 3 秒泵下一拍即走
+        // 重建→切线路→强制换源递进，不再硬等 20 秒窗。只动账不动状态机：递进动作仍由守卫统一执行，
+        // 与内核 PlaybackException→Failed→failover 天然竞速但方向一致（谁先救回都行，账重复判过期幂等）。
+        // 信号回调在内核播放线程：过 _main 回主线程，与守卫泵读写零帧账不并发。
+        void WireVideoFault(ExoPlayerPlayer player)
+        {
+            player.OnVideoFault += (_, detail) => _main.Post(() =>
+            {
+                if (_manager.Current is not { } c
+                    || !ReferenceEquals(c.Kernel, player)
+                    || c.State != PlaybackState.Playing)
+                {
+                    return; // 非当前会话本内核（热备攒流），或已不在播：账归守卫原口径管，不掺和
+                }
+                CrashNet.Record($"[只出声兜底] 内核视频故障：{detail}——零帧账判过期，守卫下一拍递进");
+                _lastVideoFrameAtMs = System.Environment.TickCount64 - 60_000;
+            });
         }
 
         // 画面平稳无感量化埋点（v20）：帧回调进滑窗，每 10 秒取数落 [画面平稳] 日志行；
@@ -1103,7 +1124,7 @@ public partial class MainActivity : Activity
 
     /// <summary>#75 音画同出兜底（2026-11-15 老板令，泵 3 秒节拍内调；vc66 重写治「画一直黑几秒后全线路不可达」）：
     /// 「音出画不出」=内核 READY 态视频断供/慢热。vc66 三修：
-    /// ①零帧判定窗随真机出画耗时自校准（RevealEtaMs 指数均值×2，下限 8 秒）——慢热盒子不被 5 秒死窗掐死重起，
+    /// ①零帧判定窗随真机出画耗时自校准（RevealEtaMs 指数均值×2，下限 20 秒）——慢热盒子不被死窗掐死重起，
     ///   画面在路上就被拦下重起是「画永远出不来」的第一根因（真机实锤：以前无守卫等得久但等得到）；
     /// ②遮罩挂起期（出画倒计时中）同样值守——音频先出视频死时立刻走递进，不再干等安全网掀盖露黑；
     /// ③计数只认用户换台与帧恢复归零（Buffering 过渡清账缺陷已修），2 次重建→切线路→线路走完强制进换源队列，
@@ -1116,8 +1137,9 @@ public partial class MainActivity : Activity
         {
             return;
         }
-        // vc66 ①：判定窗=8 秒与「2×真机出画耗时均值」取大——等得过慢热，也兜得住真死
-        var zeroWindowMs = (long)Math.Max(8_000, RevealEtaMs * 2);
+        // vc66 ①：判定窗=20 秒与「2×真机出画耗时均值」取大——老版本基线（12 秒水位+解码）出画就在 13-16 秒起，
+        // 窗口必须给慢热让够路；真死的快速通道走内核视频故障信号（OnVideoFault→账直接判过期），不靠窗硬等
+        var zeroWindowMs = (long)Math.Max(20_000, RevealEtaMs * 2);
         if (_lastVideoFrameAtMs != 0 && System.Environment.TickCount64 - _lastVideoFrameAtMs < zeroWindowMs)
         {
             _stallRebuildCount = 0; // 有帧即清账：画面健康，重建计数归零
