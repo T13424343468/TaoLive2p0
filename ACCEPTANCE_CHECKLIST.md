@@ -68,4 +68,4 @@
 
 | 编号 | 级别 | 描述 | 状态 |
 |------|------|------|------|
-| BUG-1 | 必修（P1） | `PlaybackSession.ChangeChannel` 在 Reconnecting 态抛 `InvalidOperationException`（Transition 矩阵缺 Reconnecting→Idle）。壳层换台打在卡流窗口即崩。用例已锁定现行为：`Change_channel_during_reconnecting_currently_throws`、`Same_channel_switch_during_reconnecting_currently_throws` | 待修（修复后两用例改正向断言） |
+| BUG-1 | 必修（P1） | `PlaybackSession.ChangeChannel` 在 Reconnecting 态抛 `InvalidOperationException`（Transition 矩阵缺 Reconnecting→Idle）。壳层换台打在卡流窗口即崩。 | **已修（2026-11-15）**：Transition 矩阵补 (Reconnecting→Idle)（PlaybackSession.cs:117）；两用例改正向断言 `Change_channel_during_reconnecting_succeeds`/`Same_channel_switch_during_reconnecting_succeeds`（SessionFailoverTests.cs:119/195），141 测全绿 |
