@@ -1,4 +1,4 @@
-namespace TaoLive.Foundation;
+﻿namespace TaoLive.Foundation;
 
 /// <summary>
 /// 持久化公共口径（编码规范〇.7.3 归一：同类逻辑三现必须合并，2026-11-15 总镜子 R1 收口）。

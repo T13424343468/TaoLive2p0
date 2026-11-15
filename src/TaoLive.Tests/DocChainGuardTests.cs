@@ -1,4 +1,4 @@
-using TaoLive.Session;
+﻿using TaoLive.Session;
 using Xunit;
 
 namespace TaoLive.Tests;
