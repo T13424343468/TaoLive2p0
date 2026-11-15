@@ -668,6 +668,7 @@ public partial class MainActivity : Activity
     /// <summary>频道抽屉呼出（vc53 口径）：半透明面板盖画面，播放不中断（不摘输出面，画面在面板下继续）。</summary>
     private void ShowList()
     {
+        EnforceSingleWindow(); // #64 窗口唯一令：开新先关旧（抽屉与设置/弹窗/子页面板互斥）
         _listOpen = true;
         _playerPage.Visibility = ViewStates.Visible;
         _listPage.Visibility = ViewStates.Visible;
@@ -1343,6 +1344,7 @@ public partial class MainActivity : Activity
     private void ConfirmExit()
     {
         if (_exitDialog != null) return; // 弹窗已开着：不重复弹
+        EnforceSingleWindow(); // #64 窗口唯一令：开新先关旧（退出弹窗也是窗口）
         var box = new LinearLayout(this) { Orientation = Orientation.Vertical };
         int pad = Dp(20);
         box.SetPadding(pad * 2, pad * 2, pad * 2, pad);

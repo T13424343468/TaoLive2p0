@@ -82,8 +82,31 @@ public partial class MainActivity
         if (_settingsPanelOpen) CloseSettingsPanel(); else OpenSettingsPanel();
     }
 
+    // —— 窗口唯一令（#64 老板令 2026-11-15）：打开任何窗口前先关掉其它所有窗口——
+    //    不允许重叠，当前操作的窗口永远第一顺位且唯一。覆盖：频道抽屉/设置面板/退出确认弹窗/
+    //    运行统计·崩溃日志/自诊断/进阶调优/开源许可。纯关闭不触发「返回设置页」收口。 ——
+
+    /// <summary>统一闸：开新窗口前先关掉其它全部窗口（幂等，重复调无害）。</summary>
+    private void EnforceSingleWindow()
+    {
+        if (_listOpen) ShowPlayer();      // 收频道抽屉回播放页（纯收起，画面本就没停）
+        CloseSettingsPanel();             // 收设置面板
+        if (_exitDialog is not null)      // 收退出确认弹窗
+        {
+            _exitDialog.Dismiss();
+            _exitDialog = null;
+            _exitNo = null;
+            _exitYes = null;
+        }
+        CloseCrashOverlayOnly();
+        CloseDiagOverlayOnly();
+        CloseLicenseOverlayOnly();
+        CloseAdvancedOverlayOnly();
+    }
+
     private void OpenSettingsPanel()
     {
+        EnforceSingleWindow(); // #64 窗口唯一令：开新先关旧
         _settingsPanel ??= BuildSettingsPanel();
         _settingsPanelOpen = true;
         RefreshSettingsRows();
@@ -388,6 +411,7 @@ public partial class MainActivity
     /// <summary>运行统计面板：只读聚合，无清理键防误操作；关闭键即回设置页。读盘解析走后台（#23）。</summary>
     private void ShowRunStatsPanel()
     {
+        EnforceSingleWindow(); // #64 窗口唯一令：开新先关旧
         try
         {
             var path = new Java.IO.File(FilesDir, "taolive_crash.log");
@@ -422,6 +446,7 @@ public partial class MainActivity
 
     private void ShowCrashLog()
     {
+        EnforceSingleWindow(); // #64 窗口唯一令：开新先关旧
         try
         {
             var path = new Java.IO.File(FilesDir, "taolive_crash.log");
@@ -473,6 +498,13 @@ public partial class MainActivity
 
     private void CloseCrashPanel()
     {
+        CloseCrashOverlayOnly();
+        OpenSettingsPanel();
+    }
+
+    /// <summary>#64 窗口唯一令：崩溃/运行统计面板纯关闭（不回设置页），供统一闸复用。</summary>
+    private void CloseCrashOverlayOnly()
+    {
         if (_crashOverlay is null) return;
         _root.RemoveView(_crashOverlay);
         _crashOverlay.Dispose();
@@ -480,7 +512,6 @@ public partial class MainActivity
         _crashScroll = null;
         _crashCleanBtn = null;
         _crashCloseBtn = null;
-        OpenSettingsPanel();
     }
 
     /// <summary>子页面板骨架：标题 + 权重铺满的滚动正文 + 统一内边距。按钮行由各页自挂（键位各不同）。</summary>
@@ -546,6 +577,7 @@ public partial class MainActivity
 
     private void ShowDiagPanel()
     {
+        EnforceSingleWindow(); // #64 窗口唯一令：开新先关旧
         try
         {
             var (box, pad) = BuildOverlayPanel("自诊断（只读）", "诊断中…", out var scroll);
@@ -593,6 +625,13 @@ public partial class MainActivity
 
     private void CloseDiagPanel()
     {
+        CloseDiagOverlayOnly();
+        OpenSettingsPanel();
+    }
+
+    /// <summary>#64 窗口唯一令：自诊断面板纯关闭（不回设置页），供统一闸复用。</summary>
+    private void CloseDiagOverlayOnly()
+    {
         if (_diagOverlay is null) return;
         _root.RemoveView(_diagOverlay);
         _diagOverlay.Dispose();
@@ -600,13 +639,13 @@ public partial class MainActivity
         _diagScroll = null;
         _diagExportBtn = null;
         _diagCloseBtn = null;
-        OpenSettingsPanel();
     }
 
     // —— 关于面板（v47 开源合规）：Apache-2.0 许可文本只读一页，来源随包 Assets/NOTICE.txt ——
 
     private void ShowLicensePanel()
     {
+        EnforceSingleWindow(); // #64 窗口唯一令：开新先关旧
         try
         {
             string body;
@@ -646,13 +685,19 @@ public partial class MainActivity
 
     private void CloseLicensePanel()
     {
+        CloseLicenseOverlayOnly();
+        OpenSettingsPanel();
+    }
+
+    /// <summary>#64 窗口唯一令：许可面板纯关闭（不回设置页），供统一闸复用。</summary>
+    private void CloseLicenseOverlayOnly()
+    {
         if (_licenseOverlay is null) return;
         _root.RemoveView(_licenseOverlay);
         _licenseOverlay.Dispose();
         _licenseOverlay = null;
         _licenseScroll = null;
         _licenseCloseBtn = null;
-        OpenSettingsPanel();
     }
 
     /// <summary>五类摘要组装：全部经现有公开接口/公开成员取数，不落设备标识、不新增采集。</summary>
@@ -753,6 +798,7 @@ public partial class MainActivity
 
     private void ShowAdvancedTuningPanel()
     {
+        EnforceSingleWindow(); // #64 窗口唯一令：开新先关旧
         try
         {
             var box = new LinearLayout(this) { Orientation = Orientation.Vertical };
@@ -888,11 +934,17 @@ public partial class MainActivity
 
     private void CloseAdvancedPanel()
     {
+        CloseAdvancedOverlayOnly();
+        OpenSettingsPanel();
+    }
+
+    /// <summary>#64 窗口唯一令：进阶调优面板纯关闭（不回设置页），供统一闸复用。</summary>
+    private void CloseAdvancedOverlayOnly()
+    {
         if (_advOverlay is null) return;
         _root.RemoveView(_advOverlay);
         _advOverlay.Dispose();
         _advOverlay = null;
-        OpenSettingsPanel();
     }
 
     private void SaveAdvancedTuning() // 旋钮写偏好（跨启动记忆；Apply 即生效）
