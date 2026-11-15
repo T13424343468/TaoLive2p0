@@ -218,6 +218,28 @@ public sealed class ExoPlayerPlayer : IPlayer
         }
     }
 
+    /// <summary>
+    /// 缓冲库存读数（IPlayer 契约，老板令 #24）：内核缓冲位置 − 播放位置=播放点之后的存货毫秒。
+    /// 未就绪（TIME_UNSET/负数）、位置异常一律按 0=「无读数」上交，会话层不据此判趋势防误切。
+    /// </summary>
+    public long BufferedMs
+    {
+        get
+        {
+            try
+            {
+                long buffered = _player.BufferedPosition;
+                long position = _player.CurrentPosition;
+                if (buffered < 0 || position < 0) return 0; // TIME_UNSET=未就绪：按无读数
+                return Math.Max(0, buffered - position);
+            }
+            catch
+            {
+                return 0; // 内核已释放等边界：按无读数，交既有卡流自救路径兜底
+            }
+        }
+    }
+
     public void Dispose()
     {
         _playGeneration++; // 释放后作废一切在途回调（闪退镜红②）

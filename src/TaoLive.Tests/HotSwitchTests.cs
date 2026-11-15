@@ -169,6 +169,54 @@ public class HotSwitchTests
     }
 
     [Fact]
+    public void Superseded_session_evicted_after_ttl_by_monotonic_clock()
+    {
+        // 老板令 #21 回归账：超龄清理按让位时间账（单调钟）判，
+        // 不得拿 LRU 序数当毫秒——否则一开机就整表误清。
+        long nowMs = 10_000;
+        var players = new List<LoggingPlayer>();
+        var manager = new PlaybackSessionManager(
+            () => { var p = new LoggingPlayer(); players.Add(p); return new PlaybackSession(p, new FixedClock(T0)); },
+            hotStandbyEnabled: true,
+            monotonicMs: () => nowMs);
+        var ch1 = MakeChannel("cctv1", "https://s/a.m3u8");
+        var ch2 = MakeChannel("cctv2", "https://s/b.m3u8");
+
+        manager.SwitchTo(ch1);
+        nowMs += 60_000; // 看了 1 分钟
+        manager.SwitchTo(ch2); // ch1 让位，超龄账自此起算
+        Assert.NotNull(manager.TryGet("cctv1")); // TTL 内留表：同频道切回秒回切
+
+        nowMs += (long)PlaybackSessionManager.SupersededSessionTtl.TotalMilliseconds;
+        manager.SwitchTo(MakeChannel("cctv3", "https://s/c.m3u8")); // 触发资源闸清超龄
+        Assert.Null(manager.TryGet("cctv1")); // 超龄让位会话被清
+        Assert.True(players[0].Log.Contains("Dispose"), "超龄会话未释放内核");
+        Assert.NotNull(manager.TryGet("cctv2")); // 仍在 TTL 内的让位会话不清
+        Assert.NotNull(manager.TryGet("cctv3")); // 当前会话永不清
+    }
+
+    [Fact]
+    public void Memory_pressure_shrink_clears_superseded_keeps_current_and_standby()
+    {
+        // 老板令 #25：内存告警先自瘦身——让位会话全清，当前台/热备不动
+        var (manager, players) = MakeManager();
+        var ch1 = MakeChannel("cctv1", "https://s/a.m3u8");
+        var ch2 = MakeChannel("cctv2", "https://s/b.m3u8");
+        var ch3 = MakeChannel("cctv3", "https://s/c.m3u8");
+        manager.SwitchTo(ch1);
+        manager.SwitchTo(ch2); // ch1 让位
+        manager.PrepareStandby(ch3); // ch3 热备
+
+        Assert.Equal(1, manager.ShrinkForMemoryPressure());
+        Assert.Null(manager.TryGet("cctv1")); // 让位会话清出表
+        Assert.True(players[0].Log.Contains("Dispose"), "让位会话内核未释放");
+        Assert.NotNull(manager.TryGet("cctv2")); // 当前台不动
+        Assert.NotNull(manager.TryGet("cctv3")); // 热备不动
+        Assert.Equal(manager.Current, manager.TryGet("cctv2"));
+        Assert.Equal(0, manager.ShrinkForMemoryPressure()); // 无让位会话再缩编为零
+    }
+
+    [Fact]
     public void Switching_channel_triggers_prefetch_hook_with_switched_channel()
     {
         var prefetched = new List<Channel>();

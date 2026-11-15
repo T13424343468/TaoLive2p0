@@ -49,6 +49,9 @@ public sealed class PlaybackSessionManager
     private readonly bool _hotStandbyEnabled;
     private readonly Dictionary<string, PlaybackSession> _sessions = new(StringComparer.Ordinal);
     private readonly Dictionary<string, long> _lastUsed = new(StringComparer.Ordinal);
+    // 超龄清理的时间账（老板令 #21）：会话让位（不再是 Current/Standby）时按单调钟记账；
+    // 与 LRU 序数账 _lastUsed 分开——序数是字典内部记账，不能和毫秒钟相减。
+    private readonly Dictionary<string, long> _supersededAtMs = new(StringComparer.Ordinal);
     private readonly object _returnGate = new();
     private readonly Func<long> _monotonicMs;
     private readonly RetryBackoffAccount _retryBackoff;
@@ -158,10 +161,12 @@ public sealed class PlaybackSessionManager
         {
             SessionTrace.Emit($"[热备] 备台 {oldSb.CurrentChannel?.Name ?? oldSb.CurrentChannel?.Id ?? "?"} 让位（攒流 {_monotonicMs() - _standbySinceMs}ms 未接管），改备 {channel.Name}");
             oldSb.Supersede();
+            MarkSuperseded(oldSb); // 超龄账起算（#21）
         }
         if (_sessions.TryGetValue(channel.Id, out var existing))
         {
             Touch(channel.Id);
+            _supersededAtMs.Remove(channel.Id); // 重新成为热备，超龄账清零
             existing.ChangeChannel(channel);
             Standby = existing;
             _standbySinceMs = _monotonicMs(); // 攒流超时账起算（v75）
@@ -171,6 +176,7 @@ public sealed class PlaybackSessionManager
         var session = _sessionFactory();
         _sessions[channel.Id] = session;
         _lastUsed[channel.Id] = _stamp++;
+        _supersededAtMs.Remove(channel.Id);
         WireSession(session);
         EvictIfOverCapacity();
         session.ChangeChannel(channel); // 无面起播：攒流到门槛线，不接管画面
@@ -197,8 +203,10 @@ public sealed class PlaybackSessionManager
             // 新画面先挂面覆盖旧画面（同面后画覆盖先画，旧画面撑到让位不露黑）
             sb.AttachSurface(cur.SurfaceHandle);
             cur.Supersede();
+            MarkSuperseded(cur); // 超龄账起算（#21）
             Current = sb;
             Standby = null;
+            _supersededAtMs.Remove(channel.Id); // 目标台接管前台，超龄账清零
             Touch(channel.Id);
             RaiseCurrentChanged(sb);
             return sb;
@@ -219,6 +227,7 @@ public sealed class PlaybackSessionManager
             && !string.Equals(prevChannel.Id, channel.Id, StringComparison.Ordinal))
         {
             p.Supersede();
+            MarkSuperseded(p); // 超龄账起算（#21）
         }
         if (ReferenceEquals(Standby, prev)) Standby = null;
         if (!_sessions.TryGetValue(channel.Id, out var session))
@@ -230,6 +239,7 @@ public sealed class PlaybackSessionManager
         }
         if (ReferenceEquals(Standby, session)) Standby = null;
         Touch(channel.Id);
+        _supersededAtMs.Remove(channel.Id); // 目标台接管前台，超龄账清零
         session.ChangeChannel(channel);
         Current = session;
         EvictIfOverCapacity();
@@ -241,7 +251,37 @@ public sealed class PlaybackSessionManager
     public PlaybackSession? TryGet(string channelId) =>
         _sessions.TryGetValue(channelId, out var session) ? session : null;
 
-    /// <summary>看门狗泵：由壳层定时器周期调用，仅作用于当前会话；顺带跑回主源迟滞判据与热备攒流超时账。</summary>
+    /// <summary>
+    /// 内存压力缩编（老板令 #25：低配机不等系统来杀，先自瘦身）：系统内存告警时，
+    /// 让位会话（非 Current/Standby）全数出表并释放内核，当前台与热备不动——
+    /// 旧台缓存是「锦上添花」，内存吃紧时第一个让路。返回清掉的会话数（壳层落台账）。
+    /// </summary>
+    public int ShrinkForMemoryPressure()
+    {
+        List<string>? victims = null;
+        foreach (var (id, s) in _sessions)
+        {
+            if (ReferenceEquals(s, Current) || ReferenceEquals(s, Standby)) continue;
+            (victims ??= new List<string>()).Add(id);
+        }
+        if (victims is null) return 0;
+        foreach (var id in victims)
+        {
+            var victim = _sessions[id];
+            _sessions.Remove(id);
+            _lastUsed.Remove(id);
+            _supersededAtMs.Remove(id);
+            try { victim.ReleaseKernel(); }
+            catch { /* 释放失败不拖垮缩编：内核随进程回收 */ }
+        }
+        if (victims.Count > 0)
+        {
+            SessionTrace.Emit($"[资源] 内存压力缩编：让位会话清 {victims.Count} 个（当前台/热备保留，老板令 #25）");
+        }
+        return victims.Count;
+    }
+
+    /// <summary>看门狗泵：由壳层定时器周期调用，仅作用于当前会话；顺带跑预防性介入（老板令 #24）、回主源迟滞判据与热备攒流超时账。</summary>
     public void Tick()
     {
         var current = Current;
@@ -252,6 +292,7 @@ public sealed class PlaybackSessionManager
             return;
         }
         current.CheckWatchdog();
+        current.CheckProactiveFailover();
         TryReturnToPrimary(current);
         TryStandbyTimeout();
     }
@@ -269,6 +310,7 @@ public sealed class PlaybackSessionManager
         // 攒流超时打点（埋点补充 2026-11-15）：热备为何没了的账面依据（攒流烧满窗口未达门槛）
         SessionTrace.Emit($"[热备] 备台 {sb.CurrentChannel?.Name ?? sb.CurrentChannel?.Id ?? "?"} 攒流超时 {StandbyAccumulateWindow.TotalSeconds}s 未达门槛，放弃热备转冷切");
         sb.Supersede(); // 攒不到门槛即放弃热备；会话留表，冷切可复用
+        MarkSuperseded(sb); // 超龄账起算（#21）
         Standby = null;
     }
 
@@ -307,9 +349,37 @@ public sealed class PlaybackSessionManager
         if (_lastUsed.ContainsKey(channelId)) _lastUsed[channelId] = _stamp++;
     }
 
-    /// <summary>资源闸：超容即淘汰最久未用的已让位会话并释放内核；Current/Standby 永不淘汰。</summary>
+    /// <summary>已让位会话寿命（老板令 2026-11-15 #21）：上次使用超此时长的热备/留台会话一律释放——
+    /// 缓冲内容永远只服务近期看过的台，旧台不囤积。5 分钟兼作秒回切窗口，终值随真机定标。</summary>
+    public static readonly TimeSpan SupersededSessionTtl = TimeSpan.FromMinutes(5);
+
+    /// <summary>资源闸：先清超龄已让位会话（老板令 #21：旧台限时丢弃，超龄即清，与容量无关），
+    /// 再超容淘汰最久未用者；Current/Standby 永不清。
+    /// 超龄按让位时间账（_supersededAtMs，单调钟）；无账可查的让位会话视作刚让位，不立即清（防误杀）。</summary>
     private void EvictIfOverCapacity()
     {
+        long nowMs = _monotonicMs();
+        List<string>? staleIds = null;
+        foreach (var (id, s) in _sessions)
+        {
+            if (ReferenceEquals(s, Current) || ReferenceEquals(s, Standby)) continue;
+            long supersededAt = _supersededAtMs.GetValueOrDefault(id, nowMs);
+            if (nowMs - supersededAt >= SupersededSessionTtl.TotalMilliseconds)
+                (staleIds ??= new List<string>()).Add(id);
+        }
+        if (staleIds != null)
+        {
+            foreach (var id in staleIds)
+            {
+                var stale = _sessions[id];
+                _sessions.Remove(id);
+                _lastUsed.Remove(id);
+                _supersededAtMs.Remove(id);
+                try { stale.ReleaseKernel(); }
+                catch { /* 超龄释放失败不拖垮会话表：内核随进程回收 */ }
+            }
+            SessionTrace.Emit($"[热备] 超龄让位会话清理 {staleIds.Count} 个（寿命 {SupersededSessionTtl.TotalMinutes:0} 分钟，老板令 #21）");
+        }
         while (_sessions.Count > RetainedCapacity)
         {
             string? victimId = null;
@@ -328,9 +398,16 @@ public sealed class PlaybackSessionManager
             var victim = _sessions[victimId];
             _sessions.Remove(victimId);
             _lastUsed.Remove(victimId);
+            _supersededAtMs.Remove(victimId);
             try { victim.ReleaseKernel(); }
             catch { /* 淘汰释放失败不拖垮会话表：内核随进程回收 */ }
         }
+    }
+
+    /// <summary>会话让位（老板令 #21 超龄账）：按单调钟记让位时刻，超龄清理据此判账。</summary>
+    private void MarkSuperseded(PlaybackSession session)
+    {
+        if (session.CurrentChannel is { } ch) _supersededAtMs[ch.Id] = _monotonicMs();
     }
 
     private void WireSession(PlaybackSession session)

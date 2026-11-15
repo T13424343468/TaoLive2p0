@@ -28,6 +28,11 @@ public sealed class PlaybackSession
     // 墙钟（StartedAtUtc 等）仅留展示与台账，开机校时跳变不再误触/漏触看门狗。
     private long? _bufferingSinceMs;
     private long? _reconnectingSinceMs;
+    // 预防性换源账（老板令 #24）：库存跌破线连续两拍（间隔≥1 秒）即主动切备线，不等卡流 15 秒。
+    // 单调钟记账；0 读数按「无读数」不判趋势（IPlayer 契约），冷却窗防横跳。
+    private int _lowInventoryRounds;
+    private long _lowInventoryLastAtMs;
+    private long? _lastFailoverAtMs; // 可空：无账=从未切过，不占冷却窗（初值 0 会把开机头 60 秒全锁死）
 
     public PlaybackSession(IPlayer player, IClock clock)
     {
@@ -213,6 +218,7 @@ public sealed class PlaybackSession
         AppendFallbacks();
         _endpointIndex = 0;
         FailoverCount = 0;
+        _stallTimes.Clear(); // 欠载趋势账随换台清零（老板令 #26）：账只记本台画质，不跟人走
         Transition(PlaybackState.Buffering, "change channel");
         _player.Play(new PlaybackParams(channel, _queue[0], _preferLowLatency));
         ReattachSurface();
@@ -283,7 +289,23 @@ public sealed class PlaybackSession
         {
             Transition(PlaybackState.Reconnecting, "watchdog stall");
             _reconnectingSinceMs = _clock.NowMs;
+            RecordStall(_clock.NowMs); // 欠载趋势账（老板令 #26）：反复短卡流也是主动介入依据
         }
+    }
+
+    /// <summary>持续欠载判据（老板令 #26）：滚动窗内短卡流满此次数即预防性换线，
+    /// 不等下一次卡死 15 秒——库存读数看「这一刻还剩多少货」，欠载账看「这阵子饿了几次」，两判据互补。</summary>
+    public const int StallChurnThreshold = 3;
+
+    /// <summary>持续欠载滚动窗（毫秒）：窗内卡流满 3 次即触发，超窗自动滑出。</summary>
+    public static readonly TimeSpan StallChurnWindow = TimeSpan.FromMinutes(5);
+
+    private readonly List<long> _stallTimes = new();
+
+    private void RecordStall(long nowMs)
+    {
+        _stallTimes.RemoveAll(t => nowMs - t >= StallChurnWindow.TotalMilliseconds);
+        _stallTimes.Add(nowMs);
     }
 
     /// <summary>
@@ -325,6 +347,73 @@ public sealed class PlaybackSession
             return true;
         }
         return false;
+    }
+
+    /// <summary>预防性换源库存线（老板令 #24）：Playing 期库存跌破起播下限（BufferInventory.TargetMs=7 秒）
+    /// 连续两拍即主动切备线——卡顿前动手，不等卡流 15 秒看门狗。终值随真机定标。</summary>
+    public static readonly TimeSpan ProactiveInventoryFloor = TimeSpan.FromMilliseconds(BufferInventory.TargetMs);
+
+    /// <summary>预防性换源冷却窗：切换后冷却期内不再预防性介入（防坏线连切横跳）；卡流看门狗自救不受限。</summary>
+    public static readonly TimeSpan ProactiveCooldown = TimeSpan.FromSeconds(60);
+
+    /// <summary>
+    /// 预防性介入泵（老板令 #24/#26：主动预防，不做「出了问题再处理问题」）：
+    /// Playing 期两条判据，命中其一且有备线、不在冷却窗 → 预防性切下一路线：
+    /// ① 库存线（#24）：内核库存（BufferedMs）跌破线（&gt;0 且 &lt;7 秒）连续两拍（间隔≥1 秒，单次网络抖动不切）；
+    /// ② 欠载线（#26）：滚动窗内短卡流满 3 次——反复饿也算坏线，不等下一次卡死 15 秒。
+    /// 0 读数按「无读数」不判趋势（IPlayer 契约：直播源无数≠见底）；真见底（内核进卡流态）走既有看门狗。
+    /// 生产由管理器 Tick 驱动，与 CheckWatchdog 同泵；测试注入 FixedClock 后手动泵。
+    /// </summary>
+    public bool CheckProactiveFailover()
+    {
+        if (!_active || _state != PlaybackState.Playing)
+        {
+            _lowInventoryRounds = 0;
+            return false;
+        }
+        if (_endpointIndex + 1 >= _queue.Count)
+        {
+            return false; // 没有备线，无从预防（最后一根线由看门狗兜底）
+        }
+        long nowMs = _clock.NowMs;
+        if (_lastFailoverAtMs is { } lastFailover
+            && nowMs - lastFailover < ProactiveCooldown.TotalMilliseconds)
+        {
+            _lowInventoryRounds = 0; // 冷却窗内只攒账不切，防坏线连切横跳
+            return false;
+        }
+
+        // 判据②（老板令 #26）：滚动窗内卡流满 3 次，账内即时坐实，不需第二拍等趋势
+        _stallTimes.RemoveAll(t => nowMs - t >= StallChurnWindow.TotalMilliseconds);
+        bool churnTripped = _stallTimes.Count >= StallChurnThreshold;
+
+        long bufferedMs = _player.BufferedMs;
+        bool lowInventory = bufferedMs > 0 && bufferedMs < ProactiveInventoryFloor.TotalMilliseconds;
+        if (!lowInventory)
+        {
+            _lowInventoryRounds = 0; // 库存回线：趋势账清零
+        }
+        else if (_lowInventoryRounds == 0 || nowMs - _lowInventoryLastAtMs >= 1000)
+        {
+            _lowInventoryRounds++;
+            _lowInventoryLastAtMs = nowMs;
+        }
+        bool inventoryTripped = lowInventory && _lowInventoryRounds >= 2;
+        if (!churnTripped && !inventoryTripped)
+        {
+            return false; // 两条判据都没坐实：单次抖动不切，等趋势
+        }
+        _lowInventoryRounds = 0;
+        // 预防打点（老板令 #24/#26）：主动介入的账面依据——命中哪条判据、账面多少、切前是第几路线
+        string basis = churnTripped
+            ? $"滚动窗 {StallChurnWindow.TotalMinutes:0}min 内卡流 {_stallTimes.Count} 次（满 {StallChurnThreshold} 次）"
+            : $"库存 {bufferedMs}ms 连续 2 拍低于 {(int)ProactiveInventoryFloor.TotalMilliseconds}ms";
+        SessionTrace.Emit($"[预防] {DescribeChannel()} {basis}，预防性换源（原线路 {CurrentLineIndex + 1}/{LineCount}，不等卡流超时）");
+        _stallTimes.Clear(); // 介入一次清一次账：新线重新起账，老账不跟去新线
+        // 走既有自救口径：先归 Failed 再切线（状态机矩阵 Playing 不直跳 Buffering，与看门狗/报错同路）
+        Transition(PlaybackState.Failed, "proactive switch");
+        TryFailover(churnTripped ? "stall churn proactive" : "low inventory proactive");
+        return true;
     }
 
     /// <summary>被管理器换下：停内核、摘面、状态归 Idle，此后不再响应内核事件。</summary>
@@ -378,6 +467,7 @@ public sealed class PlaybackSession
         var from = _queue[_endpointIndex];
         _endpointIndex = next;
         FailoverCount++;
+        _lastFailoverAtMs = _clock.NowMs; // 预防性介入冷却账起算（老板令 #24）
         Transition(PlaybackState.Buffering, $"failover after {reason}");
         _player.Play(new PlaybackParams(_channel, _queue[next], _preferLowLatency));
         ReattachSurface();

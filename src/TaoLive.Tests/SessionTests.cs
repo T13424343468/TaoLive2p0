@@ -76,6 +76,39 @@ public class SessionTests
     }
 
     [Fact]
+    public void Proactive_failover_on_repeated_stall_churn()
+    {
+        // 老板令 #26：滚动窗内短卡流满 3 次即预防性换线（库存充足也切），不等下一次卡死 15 秒
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer { BufferedMs = 20_000 };
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8");
+        session.ChangeChannel(ch);
+        session.NotifyFirstFrame();
+        Assert.Equal(PlaybackState.Playing, session.State);
+
+        for (int i = 0; i < 2; i++) // 前两次短卡流（各自恢复）：账不够，不切
+        {
+            player.RaiseBufferingStart();
+            player.RaiseBufferingEnd();
+        }
+        clock.Advance(TimeSpan.FromSeconds(2));
+        Assert.False(session.CheckProactiveFailover());
+        Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url);
+
+        player.RaiseBufferingStart(); // 第三次：满 3 次坐实坏线
+        player.RaiseBufferingEnd();
+        Assert.True(session.CheckProactiveFailover());
+        Assert.Equal("https://s/b.m3u8", session.CurrentEndpoint?.Url);
+        Assert.Equal(1, session.FailoverCount);
+
+        session.NotifyFirstFrame(); // 新线回播放：欠载账已清，不跟去新线
+        clock.Advance(TimeSpan.FromSeconds(2));
+        Assert.False(session.CheckProactiveFailover());
+        Assert.Equal(1, session.FailoverCount);
+    }
+
+    [Fact]
     public void Exhausted_sources_fires_all_failed_and_stays_failed()
     {
         var player = new LoggingPlayer();
@@ -91,6 +124,84 @@ public class SessionTests
         Assert.NotNull(args);
         Assert.Equal("cctv1", args!.ChannelId);
         Assert.Equal(0, session.FailoverCount);
+    }
+
+    [Fact]
+    public void Proactive_failover_switches_line_on_sustained_low_inventory()
+    {
+        // 老板令 #24：库存跌破线连续两拍即预防性换源，不等卡流 15 秒
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer { BufferedMs = 20_000 };
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8");
+        session.ChangeChannel(ch);
+        session.NotifyFirstFrame();
+        Assert.Equal(PlaybackState.Playing, session.State);
+
+        player.BufferedMs = 5_000;
+        Assert.False(session.CheckProactiveFailover()); // 第一拍：单次抖动不切
+        Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url);
+
+        clock.Advance(TimeSpan.FromSeconds(2)); // 第二拍（间隔≥1 秒）仍低于线：预防性切线
+        Assert.True(session.CheckProactiveFailover());
+        Assert.Equal("https://s/b.m3u8", session.CurrentEndpoint?.Url);
+        Assert.Equal(1, session.FailoverCount);
+        Assert.Equal(PlaybackState.Buffering, session.State);
+    }
+
+    [Fact]
+    public void Proactive_failover_resets_on_recovery_and_requires_two_spaced_samples()
+    {
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer { BufferedMs = 5_000 };
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8");
+        session.ChangeChannel(ch);
+        session.NotifyFirstFrame();
+
+        // 同拍内重复泵不累计（两拍须间隔≥1 秒）
+        Assert.False(session.CheckProactiveFailover());
+        Assert.False(session.CheckProactiveFailover());
+
+        // 库存回线：趋势账清零，再低于线须从第一拍重新起算
+        clock.Advance(TimeSpan.FromSeconds(2));
+        player.BufferedMs = 20_000;
+        Assert.False(session.CheckProactiveFailover());
+        player.BufferedMs = 5_000;
+        Assert.False(session.CheckProactiveFailover()); // 新账第一拍
+        clock.Advance(TimeSpan.FromSeconds(2));
+        Assert.True(session.CheckProactiveFailover());
+        Assert.Equal(1, session.FailoverCount);
+    }
+
+    [Fact]
+    public void Proactive_failover_skipped_without_spare_line_or_within_cooldown()
+    {
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer { BufferedMs = 5_000 };
+        var session = new PlaybackSession(player, clock);
+        // 单线频道：没有备线，预防无从介入
+        var single = MakeChannel("cctv1", "https://s/a.m3u8");
+        session.ChangeChannel(single);
+        session.NotifyFirstFrame();
+        clock.Advance(TimeSpan.FromSeconds(2));
+        Assert.False(session.CheckProactiveFailover());
+
+        // 冷却窗：真实换线后 60 秒内只攒账不切，到期恢复预防介入（三线频道：报错切到第 2 线后仍有备线）
+        var multi = MakeChannel("cctv2", "https://s/a2.m3u8", "https://s/b2.m3u8", "https://s/c2.m3u8");
+        session.ChangeChannel(multi);
+        session.NotifyFirstFrame();
+        clock.Advance(TimeSpan.FromSeconds(70));
+        player.RaiseError("NET-1"); // 真实换线，冷却账起算
+        session.NotifyFirstFrame(); // 新线回 Playing
+        player.BufferedMs = 5_000;
+        clock.Advance(TimeSpan.FromSeconds(2));
+        Assert.False(session.CheckProactiveFailover()); // 冷却窗内不切
+        clock.Advance(PlaybackSession.ProactiveCooldown);
+        Assert.False(session.CheckProactiveFailover()); // 到期第一拍
+        clock.Advance(TimeSpan.FromSeconds(2));
+        Assert.True(session.CheckProactiveFailover()); // 冷却窗外坐实趋势即切
+        Assert.Equal(2, session.FailoverCount);
     }
 
     [Fact]
@@ -303,6 +414,9 @@ internal sealed class LoggingPlayer : IPlayer
 {
     public List<string> Log { get; } = new();
     public List<string> PlayedUrls { get; } = new();
+
+    /// <summary>库存读数（IPlayer 契约，老板令 #24）：测试可设，模拟内核缓冲余量。</summary>
+    public long BufferedMs { get; set; }
 
     public event EventHandler<PlayerFirstFrameEventArgs>? OnFirstFrame;
     public event EventHandler<PlayerFrameTickEventArgs>? OnFrameTick;

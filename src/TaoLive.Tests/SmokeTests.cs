@@ -89,4 +89,7 @@ public sealed class StubPlayer : IPlayer
     public void AttachSurface(IntPtr surfaceHandle) { }
     public void DetachSurface() { }
     public void Dispose() { }
+
+    /// <summary>库存读数（IPlayer 契约，老板令 #24）：桩无实播，恒 0=无读数。</summary>
+    public long BufferedMs => 0;
 }
