@@ -435,15 +435,15 @@ public partial class MainActivity : Activity
                 {
                     var idx = DefaultChannelIndex();
                     ShowToast($"正在打开 {_channels[idx].Name}");
-                    if (_precheckEnabled)
+                    try
                     {
-                        try
-                        {
-                            var warm = new ChannelWarmer(_resolver).WarmChannelAsync(_channels[idx]); // 预检先焐热取票缓存
-                            await Task.WhenAny(warm, Task.Delay(15_000)); // 预热超时照常进默认台
-                        }
-                        catch (Exception ex) { CrashNet.Record($"[Boot] 预热未完成照常进默认台：{ex.Message}"); }
+                        // 默认台焐热：老板令 2026-11-15「每次开机后台自动优先预热默认频道」——
+                        // 移出预检开关条件，每次启动链路无条件焐热（全量预热/邻台预取仍随预检开关同起同停）；
+                        // 出画前提示即上方「正在打开 X」信息条，已有不必另造。
+                        var warm = new ChannelWarmer(_resolver).WarmChannelAsync(_channels[idx]);
+                        await Task.WhenAny(warm, Task.Delay(15_000)); // 预热超时照常进默认台
                     }
+                    catch (Exception ex) { CrashNet.Record($"[Boot] 预热未完成照常进默认台：{ex.Message}"); }
                     if (!_onPlayerPage) PlayAt(idx); // 用户已手动进台不抢
                 }
                 catch (Exception ex) { CrashNet.Record($"[Boot] 开机链路异常照常进默认台：{ex.Message}"); }
