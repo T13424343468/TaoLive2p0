@@ -557,7 +557,7 @@ public partial class MainActivity
     private static readonly int[] AdvGateSteps = { 1, 2, 3, 5, 8, 12 };
     private static readonly int[] AdvReprobeMinSteps = { 1, 2, 5, 10, 15 };
     private static readonly int[] AdvCacheSecSteps = { 15, 30, 60, 120, 300 };
-    private static readonly int[] AdvRetrySecSteps = { 30, 60, 120, 300, 600 }; // 起步；封顶恒 2 小时
+    private static readonly int[] AdvRetrySecSteps = { 30, 60, 120, 300, 600 }; // 起步；封顶 16 分钟（AdvancedTuning.DefaultRetryMaxMs 口径）
 
     private static int NextStep(int[] steps, int current)
     {
