@@ -28,11 +28,21 @@ public sealed class PlaybackSession
     // 墙钟（StartedAtUtc 等）仅留展示与台账，开机校时跳变不再误触/漏触看门狗。
     private long? _bufferingSinceMs;
     private long? _reconnectingSinceMs;
+    // vc67 进度感知看门狗账：起播/重灌期按内核 BufferedMs 读数是否增长区分「死源」与「慢灌源」——
+    // 死源零增长快切（#74 的 3 秒保留）；慢灌源（缓冲在涨但到不了门槛）给满放宽窗，不烧源队列。
+    // vc66 真机实锤：3 秒窗 < 5 秒首帧门槛，慢网永远到不了 READY 就被切，5 条线 15 秒烧光→全线路不可达。
+    private long _watchdogLastBufferedMs;
+    private long? _lastBufferProgressAtMs;
     // 预防性换源账（老板令 #24）：库存跌破线连续两拍（间隔≥1 秒）即主动切备线，不等卡流 15 秒。
     // 单调钟记账；0 读数按「无读数」不判趋势（IPlayer 契约），冷却窗防横跳。
     private int _lowInventoryRounds;
     private long _lowInventoryLastAtMs;
     private long? _lastFailoverAtMs; // 可空：无账=从未切过，不占冷却窗（初值 0 会把开机头 60 秒全锁死）
+    // vc67 预防介入上限：慢网盒子（带宽<流码率）库存常态低位，预防切换每冷却窗烧一条线，
+    // 几分钟烧光全队列→「出音一会又信号中断，全线路不可达」。上限内坏线照切；到顶后预防退场，
+    // 真卡流交看门狗（进度感知窗）与内核报错自救——画面持续低库存抖动也好过切到全线路不可达。
+    private int _proactiveCount;
+    public const int ProactiveCapPerChannel = 3;
 
     public PlaybackSession(IPlayer player, IClock clock)
     {
@@ -145,6 +155,12 @@ public sealed class PlaybackSession
             StartedAtUtc = _clock.UtcNow;
             _bufferingSinceMs = _clock.NowMs;
         }
+        if (next == PlaybackState.Buffering || next == PlaybackState.Reconnecting)
+        {
+            // vc67：进起播/重灌期即清进度账——新源从头采样，死源快切口径不被上一源的陈账污染
+            _watchdogLastBufferedMs = 0;
+            _lastBufferProgressAtMs = null;
+        }
         if (next != PlaybackState.Reconnecting)
         {
             _reconnectingSinceMs = null;
@@ -189,6 +205,7 @@ public sealed class PlaybackSession
         _endpointIndex = _queue.FindIndex(s => s.Url == p.Endpoint.Url);
         if (_endpointIndex < 0) _endpointIndex = 0; // 未入队端点（闪退镜黄④ 11-15）：记账归 0，防 -1 越界 TryFailover
         _preferLowLatency = p.PreferLowLatency;
+        _proactiveCount = 0; // vc67：新一轮起播（含 OK 重试）重给预防介入预算
         Transition(PlaybackState.Buffering, "start requested");
         _player.Play(p);
         ReattachSurface();
@@ -225,6 +242,7 @@ public sealed class PlaybackSession
         if (QueueOrderer is { } orderer) _queue = orderer(channel, _queue).ToList(); // #74 健康排序：备源入队后整体重排，死源沉底
         _endpointIndex = 0;
         FailoverCount = 0;
+        _proactiveCount = 0; // vc67：换台重给预防介入预算
         _stallTimes.Clear(); // 欠载趋势账随换台清零（老板令 #26）：账只记本台画质，不跟人走
         Transition(PlaybackState.Buffering, "change channel");
         _player.Play(new PlaybackParams(channel, _queue[0], _preferLowLatency));
@@ -257,6 +275,7 @@ public sealed class PlaybackSession
         }
         _endpointIndex = endpointIndex;
         FailoverCount = 0;
+        _proactiveCount = 0; // vc67：手动换线=老板意图，重给预防介入预算
         Transition(PlaybackState.Buffering, "manual line switch");
         _player.Play(new PlaybackParams(_channel, _queue[endpointIndex], _preferLowLatency));
         ReattachSurface();
@@ -343,30 +362,67 @@ public sealed class PlaybackSession
     /// <summary>
     /// 看门狗泵：缓冲超时或卡流超时即断流自救。返回是否触发了迁移。
     /// 生产由壳层定时器或管理器 Tick 驱动，测试注入 FixedClock 后手动泵。判定一律按单调钟。
+    /// vc67 进度感知：死源（内核 BufferedMs 零增长）按 #74 的 3 秒快切不动；
+    /// 慢灌源（读数在涨、到不了门槛）放宽到首帧门槛×3（起播）/重入门槛×2（重灌）——
+    /// vc66 真机实锤：3 秒窗 < 5 秒首帧门槛是数学死局，慢网烧光源队列出「全线路不可达」。
     /// </summary>
     public bool CheckWatchdog()
     {
+        long nowMs = _clock.NowMs;
+        SampleBufferProgress(nowMs);
         if (_state == PlaybackState.Buffering
-            && _bufferingSinceMs is { } started
-            && _clock.NowMs - started >= (long)OpenTimeout.TotalMilliseconds)
+            && _bufferingSinceMs is { } started)
         {
-            // 看门狗打点（埋点补充 2026-11-15）：此前看门狗触发完全静默，真机只能看到「换源」结果看不到因——
-            // 补触发原因+已等时长，断流自救链路（含误杀嫌疑对账）可查。
-            SessionTrace.Emit($"[看门狗] {DescribeChannel()} 起播超时 {_clock.NowMs - started}ms≥{(int)OpenTimeout.TotalMilliseconds}ms，转备源自救（原线路 {CurrentLineIndex + 1}/{LineCount}）");
-            Transition(PlaybackState.Failed, "open timeout");
-            TryFailover("open timeout");
-            return true;
+            var windowMs = WatchdogWindowMs(nowMs, SlowStartWindow);
+            if (nowMs - started >= windowMs)
+            {
+                // 看门狗打点（埋点补充 2026-11-15）：此前看门狗触发完全静默，真机只能看到「换源」结果看不到因——
+                // 补触发原因+已等时长，断流自救链路（含误杀嫌疑对账）可查。vc67：带上进度口径（快切/慢灌让路）。
+                SessionTrace.Emit($"[看门狗] {DescribeChannel()} 起播超时 {nowMs - started}ms≥{windowMs}ms，转备源自救（原线路 {CurrentLineIndex + 1}/{LineCount}，{_watchdogLastBufferedMs}ms 存货）");
+                Transition(PlaybackState.Failed, "open timeout");
+                TryFailover("open timeout");
+                return true;
+            }
         }
         if (_state == PlaybackState.Reconnecting
-            && _reconnectingSinceMs is { } stalled
-            && _clock.NowMs - stalled >= (long)OpenTimeout.TotalMilliseconds)
+            && _reconnectingSinceMs is { } stalled)
         {
-            SessionTrace.Emit($"[看门狗] {DescribeChannel()} 卡流超时 {_clock.NowMs - stalled}ms≥{(int)OpenTimeout.TotalMilliseconds}ms，转备源自救（原线路 {CurrentLineIndex + 1}/{LineCount}）");
-            Transition(PlaybackState.Failed, "stall timeout");
-            TryFailover("stall timeout");
-            return true;
+            var windowMs = WatchdogWindowMs(nowMs, SlowRecoveryWindow);
+            if (nowMs - stalled >= windowMs)
+            {
+                SessionTrace.Emit($"[看门狗] {DescribeChannel()} 卡流超时 {nowMs - stalled}ms≥{windowMs}ms，转备源自救（原线路 {CurrentLineIndex + 1}/{LineCount}，{_watchdogLastBufferedMs}ms 存货）");
+                Transition(PlaybackState.Failed, "stall timeout");
+                TryFailover("stall timeout");
+                return true;
+            }
         }
         return false;
+    }
+
+    /// <summary>vc67 慢灌放宽窗（起播）：首帧门槛 5s×3=15 秒——带宽 ≥1/3 流码率即灌得到，慢网盒子让够路。</summary>
+    public static readonly TimeSpan SlowStartWindow =
+        TimeSpan.FromMilliseconds(PrefetchCurve.FirstFrameGate.TotalMilliseconds * 3);
+
+    /// <summary>vc67 慢灌放宽窗（重灌）：卡后重入门槛 12s×2=24 秒——重灌要满 12 秒媒体，带宽 ≥1/2 流码率即灌得到。</summary>
+    public static readonly TimeSpan SlowRecoveryWindow =
+        TimeSpan.FromMilliseconds(PrefetchCurve.StartupThreshold.TotalMilliseconds * 2);
+
+    /// <summary>进度采样（vc67）：内核 BufferedMs 读数有增长即记时刻——3 秒内有增长算「慢灌在走」。</summary>
+    private void SampleBufferProgress(long nowMs)
+    {
+        long buffered = _player.BufferedMs;
+        if (buffered > _watchdogLastBufferedMs)
+        {
+            _watchdogLastBufferedMs = buffered;
+            _lastBufferProgressAtMs = nowMs;
+        }
+    }
+
+    /// <summary>vc67 看门狗窗：3 秒内有缓冲增长→放宽窗（慢灌让路）；零增长→#74 的 3 秒快切。</summary>
+    private long WatchdogWindowMs(long nowMs, TimeSpan slowWindow)
+    {
+        bool flowing = _lastBufferProgressAtMs is { } t && nowMs - t < 3_000;
+        return (long)Math.Max(OpenTimeout.TotalMilliseconds, flowing ? slowWindow.TotalMilliseconds : 0);
     }
 
     /// <summary>预防性换源库存线（老板令 #24）：Playing 期库存跌破起播下限（BufferInventory.TargetMs=7 秒）
@@ -402,6 +458,12 @@ public sealed class PlaybackSession
             _lowInventoryRounds = 0; // 冷却窗内只攒账不切，防坏线连切横跳
             return false;
         }
+        if (_proactiveCount >= ProactiveCapPerChannel)
+        {
+            // vc67：预防介入到顶——本台不再预防性切线（慢网烧线病根），真卡流交看门狗与内核报错
+            _lowInventoryRounds = 0;
+            return false;
+        }
 
         // 判据②（老板令 #26）：滚动窗内卡流满 3 次，账内即时坐实，不需第二拍等趋势
         _stallTimes.RemoveAll(t => nowMs - t >= StallChurnWindow.TotalMilliseconds);
@@ -424,6 +486,7 @@ public sealed class PlaybackSession
             return false; // 两条判据都没坐实：单次抖动不切，等趋势
         }
         _lowInventoryRounds = 0;
+        _proactiveCount++; // vc67：预防介入记账，到顶退场（慢网烧线病根）
         // 预防打点（老板令 #24/#26）：主动介入的账面依据——命中哪条判据、账面多少、切前是第几路线
         string basis = churnTripped
             ? $"滚动窗 {StallChurnWindow.TotalMinutes:0}min 内卡流 {_stallTimes.Count} 次（满 {StallChurnThreshold} 次）"

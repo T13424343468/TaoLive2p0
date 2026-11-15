@@ -413,7 +413,7 @@ public sealed class ExoPlayerPlayer : IPlayer
             if (_lastBwLogMs >= 0 && !bigMove && !intervalDue) return;
             _lastBwLogMs = now;
             _lastBwBitrate = bitrateEstimate;
-            Report($"[带宽] 估速 {bitrateEstimate / 8 / 1000} kbps（{Ch()}，累计 {totalBytesLoaded / 1024}KB/{totalLoadTimeMs}ms）");
+            Report($"[带宽] 估速 {bitrateEstimate / 1000} kbps（{Ch()}，累计 {totalBytesLoaded / 1024}KB/{totalLoadTimeMs}ms）"); // vc67 修：原 /8/1000 实为 kB/s 标 kbps，差 8 倍口径
         }
     }
 

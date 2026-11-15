@@ -101,6 +101,84 @@ public class SessionFailoverTests
     }
 
     [Fact]
+    public void Watchdog_slow_filling_source_gets_extended_window()
+    {
+        // vc67 进度感知：慢灌源（内核存货在涨、到不了 5 秒首帧门槛）3 秒不被切，
+        // 放宽到首帧门槛×3=15 秒——vc66 真机实锤 3 秒窗<5 秒门槛是数学死局，烧光队列出「全线路不可达」。
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer();
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8");
+        session.ChangeChannel(ch);
+
+        player.BufferedMs = 1_000; // 缓冲在灌（>0 有增长）
+        clock.Advance(TimeSpan.FromSeconds(3));
+        Assert.False(session.CheckWatchdog()); // 3 秒窗不让路，慢灌源不切
+        Assert.Equal(PlaybackState.Buffering, session.State);
+        Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url);
+
+        player.BufferedMs = 2_000; // 继续在灌
+        clock.Advance(TimeSpan.FromSeconds(9)); // 累计 12s < 15s 放宽窗
+        Assert.False(session.CheckWatchdog());
+        Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url);
+
+        clock.Advance(TimeSpan.FromSeconds(6)); // 累计 18s ≥ 15s：放宽窗也到头，该切还得切
+        Assert.True(session.CheckWatchdog());
+        Assert.Equal("https://s/b.m3u8", session.CurrentEndpoint?.Url);
+    }
+
+    [Fact]
+    public void Watchdog_dead_source_still_cut_fast_at_three_seconds()
+    {
+        // vc67 口径保留：死源（零增长）仍按 #74 的 3 秒快切，切台提速不回退。
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer(); // BufferedMs 恒 0：零增长
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8");
+        session.ChangeChannel(ch);
+
+        clock.Advance(TimeSpan.FromSeconds(2));
+        Assert.False(session.CheckWatchdog()); // 2 秒不切
+        clock.Advance(TimeSpan.FromSeconds(1));
+        Assert.True(session.CheckWatchdog()); // 满 3 秒即切
+        Assert.Equal("https://s/b.m3u8", session.CurrentEndpoint?.Url);
+    }
+
+    [Fact]
+    public void Proactive_failover_capped_per_channel_round()
+    {
+        // vc67 预防介入上限：慢网盒子库存常态低位，预防切换每冷却窗烧一条线，几分钟烧光全队列
+        // →「出音一会又信号中断」。上限 3 次；到顶后预防退场，真卡流交看门狗与内核报错。
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer { BufferedMs = 5_000 }; // 库存常态低位（<7 秒线），慢网盒子实况
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1",
+            "https://s/a.m3u8", "https://s/b.m3u8", "https://s/c.m3u8", "https://s/d.m3u8", "https://s/e.m3u8");
+        session.ChangeChannel(ch);
+
+        for (int i = 0; i < 3; i++)
+        {
+            player.RaiseFirstFrame(); // 回 Playing（每次预防切线后）
+            clock.Advance(TimeSpan.FromSeconds(2));
+            session.CheckProactiveFailover(); // 攒第 1 拍
+            clock.Advance(TimeSpan.FromSeconds(2));
+            session.CheckProactiveFailover(); // 第 2 拍坐实 → 切线
+            clock.Advance(TimeSpan.FromSeconds(61)); // 过冷却窗
+        }
+
+        Assert.Equal(3, session.FailoverCount);
+        Assert.Equal("https://s/d.m3u8", session.CurrentEndpoint?.Url);
+
+        // 第 4 次：预算用尽，预防退场——库存再低也不切
+        player.RaiseFirstFrame();
+        clock.Advance(TimeSpan.FromSeconds(2));
+        Assert.False(session.CheckProactiveFailover());
+        clock.Advance(TimeSpan.FromSeconds(2));
+        Assert.False(session.CheckProactiveFailover());
+        Assert.Equal("https://s/d.m3u8", session.CurrentEndpoint?.Url);
+    }
+
+    [Fact]
     public void Late_error_after_exhaustion_is_ignored_until_retry()
     {
         var player = new LoggingPlayer();
