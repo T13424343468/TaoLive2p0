@@ -632,7 +632,10 @@ public sealed class PlaybackSession
             _ticketRetrySinceMs = _clock.NowMs;
             invalidate(retryChannel.Id, badEndpoint);
             SessionTrace.Emit($"[坏票] {DescribeChannel()} 线路{CurrentLineIndex + 1} HTTP 状态错（{code}），作废票据原地换新票重试（宽限窗 {TicketRetryGrace.TotalSeconds:0}s）");
+            // 迁移次序照 TryFailover 口径：Failed 落账后必须回 Buffering 起新一轮——
+            // 不回 Buffering 状态机停在 Failed，看门狗失灵、后续报错被终态守卫吞掉（全测 2 例红实锤）
             Transition(PlaybackState.Failed, $"bad ticket {code}");
+            Transition(PlaybackState.Buffering, "bad ticket retry");
             _player.Play(new PlaybackParams(retryChannel, badEndpoint, _preferLowLatency));
             ReattachSurface();
             return;

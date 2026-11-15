@@ -44,7 +44,9 @@ jobs:
       - name: Install android workload
         run: dotnet workload install android
       - name: 逻辑全测（xUnit 全绿才算过，零错零警口径）
-        run: dotnet test src/TaoLive.Tests/TaoLive.Tests.csproj -c Release --nologo | tee run-cases.log
+        run: |
+          set -o pipefail # 闸门硬闸：tee 吞退出码会假绿（2026-11-16 实锤 2 红报绿），dotnet test 非零必须红
+          dotnet test src/TaoLive.Tests/TaoLive.Tests.csproj -c Release --nologo | tee run-cases.log
       - name: 用例台账落盘
         uses: actions/upload-artifact@v4
         with:
