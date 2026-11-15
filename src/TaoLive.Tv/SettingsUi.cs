@@ -6,6 +6,7 @@ using Android.Views;
 using Android.Views.Animations;
 using Android.Widget;
 using TaoLive.Foundation;
+using TaoLive.Session;
 
 namespace TaoLive.Tv;
 
