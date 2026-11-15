@@ -12,6 +12,9 @@ namespace TaoLive.Players;
 /// 事件映射：
 ///   内核进入 Buffering → OnBufferingStart；
 ///   内核进入 Ready → OnBufferingEnd + OnFirstFrame（每次 Play 仅一次）；
+///   内核进入 Ended → 视同卡流 OnBufferingStart（R2-72 发现即改：直播流被服务端掐断时内核进
+///   ENDED，此前未映射 → 无错误回调、无卡流事件，状态机停在 Playing，画面冻结且看门狗/
+///   备源自救永不触发——冻画黑洞。直播语义 ENDED=流断，交会话卡流路径自救）；
 ///   OnPlayerError → OnError（终态，直到下一次 Play）。
 /// </summary>
 public sealed class ExoPlayerPlayer : IPlayer
@@ -259,7 +262,8 @@ public sealed class ExoPlayerPlayer : IPlayer
 
     /// <summary>
     /// 内核事件桥：实现 Media3 Player.Listener 绑定接口（IPlayerListener，全默认方法，
-    /// 只重写契约需要的两个回调，其余按契约未定义语义不映射）。
+    /// 只重写契约需要的两个回调；OnPlaybackStateChanged 映射 Buffering/Ready/Ended 三态，
+    /// Ended 视同卡流上报（R2-72 发现即改），其余内核态按契约未定义语义不映射）。
     /// </summary>
     private sealed class Forwarder : Java.Lang.Object, AndroidX.Media3.Common.IPlayerListener
     {
@@ -276,6 +280,13 @@ public sealed class ExoPlayerPlayer : IPlayer
                     break;
                 case AndroidX.Media3.Common.BasePlayer.InterfaceConsts.StateReady:
                     _owner.HandleReady();
+                    break;
+                case AndroidX.Media3.Common.BasePlayer.InterfaceConsts.StateEnded:
+                    // R2-72 发现即改：直播流被服务端掐断时内核进 ENDED，此前未映射——
+                    // 无错误回调、无卡流事件，状态机停在 Playing，画面冻结且看门狗/备源自救永不触发（冻画黑洞）。
+                    // 直播语义 ENDED=流断：视同卡流上报，交会话层卡流路径（NotifyStalled→Reconnecting→超时切备源）。
+                    // 用户主动 Stop 不产生 ENDED（ExoPlayer stop 保持状态）； stray 事件由 NotifyStalled 的 Playing 守卫挡住。
+                    _owner.HandleBufferingStarted();
                     break;
             }
         }
