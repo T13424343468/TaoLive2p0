@@ -22,7 +22,7 @@ namespace TaoLive.Tv;
 /// 界面样式一期保留（纯文字列表，无花哨横幅）。label=TaoLive 特征关见 AndroidManifest。
 /// </summary>
 [Activity(Label = "TaoLive", MainLauncher = true)]
-public class MainActivity : Activity
+public partial class MainActivity : Activity
 {
     private IServiceProvider _services = default!;
     private PlaybackSessionManager _manager = default!;
@@ -47,6 +47,20 @@ public class MainActivity : Activity
     protected override void OnCreate(Bundle? savedInstanceState)
     {
         base.OnCreate(savedInstanceState);
+
+        // 持久化设置（vc53 口径）：UI 缩放档 + 后台预热开关 + 进阶调优旋钮，启动装载
+        //（缩放档须在 BuildRoot 前就位，全套令牌按档位重算）
+        _prefs = GetSharedPreferences("taolive_prefs", FileCreationMode.Private)!;
+        UiScale.Factor = _prefs.GetFloat("ui_scale", 4f / 9f);
+        _warmupEnabled = _prefs.GetBoolean("warmup_enabled", true);
+        AdvancedTuning.Apply(
+            _prefs.GetInt("adv_fail_gate", AdvancedTuning.DefaultFailGate),
+            _prefs.GetInt("adv_reprobe_min", 5) * 60_000L,
+            _prefs.GetInt("adv_cache_sec", AdvancedTuning.DefaultListCacheSec),
+            _prefs.GetInt("adv_retry_base_sec", 120) * 1000L,
+            _prefs.GetInt("adv_retry_max_min", 120) * 60_000L,
+            _prefs.GetInt("adv_proxy_port", AdvancedTuning.DefaultProxyPort));
+        CrashNet.Install(); // 未捕获异常先落日志再放行（崩溃日志页可查可清）
 
         var resolver = new TicketResolver();
 
@@ -75,8 +89,9 @@ public class MainActivity : Activity
             .AddSingleton<IMainThreadDispatcher>(new AndroidMainThreadDispatcher(_main))
             .AddTaoLiveSession(KernelFactory, ch =>
             {
-                // 换台即触发邻台预取（火车道让路：首帧未落地铁道自动门控，画面平稳优先）
-                _ = Task.Run(() => prefetcher.PrefetchNeighborsAsync(ch, _channels));
+                // 换台即触发邻台预取（火车道让路：首帧未落地铁道自动门控，画面平稳优先）；
+                // 后台预热开关关闭时同步停——开关真实生效，不留死旋钮
+                if (_warmupEnabled) _ = Task.Run(() => prefetcher.PrefetchNeighborsAsync(ch, _channels));
             })
             .BuildServiceProvider();
         _manager = _services.GetRequiredService<PlaybackSessionManager>();
@@ -86,9 +101,16 @@ public class MainActivity : Activity
         // 只收当前会话事件（热备攒流/换台竞速不掺内部，画面不受热备起播影响——方案书 v5 口径）
         _manager.SessionStateChanged += (_, e) =>
         {
+            // 逐次换源打点：所有会话（含热备）均落运行日志（自诊断/崩溃日志统计口径）
+            e.Session.Failover -= OnSessionFailover;
+            e.Session.Failover += OnSessionFailover;
             if (e.Session != _manager.Current) return;
             if (e.State == PlaybackState.Failed)
+            {
+                // 失败打点接真实事件：全线路不可达落运行日志
+                CrashNet.Record($"[ConnectFailure] {e.Session.CurrentChannel?.Name ?? "未知频道"} 全线路不可达");
                 ShowToast(TaoLive.Session.SwitchHud.AllLinesFailed);
+            }
             else if (e.State == PlaybackState.Buffering)
             {
                 // 换台过渡：铺底色遮罩（一期 SwitchRevealPolicy 口径，新流就绪才亮）
@@ -105,11 +127,15 @@ public class MainActivity : Activity
         };
 
         // 开机预热（W8：取票口预取进 5 分钟缓存，换台零等待；退避账挂账不烧请求）
-        _ = Task.Run(async () =>
+        // 后台预热开关关闭时跳过（设置面板真实开关，不留死旋钮）
+        if (_warmupEnabled)
         {
-            try { await new ChannelWarmer(resolver).WarmAllAsync(ChannelTable.Build()); }
-            catch { /* 预热失败不影响播放 */ }
-        });
+            _ = Task.Run(async () =>
+            {
+                try { await new ChannelWarmer(resolver).WarmAllAsync(ChannelTable.Build()); }
+                catch { /* 预热失败不影响播放 */ }
+            });
+        }
 
         Window!.AddFlags(WindowManagerFlags.KeepScreenOn);
         BuildRoot();
@@ -263,6 +289,98 @@ public class MainActivity : Activity
 
     public override bool OnKeyDown([GeneratedEnum] Keycode keyCode, KeyEvent? e)
     {
+        // TCL 设置键厂商码（真机实测 4077）：单击呼出软件设置面板、长按跳系统设置（v1.0.8 拍板口径）。
+        // 单击/长按在 KeyUp / OnKeyLongPress 分流，这里只消费按键并复位长按标记。
+        if ((int)keyCode == 4077)
+        {
+            _settingsLongFired = false;
+            return true;
+        }
+
+        // 进阶调优面板：返回/菜单=关闭；确认=点当前行；
+        // 方向键必须放行（return false）——系统焦点导航在 Activity 消费之后才走，这里吞掉光标就冻结（真机实锤 1.0.9）；
+        // 其余键不穿透，防误触底层键位。
+        if (_advOverlay != null)
+        {
+            switch (keyCode)
+            {
+                case Keycode.Back or Keycode.Menu:
+                    CloseAdvancedPanel();
+                    return true;
+                case Keycode.DpadCenter or Keycode.Enter:
+                    (CurrentFocus as TextView)?.PerformClick();
+                    return true;
+                case Keycode.DpadUp or Keycode.DpadDown or Keycode.DpadLeft or Keycode.DpadRight:
+                    return false; // 交还系统走焦点导航（含面板内行间移动与光标行滚入可视区）
+                default:
+                    return true; // 其余不穿透
+            }
+        }
+
+        // 自诊断面板：返回/菜单=关闭；上下=滚动（单按近一屏、长按连滚）；左右=两钮移焦点；确认=点当前钮
+        if (_diagOverlay != null)
+        {
+            switch (keyCode)
+            {
+                case Keycode.Back or Keycode.Menu:
+                    CloseDiagPanel();
+                    return true;
+                case Keycode.DpadUp or Keycode.DpadDown when _diagScroll != null:
+                {
+                    int dir = keyCode == Keycode.DpadUp ? -1 : 1;
+                    if (e is { RepeatCount: 0 })
+                        _diagScroll.SmoothScrollBy(0, dir * (int)(_diagScroll.Height * 0.8f));
+                    else
+                        _diagScroll.ScrollBy(0, dir * Dp(56));
+                    return true;
+                }
+                case Keycode.DpadLeft or Keycode.DpadRight when _diagExportBtn != null && _diagCloseBtn != null:
+                    (CurrentFocus == _diagExportBtn ? _diagCloseBtn : _diagExportBtn).RequestFocus();
+                    return true;
+                case Keycode.DpadCenter or Keycode.Enter:
+                    (CurrentFocus as TextView)?.PerformClick();
+                    return true;
+                default:
+                    return true; // 不穿透，防误触底层键位
+            }
+        }
+
+        // 崩溃日志面板（自管全屏）：键位同自诊断——上下滚日志、左右移两钮、确认点当前钮、其余吞掉
+        if (_crashOverlay != null)
+        {
+            switch (keyCode)
+            {
+                case Keycode.Back or Keycode.Menu:
+                    CloseCrashPanel();
+                    return true;
+                case Keycode.DpadUp or Keycode.DpadDown when _crashScroll != null:
+                {
+                    int dir = keyCode == Keycode.DpadUp ? -1 : 1;
+                    if (e is { RepeatCount: 0 })
+                        _crashScroll.SmoothScrollBy(0, dir * (int)(_crashScroll.Height * 0.8f));
+                    else
+                        _crashScroll.ScrollBy(0, dir * Dp(56));
+                    return true;
+                }
+                case Keycode.DpadLeft or Keycode.DpadRight when _crashCleanBtn != null && _crashCloseBtn != null:
+                    (CurrentFocus == _crashCleanBtn ? _crashCloseBtn : _crashCleanBtn).RequestFocus();
+                    return true;
+                case Keycode.DpadCenter or Keycode.Enter:
+                    (CurrentFocus as TextView)?.PerformClick();
+                    return true;
+                default:
+                    return true; // 不穿透，防误触底层键位
+            }
+        }
+
+        // 设置面板开着：返回/菜单收起，其余交给面板焦点导航；左右键不呼列表不换台
+        if (_settingsPanelOpen)
+        {
+            if (keyCode is Keycode.Back or Keycode.Menu) { CloseSettingsPanel(); return true; }
+            if (keyCode is Keycode.DpadLeft or Keycode.DpadRight) return true;
+            return base.OnKeyDown(keyCode, e);
+        }
+
         switch (keyCode)
         {
             case Keycode.DpadUp when _onPlayerPage:
@@ -288,8 +406,26 @@ public class MainActivity : Activity
         return base.OnKeyDown(keyCode, e);
     }
 
+    public override bool OnKeyUp([GeneratedEnum] Keycode keyCode, KeyEvent? e)
+    {
+        // 设置键单击在 KeyUp 分流（KeyDown 只复位长按标记）
+        if ((int)keyCode == 4077)
+        {
+            if (!_settingsLongFired) ToggleSettingsPanel();
+            return true;
+        }
+        return base.OnKeyUp(keyCode, e);
+    }
+
     public override bool OnKeyLongPress([GeneratedEnum] Keycode keyCode, KeyEvent? e)
     {
+        // 设置键长按直达系统设置（三级降级：对口设置页→系统总入口→文字指引）
+        if ((int)keyCode == 4077)
+        {
+            _settingsLongFired = true;
+            OpenSystemSettings();
+            return true;
+        }
         if (keyCode is Keycode.DpadCenter or Keycode.Enter)
         {
             if (!_onPlayerPage)
