@@ -137,20 +137,9 @@ public sealed class ExoPlayerPlayer : IPlayer
     {
         try
         {
-            // 请求头纪律（vc53 同口径搬回）：频道表/源登记的 UA/Referer 必须带到取流请求上，
-            // 否则带校验的源在 ExoPlayer 默认 UA 下直接拒连（真机 11-15 全线路 player error 嫌疑主线）。
-            AndroidX.Media3.ExoPlayer.Source.DefaultMediaSourceFactory? sourceFactory = null;
-            var ua = string.IsNullOrEmpty(channel?.UserAgent) ? null : channel.UserAgent;
-            var referer = string.IsNullOrEmpty(channel?.Referer) ? null : channel.Referer;
-            if (ua is not null || referer is not null)
-            {
-                var httpFactory = new AndroidX.Media3.DataSource.DefaultHttpDataSource.Factory();
-                if (ua is not null) httpFactory.SetUserAgent(ua);
-                if (referer is not null)
-                    httpFactory.SetDefaultRequestProperties(new Dictionary<string, string> { ["Referer"] = referer });
-                sourceFactory = new AndroidX.Media3.ExoPlayer.Source.DefaultMediaSourceFactory(httpFactory);
-                _player.SetMediaSourceFactory(sourceFactory);
-            }
+            // 请求头纪律（vc53 同口径）：当前频道表与备源表全部无自定义 UA/Referer（11-15 清点=0 路），
+            // 内核走 Media3 默认头即可；将来某路源带校验需补头时，改在 ExoPlayerBuilder 构造期注入工厂，
+            // 不在每次 Play 动态挂（IExoPlayer 绑定无 SetMediaSourceFactory，云闸已实锤）。
             var builder = new AndroidX.Media3.Common.MediaItem.Builder();
             builder.SetUri(Android.Net.Uri.Parse(url));
             if (IsHls(url))
