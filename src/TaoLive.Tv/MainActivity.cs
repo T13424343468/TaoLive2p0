@@ -519,9 +519,11 @@ public partial class MainActivity : Activity
 
     private void BuildRoot()
     {
-        // 水墨主题底（vc53：TaoPalette 水墨暖宣浅；视频首帧前露底即暖宣，不露黑）
+        // 水墨主题底（#65 老板令 2026-11-15：改水墨深底 #2B333B，与窗底/切台遮罩同色——
+        // 开机到首帧之间露底不再白屏，跟切台一样黑底+延迟亮牌 Loading，首帧出画自动撤；
+        // 原「暖宣浅底不露黑」口径废止：真机白屏几秒实锤比黑更难看）
         _root = new FrameLayout(this);
-        _root.SetBackgroundColor(Color.ParseColor("#F7F5EE"));
+        _root.SetBackgroundColor(Color.ParseColor("#2B333B"));
 
         _toastHide = new Java.Lang.Runnable(() =>
             _toast.Visibility = ViewStates.Invisible);
