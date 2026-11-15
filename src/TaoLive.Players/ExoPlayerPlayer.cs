@@ -454,9 +454,11 @@ public sealed class ExoPlayerPlayer : IPlayer
     }
 
     /// <summary>HLS 判据（vc73 审查清零 P2 修）：按 URI 路径判断，不再对整 URL 做子串匹配——
-    /// query 带 ".m3u8" 的非 HLS 地址（如带 .m3u8 参数的防盗链签名）此前会被误设 HLS MIME。</summary>
-    private static bool IsHls(Android.Net.Uri uri) =>
-        (uri.Path ?? "").EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase);
+    /// query 带 ".m3u8" 的非 HLS 地址（如带 .m3u8 参数的防盗链签名）此前会被误设 HLS MIME。
+    /// 参数收 nullable：不同版本安卓 binding 对 Uri.Parse 可空注解不一致（云闸 11-16 实锤），
+    /// 收 nullable + 空安全判定，两侧编译口径都过。</summary>
+    private static bool IsHls(Android.Net.Uri? uri) =>
+        (uri?.Path ?? "").EndsWith(".m3u8", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// 内核事件桥：实现 Media3 Player.Listener 绑定接口（IPlayerListener，全默认方法，
