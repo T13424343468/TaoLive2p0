@@ -154,6 +154,32 @@ public class SessionTests
     }
 
     [Fact]
+    public void Recovered_stream_returns_to_playing_without_failover()
+    {
+        // 恢复沿（真机反馈批#5 修 2026-11-15）：Reconnecting 中内核恢复出帧（OnBufferingEnd）即回 Playing，
+        // 看门狗不误杀——此前矩阵无恢复沿，短卡流自愈后 15 秒仍被切备源（真机「断流后一直黑屏」根因）。
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer();
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8");
+        session.ChangeChannel(ch);
+        player.RaiseFirstFrame();
+        Assert.Equal(PlaybackState.Playing, session.State);
+
+        player.RaiseBufferingStart(); // 播放中短卡流
+        Assert.Equal(PlaybackState.Reconnecting, session.State);
+
+        player.RaiseBufferingEnd(); // 画面自愈恢复出帧
+        Assert.Equal(PlaybackState.Playing, session.State);
+        Assert.Equal(0, session.FailoverCount);
+        Assert.Single(player.PlayedUrls); // 未发生换源，好画面保住
+
+        clock.Advance(TimeSpan.FromSeconds(60)); // 看门狗泵过：Playing 态无超时账可判，不误杀
+        Assert.False(session.CheckWatchdog());
+        Assert.Equal(PlaybackState.Playing, session.State);
+    }
+
+    [Fact]
     public void Superseded_session_stops_responding_to_player_errors()
     {
         var player = new LoggingPlayer();

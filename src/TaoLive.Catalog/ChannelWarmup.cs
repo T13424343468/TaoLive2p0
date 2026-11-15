@@ -131,6 +131,12 @@ public sealed class ChannelWarmer
     /// <summary>让路间隔：预热请求之间最小间隔（生产 1500ms，测试可调小快拍）。</summary>
     public int MinGapOverrideMs { get; set; } = 1_500;
 
+    /// <summary>
+    /// 预热台账出口（埋点补充 2026-11-15）：壳层接 CrashNet 落运行台账；未接线为空操作。
+    /// 控量口径：源成功不逐条记（[取票] 侧已有缓存未命中成功账），只记源级失败（挂退避）与整台未就绪结论。
+    /// </summary>
+    public static Action<string>? Reporter { get; set; }
+
     public ChannelWarmer(TicketResolver resolver,
         SourceBackoffLedger? backoff = null,
         IReadOnlyDictionary<string, long>? lastRunMs = null,
@@ -167,7 +173,9 @@ public sealed class ChannelWarmer
             catch { resolved = null; }
             if (resolved is null)
             {
+                // 预热失败打点（埋点补充 2026-11-15）：源级失败+退避挂起可查，「缓存怎么是旧的/换台怎么没焐热」有账可对
                 _backoff.RecordLimited(sourceKey, nowMs);
+                Reporter?.Invoke($"[预热] {ch.Name} 源 {sourceKey} 预取失败，挂退避账（退避期内该源挂起不烧请求）");
             }
             else
             {
@@ -180,7 +188,12 @@ public sealed class ChannelWarmer
                 catch (OperationCanceledException) { return anyOk; }
             }
         }
-        return !hasWeb || anyOk;
+        var ready = !hasWeb || anyOk;
+        if (!ready)
+        {
+            Reporter?.Invoke($"[预热] {ch.Name} 本轮未就绪（Web 源全部失败或退避挂起）");
+        }
+        return ready;
     }
 
     /// <summary>整表预热（开机第一轮口径）：按台单顺序逐台预热，交给壳层后台 Task 驱动。</summary>

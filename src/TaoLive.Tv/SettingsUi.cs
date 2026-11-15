@@ -543,11 +543,18 @@ public partial class MainActivity
             if (line.Contains("[ConnectFailure]", StringComparison.Ordinal)) failCount++;
             else if (line.Contains("未捕获异常", StringComparison.Ordinal)) crashCount++;
         }
-        var startupLine = $"运行日志 {tail.Length / 1024}KB（截尾视图）· 取流失败 {failCount} 条 · 未捕获异常 {crashCount} 条";
+        var startupLine = $"运行日志 {LogSizeLabel(tail.Length)}（截尾视图）· 取流失败 {failCount} 条 · 未捕获异常 {crashCount} 条";
 
         return DiagLog.BuildSnapshot(versionLine, clockLine, networkLine, sessionLine, kernelLine, startupLine,
             DiagLog.RecentFailuresFromLog(tail, 10));
     }
+
+    /// <summary>
+    /// 运行日志大小显示口径（真机反馈批 2026-11-15 修）：原整除 1024，日志不足 1KB 显示「0KB」，
+    /// 与崩溃日志页「有内容」看似矛盾（实为同一文件同一账，纯显示口径）；改 KB 向上取整，空账明示「暂无日志」。
+    /// </summary>
+    private static string LogSizeLabel(int chars) =>
+        chars == 0 ? "0KB（暂无日志）" : $"{Math.Max(1, (int)Math.Ceiling(chars / 1024.0))}KB";
 
     // —— 进阶调优面板：旋钮全量可调 + 每项讲清作用 + 一键还原 ——
 

@@ -156,6 +156,7 @@ public sealed class PlaybackSessionManager
             && !string.Equals(oldSb.CurrentChannel?.Id, channel.Id, StringComparison.Ordinal)
             && !ReferenceEquals(oldSb, Current))
         {
+            SessionTrace.Emit($"[热备] 备台 {oldSb.CurrentChannel?.Name ?? oldSb.CurrentChannel?.Id ?? "?"} 让位（攒流 {_monotonicMs() - _standbySinceMs}ms 未接管），改备 {channel.Name}");
             oldSb.Supersede();
         }
         if (_sessions.TryGetValue(channel.Id, out var existing))
@@ -164,6 +165,7 @@ public sealed class PlaybackSessionManager
             existing.ChangeChannel(channel);
             Standby = existing;
             _standbySinceMs = _monotonicMs(); // 攒流超时账起算（v75）
+            SessionTrace.Emit($"[热备] 备台 {channel.Name} 起播攒流（会话表复用）");
             return existing;
         }
         var session = _sessionFactory();
@@ -174,6 +176,7 @@ public sealed class PlaybackSessionManager
         session.ChangeChannel(channel); // 无面起播：攒流到门槛线，不接管画面
         Standby = session;
         _standbySinceMs = _monotonicMs();
+        SessionTrace.Emit($"[热备] 备台 {channel.Name} 起播攒流（新会话）");
         return session;
     }
 
@@ -189,6 +192,8 @@ public sealed class PlaybackSessionManager
             && string.Equals(sb.CurrentChannel?.Id, channel.Id, StringComparison.Ordinal)
             && sb.State == PlaybackState.Playing)
         {
+            // 热切打点（埋点补充 2026-11-15）：攒流到接管的真实时长落账，换台快慢归因热备链路可查
+            SessionTrace.Emit($"[热备] 热切接管 {channel.Name}（攒流 {_monotonicMs() - _standbySinceMs}ms 后出画就绪）");
             // 新画面先挂面覆盖旧画面（同面后画覆盖先画，旧画面撑到让位不露黑）
             sb.AttachSurface(cur.SurfaceHandle);
             cur.Supersede();
@@ -200,6 +205,14 @@ public sealed class PlaybackSessionManager
         }
 
         // 冷切（W1 契约路径）：旧会话让位，目标会话从会话表复用或新建，然后起播。
+        // 冷切归因打点（埋点补充 2026-11-15）：目标台有热备但未达门槛（攒流中）即走冷切——
+        // 换台慢归因「热备没赶上」的关键账，攒流时长一并落账；无热备的普通冷切不记（正常路径控量）。
+        if (Standby is { } notReady
+            && string.Equals(notReady.CurrentChannel?.Id, channel.Id, StringComparison.Ordinal)
+            && notReady.State != PlaybackState.Playing)
+        {
+            SessionTrace.Emit($"[热备] 热备未就绪（{notReady.State}，攒流 {_monotonicMs() - _standbySinceMs}ms），冷切 {channel.Name}");
+        }
         var prev = Current;
         if (prev is { } p
             && p.CurrentChannel is { } prevChannel
@@ -253,6 +266,8 @@ public sealed class PlaybackSessionManager
         var sb = Standby;
         if (sb is null || ReferenceEquals(sb, Current) || sb.State == PlaybackState.Playing) return;
         if (_monotonicMs() - _standbySinceMs < StandbyAccumulateWindow.TotalMilliseconds) return;
+        // 攒流超时打点（埋点补充 2026-11-15）：热备为何没了的账面依据（攒流烧满窗口未达门槛）
+        SessionTrace.Emit($"[热备] 备台 {sb.CurrentChannel?.Name ?? sb.CurrentChannel?.Id ?? "?"} 攒流超时 {StandbyAccumulateWindow.TotalSeconds}s 未达门槛，放弃热备转冷切");
         sb.Supersede(); // 攒不到门槛即放弃热备；会话留表，冷切可复用
         Standby = null;
     }
@@ -282,6 +297,8 @@ public sealed class PlaybackSessionManager
             }
             _returnStableSession = null; // 回后若再断由 Failover 事件重新起窗计时
         }
+        // 回主源打点（埋点补充 2026-11-15）：稳定 5 分钟+主源连续 3 轮 OK 的双判据同时满足才触发，此账回答「怎么又切回原线路了」
+        SessionTrace.Emit($"[回主源] {current.CurrentChannel?.Name ?? current.CurrentChannel?.Id ?? "?"} 稳定 {ReturnToPrimaryStableFor.TotalMinutes}min 且主源预检连续 {ReturnToPrimaryMinConsecutiveOks} 轮 OK，切回主源");
         current.SwitchLine(0);
     }
 

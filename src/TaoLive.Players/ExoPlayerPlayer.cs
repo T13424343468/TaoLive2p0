@@ -21,6 +21,7 @@ public sealed class ExoPlayerPlayer : IPlayer
 {
     private readonly Forwarder _forwarder;
     private readonly FrameTickForwarder _frameForwarder;
+    private readonly DiagAnalyticsForwarder _diagForwarder;
     private readonly AndroidX.Media3.ExoPlayer.IExoPlayer _player;
     private readonly Android.OS.Handler _main;
     private Func<TaoLive.Model.SourceEndpoint, Task<string?>>? _streamResolver;
@@ -46,6 +47,8 @@ public sealed class ExoPlayerPlayer : IPlayer
         _frameForwarder = new FrameTickForwarder(this); // 帧回调（v76：10Hz 节流）随内核装配一次，Play 全程复用
         _player.SetVideoFrameMetadataListener(_frameForwarder);
         _main = new Android.OS.Handler(Android.OS.Looper.MainLooper!);
+        _diagForwarder = new DiagAnalyticsForwarder(this); // 内核诊断监听（埋点补充 2026-11-15：解码报错/丢帧/欠载/带宽账）
+        _player.AddAnalyticsListener(_diagForwarder); // 回调在内核播放线程：仅进 Reporter（CrashNet 有界队列线程安全），不碰 UI
         _streamResolver = streamResolver;
     }
 
@@ -81,6 +84,12 @@ public sealed class ExoPlayerPlayer : IPlayer
     /// <summary>频道上下文：缓存键与整表行匹配名（nmtv/gxtv 按 name 定位），Play 前由壳层设置。</summary>
     public string? CurrentChannelKey { get; set; }
     public string? CurrentChannelName { get; set; }
+
+    /// <summary>
+    /// 内核诊断出口（埋点补充 2026-11-15）：解码器报错/丢帧/欠载等内核事件经壳层接 CrashNet 落运行台账
+    /// （真机 logcat 不进自诊断，Console.Error 通道保留）；未接线为空操作。
+    /// </summary>
+    public static Action<string>? Reporter { get; set; }
 
     /// <summary>构造后补挂取流注入点（内核工厂场景：独享内核创建后挂本实例的解析器）。</summary>
     public ExoPlayerPlayer WithStreamResolver(Func<TaoLive.Model.SourceEndpoint, Task<string?>> resolver)
@@ -191,7 +200,9 @@ public sealed class ExoPlayerPlayer : IPlayer
                 // 死面挂接（闪退镜黄⑥ 11-15）：SurfaceDestroyed 后热切重挂不砸主线程，摘面待壳层重挂
                 _hasSurface = false;
                 _surfaceHandle = IntPtr.Zero;
+                // 挂面失败出口（埋点补充 2026-11-15）：此前走 Console.Error 只进 logcat，自诊断对不上账——统一落运行台账
                 Console.Error.WriteLine($"[ExoPlayer] attach surface failed: {ex.Message}");
+                Reporter?.Invoke($"[内核挂面] 挂面失败（热切重挂遇死面）：{ex.Message}");
             }
         }
     }
@@ -211,6 +222,7 @@ public sealed class ExoPlayerPlayer : IPlayer
     {
         _playGeneration++; // 释放后作废一切在途回调（闪退镜红②）
         _player.RemoveListener(_forwarder);
+        _player.RemoveAnalyticsListener(_diagForwarder);
         _player.ClearVideoFrameMetadataListener(null);
         _frameForwarder.Dispose();
         _player.Release();
@@ -258,6 +270,69 @@ public sealed class ExoPlayerPlayer : IPlayer
         public void OnVideoFrameAboutToBeRendered(long presentationTimeUs, long eventTimeMs,
             AndroidX.Media3.Common.Format? format, Android.Media.MediaFormat? mediaFormat)
             => _owner.HandleFrameAboutToBeRendered();
+    }
+
+    /// <summary>
+    /// 内核诊断监听桥（埋点补充 2026-11-15）：Media3 AnalyticsListener 白名单回调 → Reporter 落运行台账。
+    /// 覆盖面（#10 白屏只出声 / #9 卡帧的最直接证据链）：
+    /// - [解码] 视频/音频解码器报错（codec error）；
+    /// - [解码] 视频丢帧累计（OnDroppedVideoFrames，偶发不记、成批才记，控量）；
+    /// - [解码] 视频/音频渲染器停用（OnVideoDisabled/OnAudioDisabled，带解码器计数终账）；
+    /// - [解码] 音频欠载（OnAudioUnderrun，「只出声卡顿」证据）；
+    /// - [带宽] 估速变化（节流：估速较上次记账值倍变或距上次 ≥60s 才记，防刷屏）。
+    /// 回调签名按 1.11.1 绑定程序集反射核对（AnalyticsListenerEventTime/DecoderCounters 属性名 DroppedBufferCount 等）。
+    /// </summary>
+    private sealed class DiagAnalyticsForwarder : Java.Lang.Object, AndroidX.Media3.ExoPlayer.Analytics.IAnalyticsListener
+    {
+        private readonly ExoPlayerPlayer _owner;
+        public DiagAnalyticsForwarder(ExoPlayerPlayer owner) : base() => _owner = owner;
+
+        private long _lastBwLogMs = -1;
+        private long _lastBwBitrate = -1;
+
+        private string Ch() => _owner.CurrentChannelName ?? _owner.CurrentChannelKey ?? "?";
+
+        private void Report(string message) => ExoPlayerPlayer.Reporter?.Invoke(message);
+
+        public void OnVideoCodecError(AndroidX.Media3.ExoPlayer.Analytics.AnalyticsListenerEventTime? eventTime,
+            Java.Lang.Exception? videoCodecError)
+            => Report($"[解码] 视频解码器报错（{Ch()}）：{videoCodecError?.Message}");
+
+        public void OnAudioCodecError(AndroidX.Media3.ExoPlayer.Analytics.AnalyticsListenerEventTime? eventTime,
+            Exception audioCodecError)
+            => Report($"[解码] 音频解码器报错（{Ch()}）：{audioCodecError?.Message}");
+
+        public void OnDroppedVideoFrames(AndroidX.Media3.ExoPlayer.Analytics.AnalyticsListenerEventTime? eventTime,
+            int droppedFrames, long elapsedMs)
+        {
+            if (droppedFrames < 5) return; // 偶发零星丢帧不刷屏：成批（≥5 帧/账期）才算卡帧证据
+            Report($"[解码] 视频丢帧 {droppedFrames} 帧/{elapsedMs}ms（{Ch()}，卡帧证据）");
+        }
+
+        public void OnVideoDisabled(AndroidX.Media3.ExoPlayer.Analytics.AnalyticsListenerEventTime? eventTime,
+            AndroidX.Media3.ExoPlayer.DecoderCounters? decoderCounters)
+        {
+            if (decoderCounters is null) return;
+            Report($"[解码] 视频渲染器停用（{Ch()}）：缓冲丢帧 {decoderCounters.DroppedBufferCount}"
+                + $" · 跳至关键帧 {decoderCounters.DroppedToKeyframeCount} · 丢输入帧 {decoderCounters.DroppedInputBufferCount}");
+        }
+
+        public void OnAudioUnderrun(AndroidX.Media3.ExoPlayer.Analytics.AnalyticsListenerEventTime? eventTime,
+            int bufferSize, long bufferSizeMs, long elapsedSinceLastFeedMs)
+            => Report($"[解码] 音频欠载 {elapsedSinceLastFeedMs}ms（{Ch()}，buffer {bufferSize}B/{bufferSizeMs}ms，只出声卡顿证据）");
+
+        public void OnBandwidthEstimate(AndroidX.Media3.ExoPlayer.Analytics.AnalyticsListenerEventTime? eventTime,
+            int totalLoadTimeMs, long totalBytesLoaded, long bitrateEstimate)
+        {
+            var now = Android.OS.SystemClock.ElapsedRealtime();
+            bool bigMove = _lastBwBitrate > 0
+                && (bitrateEstimate >= _lastBwBitrate * 2 || bitrateEstimate <= _lastBwBitrate / 2);
+            bool intervalDue = now - _lastBwLogMs >= 60_000;
+            if (_lastBwLogMs >= 0 && !bigMove && !intervalDue) return;
+            _lastBwLogMs = now;
+            _lastBwBitrate = bitrateEstimate;
+            Report($"[带宽] 估速 {bitrateEstimate / 8 / 1000} kbps（{Ch()}，累计 {totalBytesLoaded / 1024}KB/{totalLoadTimeMs}ms）");
+        }
     }
 
     private static bool IsHls(string url) =>

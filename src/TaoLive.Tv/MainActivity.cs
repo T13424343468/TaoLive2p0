@@ -23,7 +23,7 @@ namespace TaoLive.Tv;
 /// 电视端主入口（2.0 W5 接线 + vc53 界面整套搬运 2026-11-15 老板真机令）：
 /// 界面视觉与交互照 vc53——全屏视频垫底、半透明水墨抽屉盖画面、亮度自适应、
 /// 真实台标列表（无台标=首字占位）、五分类页签、底部节目单、顶部信息条、起播亮牌、水墨退出弹窗。
-/// 底层保留 2.0 事件/会话架构（PlaybackSessionManager + ExoPlayer 内核 + SurfaceHook 挂面），
+/// 底层保留 2.0 事件/会话架构（PlaybackSessionManager + ExoPlayer 内核 + TextureView 挂面），
 /// 即「vc53 的皮，2.0 的骨」。操作逻辑：菜单键呼/收抽屉、上下换台、左右切页签、确认收藏、频道号直达。
 /// </summary>
 [Activity(Label = "TaoLive", MainLauncher = true, Exported = true,
@@ -46,7 +46,8 @@ public partial class MainActivity : Activity
     private ListTabs.Tab _tab = ListTabs.Tab.All;
     private long _healthLastAtMs;
     private readonly SwitchDebouncer _debouncer = new();
-    private SurfaceView _surface = default!;
+    private TextureView _videoView = default!; // 视频载体（真机反馈批#6 修）：TextureView 在视图树内可被盖，SurfaceView 独立窗口层被盖即整层不渲染
+    private Surface? _textureSurface; // 自建 Surface（SurfaceTexture 就绪后创建，生命周期归壳层）
     private TextView _toast = default!;
     private TextView _emptyState = default!;
     private readonly TaoLive.Session.NetGuard _netGuard = new();
@@ -132,7 +133,13 @@ public partial class MainActivity : Activity
                 if (e.AtUtc - lastReport < TimeSpan.FromSeconds(10)) return;
                 lastReport = e.AtUtc;
                 var p95 = pulse.WindowP95Ms();
-                if (p95 is not { } ms) return;
+                // 真机反馈批#10 打点（2026-11-15）：出画中 10 秒零视频帧=「白屏只出声」排查锚点，
+                // 音视频齐 Ready 才 Playing，此态停帧指向视频解码/渲染层（ExoPlayer 无软解兜底，与 vc53 VLC 本质差异）
+                if (p95 is not { } ms)
+                {
+                    CrashNet.Record("[视频停滞] 出画中 10 秒无视频帧（白屏只出声排查锚点）");
+                    return;
+                }
                 CrashNet.Record(pulse.StallSuspicion
                     ? $"[画面平稳] 疑似卡顿：连续 3 窗帧间隔 P95 {ms}ms 超阈 {FramePulse.P95ThresholdMs}ms"
                     : $"[画面平稳] 帧间隔 P95 {ms}ms（阈 {FramePulse.P95ThresholdMs}ms）");
@@ -162,6 +169,13 @@ public partial class MainActivity : Activity
         _manager = _services.GetRequiredService<PlaybackSessionManager>();
         // 内核回调异常出口（闪退镜黄⑤）：矩阵外跳转不掀回调链，落运行台账
         TaoLive.Session.PlaybackSession.KernelCallbackFailed += (_, msg) => CrashNet.Record($"[KernelCallback] {msg}");
+        // 埋点补充（真机反馈批 2026-11-15）：会话/管理器/取票/预热/内核各层台账出口统一接 CrashNet——
+        // 层向纪律由静态委托承接（Session/Catalog/Players 不反向依赖 Tv），未接线的层打点此前只进 logcat。
+        TaoLive.Session.SessionTrace.Sink = m => CrashNet.Record(m);
+        TaoLive.Catalog.TicketResolver.Reporter = m => CrashNet.Record(m);
+        TaoLive.Catalog.ChannelWarmer.Reporter = m => CrashNet.Record(m);
+        TaoLive.Players.ExoPlayerPlayer.Reporter = m => CrashNet.Record(m);
+        TaoLive.Session.ChannelPrecheck.Reporter = m => CrashNet.Record(m); // 预检既有 Reporter 此前未接线，一并接通
         // 收口批①：备源队列吃内置表（换源触发时才遍历注册表，不进预检常驻轮）+ 活性按健康账轻排序
         // （同台活源在前、账新者在前——只动同台内排序不改台间顺序，v28 轻排序条款）；
         // 回主源迟滞判据=主源预检轮次连续命中 OK ≥3 次（复用预检结果，不另起独立探测）+ 稳定 5 分钟（管理器内判）
@@ -197,16 +211,19 @@ public partial class MainActivity : Activity
                 HideEmptyState();
                 // 断流自救（FailoverCount>0）零提示（方案书「热切断流自救全程零提示」，四镜·黑屏镜 11-15 修）：
                 // 不铺遮罩不弹 OSD，画面保持最后一帧直到新流就绪；换台过渡（FailoverCount=0）才走 SwitchRevealPolicy。
-                if (e.Session.FailoverCount == 0 && SwitchRevealPolicy.ShouldVeilOnSwitch(_surface.Holder?.Surface != null))
+                // 真机反馈批#2/#8 修 2026-11-15：铺遮罩=立即盖上不透明水墨深底（vc53 L588-605 口径），
+                // 不再藏画面——SurfaceView/TextureView 让出即露根布局暖白底，就是「换台白屏」本身。
+                if (e.Session.FailoverCount == 0 && SwitchRevealPolicy.ShouldVeilOnSwitch(_textureSurface is not null))
                 {
-                    _surface.Visibility = ViewStates.Invisible;
+                    ShowSwitchVeil();
                     ShowToast(TaoLive.Session.SwitchHud.Connecting);
                 }
             }
             else if (e.State == PlaybackState.Playing)
             {
                 HideEmptyState();
-                HideLoading(); // vc53：首帧落地即撤亮牌
+                HideLoading(); // vc53：首帧落地即撤亮牌文字
+                HideSwitchVeil(); // 首帧落地即撤换台遮罩（真机反馈批#2 修）
                 // 换源黑屏埋点（黑屏镜黄④ 11-15）：换源起点到出画恢复的时长落运行台账（含 ≤500ms 快切段）
                 if (_failoverAtMs is { } from)
                 {
@@ -218,7 +235,7 @@ public partial class MainActivity : Activity
                 {
                     _prefs.Edit()!.PutString("last_channel", playingChannel.Id)!.Apply();
                 }
-                if (SwitchRevealPolicy.ShouldReveal(true)) _surface.Visibility = ViewStates.Visible;
+                // 首帧撤遮罩由 HideSwitchVeil 承担（真机反馈批#2 修），载体不再显隐切换
             }
             else
             {
@@ -251,9 +268,9 @@ public partial class MainActivity : Activity
         SetContentView(_root);
         ShowList();
 
-        // ⑥开机默认台（方案书收口批②）：开机自启链路（BootReceiver 拉起带 from_boot）才走；
-        // 手动打开 App 仍进列表（一期口径不变）
-        if (Intent?.GetBooleanExtra("from_boot", false) == true) _ = EnterByBootAsync();
+        // 开机默认台（方案书收口批②；真机反馈批#1 修复 2026-11-15）：恢复 vc53「开机即看」口径——
+        // 每次启动（含手动打开）都进默认台，不再只认 from_boot 链路；手动打开与开机同一等网+预热+起播路径
+        _ = EnterByBootAsync();
     }
 
     /// <summary>
@@ -311,6 +328,20 @@ public partial class MainActivity : Activity
         return 0; // 未设=列表首位
     }
 
+    // 生命周期打点（埋点补充 2026-11-15）：电视 ROM 杀后台/回前台黑屏排查锚点——
+    // 此前 OnResume/OnPause 完全无账，真机「按主页再回来黑了」查无第一手证据。
+    protected override void OnResume()
+    {
+        base.OnResume();
+        CrashNet.Record($"[生命周期] OnResume 回前台（{_manager?.Current?.CurrentChannel?.Name ?? "无会话"}）");
+    }
+
+    protected override void OnPause()
+    {
+        base.OnPause();
+        CrashNet.Record($"[生命周期] OnPause 失去前台（{_manager?.Current?.CurrentChannel?.Name ?? "无会话"}）");
+    }
+
     protected override void OnDestroy()
     {
         // 生命周期收尾（闪退镜黄⑦⑧⑨ 11-15）：停看门狗泵、清数字提交回调、停预检循环、
@@ -336,18 +367,19 @@ public partial class MainActivity : Activity
             _toast.Visibility = ViewStates.Invisible);
 
         // 1. 全屏视频层（vc53：垫底；抽屉/信息条/节目单全盖其上）
+        // 载体改 TextureView（真机反馈批#6 修 2026-11-15）：SurfaceView 独立窗口层被列表盖住即整层
+        // 不渲染（列表开着换台画面黑的根因，vc53 LiveTextureView 优先同口径）；Surface 经
+        // SurfaceTexture 自建，挂面仍走会话契约 AttachSurface(IntPtr of Surface)。
         _playerPage = new FrameLayout(this);
-        _surface = new SurfaceView(this);
-        _playerPage.AddView(_surface, new FrameLayout.LayoutParams(
+        _videoView = new TextureView(this);
+        _playerPage.AddView(_videoView, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.MatchParent));
-        // 黑屏根因修复（真机「黑屏不出画只有声音」实锤）：SurfaceHook 此前从未注册，
-        // Surface 异步创建后无人补挂输出面——注册后首帧创建/回前台重建均自动补挂
-        _surface.Holder!.AddCallback(new SurfaceHook(this));
+        _videoView.SurfaceTextureListener = new TextureHook(this);
 
-        // 1.5 起播亮牌（雷二·延迟亮）：换台后 0.8 秒内没出首帧才亮，亮了带台名，
-        // 明确反馈「没死机」，首帧落地才撤（vc53 LoadingPanel 同款：亮度自适应水墨深底）
+        // 1.5 起播亮牌（雷二·延迟亮）+ 换台遮罩（真机反馈批#2 修：底固定不透明，盖住 GPU 残留旧画面）：
+        // 换台后 0.8 秒内没出首帧才亮字，亮了带台名，首帧落地才撤（vc53 LoadingPanel 同款水墨深底）
         _loadingPanel = new FrameLayout(this);
-        _loadingPanel.SetBackgroundColor(InkTranslucency.LoadingColor(this));
+        _loadingPanel.SetBackgroundColor(InkTranslucency.SwitchVeilColor());
         _loadingText = new TextView(this)
         {
             Gravity = GravityFlags.Center,
@@ -501,9 +533,9 @@ public partial class MainActivity : Activity
         _playerPage.Visibility = ViewStates.Visible;
         _onPlayerPage = true;
         EnsureWatchdog();
-        // 播放页已就绪而 Surface 早已创建（返回再进场景）：补挂输出面
-        if (_surface.Holder?.Surface != null && _surface.Holder.Surface.IsValid)
-            _manager.Current?.AttachSurface(_surface.Holder.Surface.Handle);
+        // 播放页已就绪而 Surface 就绪（返回再进场景）：补挂输出面
+        if (_textureSurface is { } surface)
+            _manager.Current?.AttachSurface(surface.Handle);
         // v22 第 13 项：关抽屉后重新亮出节目单条（本台拉到过数据才亮），按 7 秒计时收起
         if (_epgHasData) ShowEpgBar();
     }
@@ -577,6 +609,8 @@ public partial class MainActivity : Activity
                 {
                     var url = await _resolver.ResolveAsync(ep, ch.Id, ch.Name).ConfigureAwait(false);
                     if (!string.IsNullOrEmpty(url)) return true;
+                    // 探活失败明细（埋点补充 2026-11-15）：此前单源失败静默落下一源，全断才判死——补失败源与原因明细
+                    CrashNet.Record($"[探活] {ch.Name} 取票口失败（{HostOf(ep)}，返回空）");
                 }
                 else
                 {
@@ -584,11 +618,22 @@ public partial class MainActivity : Activity
                     req.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, 8191);
                     using var res = await PrecheckHttp.SendAsync(req).ConfigureAwait(false);
                     if ((int)res.StatusCode < 400) return true;
+                    CrashNet.Record($"[探活] {ch.Name} 直连探活 HTTP {(int)res.StatusCode}（{HostOf(ep)}）");
                 }
             }
-            catch { /* 单源失败落下一源；全断才判死 */ }
+            catch (Exception ex)
+            {
+                CrashNet.Record($"[探活] {ch.Name} 源探活异常（{HostOf(ep)}）：{ex.Message}"); // 单源失败落下一源；全断才判死
+            }
         }
         return false;
+    }
+
+    /// <summary>台账端点主机（埋点补充 2026-11-15）：URL 原文太长不进台账，只记主机；解析失败记原串截尾。</summary>
+    private static string HostOf(SourceEndpoint ep)
+    {
+        try { return new Uri(ep.Url, UriKind.Absolute).Host; }
+        catch { return ep.Url.Length > 48 ? ep.Url[..48] : ep.Url; }
     }
 
     /// <summary>断网恢复沿（方案书 v82）：网络恢复自动重连失败终态的当前台，静默自愈不打断用户操作；
@@ -669,7 +714,7 @@ public partial class MainActivity : Activity
         RefreshEpg(ch);     // 底部节目单：换台先清场再拉，有数据才亮
     }
 
-    /// <summary>亮牌（vc53 ShowLoading 口径）：换台后 0.8 秒内没出首帧才亮，明确反馈「没死机」；首帧/失败即撤。</summary>
+    /// <summary>亮牌（雷二·延迟亮）：换台后 0.8 秒内没出首帧才亮，明确反馈「没死机」；首帧/失败即撤。</summary>
     private void ShowLoading(Channel ch)
     {
         int seq = ++_loadingSeq;
@@ -678,13 +723,27 @@ public partial class MainActivity : Activity
         {
             if (seq != _loadingSeq) return; // 已换台/已出画：旧牌作废
             if (_manager.Current is { } s && s.State is PlaybackState.Buffering or PlaybackState.Idle or PlaybackState.Reconnecting)
-                _loadingPanel.Visibility = ViewStates.Visible;
+            {
+                ShowSwitchVeil(); // 文字带底亮（真机反馈批#2 修：遮罩底即时不透明水墨深底）
+                _loadingText.Visibility = ViewStates.Visible;
+            }
         }, 800);
     }
+
+    /// <summary>换台遮罩（vc53 铺干净底色口径，真机反馈批#2/#8 修）：换台过渡即铺不透明水墨深底盖旧画面，
+    /// 新流首帧到齐才撤；不再藏画面露根布局暖白底。文字亮灭独立计时（0.8 秒）。</summary>
+    private void ShowSwitchVeil()
+    {
+        _loadingText.Visibility = ViewStates.Gone;
+        _loadingPanel.Visibility = ViewStates.Visible;
+    }
+
+    private void HideSwitchVeil() => _loadingPanel.Visibility = ViewStates.Gone;
 
     private void HideLoading()
     {
         _loadingSeq++;
+        _loadingText.Visibility = ViewStates.Gone;
         _loadingPanel.Visibility = ViewStates.Gone;
     }
 
@@ -763,20 +822,39 @@ public partial class MainActivity : Activity
 
     private void AttachSurfaceIfShown()
     {
-        if (_onPlayerPage && _surface.Holder?.Surface is { IsValid: true } surface)
+        if (_onPlayerPage && _textureSurface is { } surface)
             _manager.Current?.AttachSurface(surface.Handle);
     }
 
-    private sealed class SurfaceHook(MainActivity owner) : Java.Lang.Object, ISurfaceHolderCallback2
+    // —— 视频载体挂面（TextureView，真机反馈批#6 修） ————————————————
+
+    /// <summary>SurfaceTexture 就绪：自建 Surface 并补挂当前会话（首帧创建/回前台重建同路径）。</summary>
+    private void OnTextureAvailable(SurfaceTexture texture)
     {
-        public void SurfaceCreated(ISurfaceHolder holder) => owner.AttachSurfaceIfShown();
+        _textureSurface?.Release();
+        _textureSurface = new Surface(texture);
+        AttachSurfaceIfShown();
+    }
 
-        public void SurfaceChanged(ISurfaceHolder holder, Format format, int width, int height) { }
+    /// <summary>SurfaceTexture 销毁：摘会话面并释放自建 Surface；返回 true 纹理随销毁释放。</summary>
+    private bool OnTextureDestroyed()
+    {
+        _manager.Current?.DetachSurface();
+        _textureSurface?.Release();
+        _textureSurface = null;
+        return true;
+    }
 
-        public void SurfaceDestroyed(ISurfaceHolder holder) =>
-            owner._manager.Current?.DetachSurface();
+    private sealed class TextureHook(MainActivity owner) : Java.Lang.Object, TextureView.ISurfaceTextureListener
+    {
+        public void OnSurfaceTextureAvailable(SurfaceTexture surface, int width, int height)
+            => owner.OnTextureAvailable(surface);
 
-        public void SurfaceRedrawNeeded(ISurfaceHolder holder) { }
+        public bool OnSurfaceTextureDestroyed(SurfaceTexture surface) => owner.OnTextureDestroyed();
+
+        public void OnSurfaceTextureSizeChanged(SurfaceTexture surface, int width, int height) { }
+
+        public void OnSurfaceTextureUpdated(SurfaceTexture surface) { }
     }
 
     // —— 看门狗泵（会话层 Tick：缓冲超时/卡流自救） ——————————————————
@@ -1355,9 +1433,11 @@ public partial class MainActivity : Activity
         _listPage.LayoutParameters = new FrameLayout.LayoutParams(width, FrameLayout.LayoutParams.MatchParent, GravityFlags.Left);
     }
 
-    /// <summary>健康点刷新节流（方案书收口批②：更新节流 5 秒）。只读账刷新展示，不写账。</summary>
+    /// <summary>健康点刷新节流（方案书收口批②：更新节流 5 秒）。只读账刷新展示，不写账。
+    /// 真机反馈批#4 打点（2026-11-15）：状态沿逐条落运行日志（不节流），圆点转绿口径按日志对账。</summary>
     private void OnPrecheckHealthChanged(string epgKey, ChannelHealth state)
     {
+        CrashNet.Record($"[健康点] {epgKey} → {state}");
         if (_onPlayerPage) return; // 抽屉未开不见列表
         var now = System.Environment.TickCount64;
         if (now - _healthLastAtMs < 5000) return;

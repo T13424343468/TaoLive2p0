@@ -28,6 +28,13 @@ public sealed class TicketResolver
     public static HttpClient Http { get; set; } = new() { Timeout = TimeSpan.FromSeconds(10) };
 
     /// <summary>
+    /// 取票台账出口（埋点补充 2026-11-15）：壳层接 CrashNet 落运行台账；未接线为空操作。
+    /// 控量口径：缓存命中不记（换台快慢归因的排除依据——无 [取票] 日志即命中缓存），
+    /// 只记缓存未命中的成功/失败与耗时；退避/整表聚合等细节由调用方与 [预热] 侧补位。
+    /// </summary>
+    public static Action<string>? Reporter { get; set; }
+
+    /// <summary>
     /// 端点换流：Web 取票口经各源分支解析；直连端点原样返回。
     /// channelKey 用频道 Id（缓存键），channelName 用于整表行匹配（nmtv/gxtv）。
     /// </summary>
@@ -40,6 +47,7 @@ public sealed class TicketResolver
         var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         if (TryGetCache(key, now, out var cached)) return cached;
 
+        var sw = System.Diagnostics.Stopwatch.StartNew(); // 取票耗时账（墙钟，仅诊断展示）
         await _gate.WaitAsync();
         try
         {
@@ -59,8 +67,13 @@ public sealed class TicketResolver
             };
             if (string.IsNullOrEmpty(url) || !Uri.TryCreate(url, UriKind.Absolute, out var resolved)
                 || (resolved.Scheme != Uri.UriSchemeHttp && resolved.Scheme != Uri.UriSchemeHttps))
+            {
+                // 取票失败打点（埋点补充 2026-11-15）：此前取票失败完全静默，「换台慢/起不来」查无第一手证据
+                Reporter?.Invoke($"[取票] {uri.Host} 失败（耗时 {sw.ElapsedMilliseconds}ms，返回空或非法）");
                 return null;
+            }
             PutCache(key, url, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+            Reporter?.Invoke($"[取票] {uri.Host} 成功（耗时 {sw.ElapsedMilliseconds}ms，缓存未命中）");
             return url;
         }
         finally { _gate.Release(); }

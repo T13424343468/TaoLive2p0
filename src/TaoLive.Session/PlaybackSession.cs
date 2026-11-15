@@ -39,6 +39,10 @@ public sealed class PlaybackSession
         // 卡流自救接线（方案书 v99 四镜·卡顿镜 11-15 修）：内核缓冲事件接会话，播放中卡流进 Reconnecting 走看门狗。
         // NotifyStalled 内部有 Playing 态守卫，起播期缓冲不误触发。
         _player.OnBufferingStart += (_, _) => GuardKernel(NotifyStalled);
+        // 恢复沿接线（真机反馈批#5 修 2026-11-15）：内核 Ready 发 OnBufferingEnd=画面恢复出帧（契约文档明载
+        // 「断流自救期间会成对反复出现」），Reconnecting 态收即回 Playing——此前矩阵无恢复沿，短卡流后即使
+        // 自行恢复也会被 15 秒看门狗误杀切备源（真机「断流后一直黑屏」归因实锤）。
+        _player.OnBufferingEnd += (_, _) => GuardKernel(NotifyRecovered);
     }
 
     /// <summary>内核回调链异常出口（闪退镜黄⑤）：壳层接 CrashNet 落运行台账。</summary>
@@ -112,6 +116,7 @@ public sealed class PlaybackSession
             (PlaybackState.Playing, PlaybackState.Failed) => true,
             (PlaybackState.Playing, PlaybackState.Idle) => true,
             (PlaybackState.Reconnecting, PlaybackState.Buffering) => true,
+            (PlaybackState.Reconnecting, PlaybackState.Playing) => true,
             (PlaybackState.Reconnecting, PlaybackState.Failed) => true,
             // BUG-1（测试分身 2026-11-15 报告）：卡流窗口换台必经 Stop→Idle，矩阵补齐合法迁移
             (PlaybackState.Reconnecting, PlaybackState.Idle) => true,
@@ -143,7 +148,18 @@ public sealed class PlaybackSession
         else
             BackgroundLane.SetFirstFrameLanded(true);
         BackgroundLane.SetPlaying(next == PlaybackState.Playing);
+        var fromState = _state;
         _state = next;
+        // 起播打点（真机反馈批·埋点补充 2026-11-15）：起播/换台/换源指令到首帧的耗时账——
+        // 覆盖正常换台与备源自救两条路径（换源后路径带换源次数），是白屏/换台慢排查的第一账；
+        // 热备攒流会话同样落账（攒流到门槛线的真实时长可查）。
+        if (next == PlaybackState.Playing && fromState == PlaybackState.Buffering
+            && _bufferingSinceMs is { } startedMs)
+        {
+            var elapsedMs = _clock.NowMs - startedMs;
+            SessionTrace.Emit($"[起播] {DescribeChannel()} 首帧 {elapsedMs}ms"
+                + $"（线路 {CurrentLineIndex + 1}/{LineCount}，第 {FailoverCount} 次换源后）");
+        }
         StateChanged?.Invoke(this, next);
     }
 
@@ -271,6 +287,18 @@ public sealed class PlaybackSession
     }
 
     /// <summary>
+    /// 断流自愈（真机反馈批#5 修 2026-11-15）：Reconnecting 中内核恢复出帧（OnBufferingEnd）即回 Playing，
+    /// 看门狗计时账随之清零——好画面不因历史卡流被误杀。Buffering 态（起播期）收 End 走 NotifyFirstFrame 正门，不进此路。
+    /// </summary>
+    private void NotifyRecovered()
+    {
+        if (_state == PlaybackState.Reconnecting)
+        {
+            Transition(PlaybackState.Playing, "stream recovered");
+        }
+    }
+
+    /// <summary>
     /// 看门狗泵：缓冲超时或卡流超时即断流自救。返回是否触发了迁移。
     /// 生产由壳层定时器或管理器 Tick 驱动，测试注入 FixedClock 后手动泵。判定一律按单调钟。
     /// </summary>
@@ -280,6 +308,9 @@ public sealed class PlaybackSession
             && _bufferingSinceMs is { } started
             && _clock.NowMs - started >= (long)OpenTimeout.TotalMilliseconds)
         {
+            // 看门狗打点（埋点补充 2026-11-15）：此前看门狗触发完全静默，真机只能看到「换源」结果看不到因——
+            // 补触发原因+已等时长，断流自救链路（含误杀嫌疑对账）可查。
+            SessionTrace.Emit($"[看门狗] {DescribeChannel()} 起播超时 {_clock.NowMs - started}ms≥{(int)OpenTimeout.TotalMilliseconds}ms，转备源自救（原线路 {CurrentLineIndex + 1}/{LineCount}）");
             Transition(PlaybackState.Failed, "open timeout");
             TryFailover("open timeout");
             return true;
@@ -288,6 +319,7 @@ public sealed class PlaybackSession
             && _reconnectingSinceMs is { } stalled
             && _clock.NowMs - stalled >= (long)OpenTimeout.TotalMilliseconds)
         {
+            SessionTrace.Emit($"[看门狗] {DescribeChannel()} 卡流超时 {_clock.NowMs - stalled}ms≥{(int)OpenTimeout.TotalMilliseconds}ms，转备源自救（原线路 {CurrentLineIndex + 1}/{LineCount}）");
             Transition(PlaybackState.Failed, "stall timeout");
             TryFailover("stall timeout");
             return true;
@@ -359,6 +391,10 @@ public sealed class PlaybackSession
             _player.AttachSurface(_surfaceHandle);
         }
     }
+
+    /// <summary>台账频道名（埋点补充 2026-11-15）：名称优先，无名退 Id，从未起播记「未知频道」。</summary>
+    private string DescribeChannel() =>
+        _channel?.Name ?? _channel?.Id ?? "未知频道";
 
     /// <summary>
     /// 备源队列吃内置表（方案书收口批①）：换源触发时才遍历注册表（不进预检常驻轮），

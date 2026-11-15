@@ -73,6 +73,10 @@ public static class InkTranslucency
     /// <summary>自适应亮牌底色：暗屏时加深一档。</summary>
     public static Color LoadingColor(Context ctx) => Color.Argb(Boost(ctx, LoadingAlpha), InkR, InkG, InkB);
 
+    /// <summary>换台遮罩底色：固定不透明水墨深底（真机反馈批#2 修 2026-11-15，vc53「铺干净底色遮住旧内容」
+    /// SwitchRevealPolicy 口径）——亮牌底 216 仍透旧画面，盖不住 GPU 残留；遮罩盖底不跟亮度走。</summary>
+    public static Color SwitchVeilColor() => Color.Argb(255, InkR, InkG, InkB);
+
     /// <summary>当前台高亮底色：强调色半透明底，一眼认出正在看的台，暗屏时略加深。</summary>
     public static Color CurrentRowFill(Context ctx) =>
         Color.Argb(Boost(ctx, CurrentFillAlpha), AccentR, AccentG, AccentB);
