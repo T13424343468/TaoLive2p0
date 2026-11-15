@@ -195,6 +195,7 @@ public partial class MainActivity
         // 预热（开机全量预热+换台邻台预取）随预检同起同停，不再单设开关。
         AddRow($"预检握手：{(_precheckEnabled ? "开" : "关")}（确认键切换 · 预热随此开关同起同停）", TogglePrecheck, "#F7F5EE");
         AddRow($"显示大小：{DisplaySizeLabel()}（确认键切换）", CycleDisplaySize, "#F7F5EE");
+        AddRow("运行统计（点按查看）", ShowRunStatsPanel, "#C9D6E2");
         AddRow("崩溃日志（点按查看）", ShowCrashLog, "#C9D6E2");
         AddRow("自诊断（点按查看）", ShowDiagPanel, "#C9D6E2");
         AddRow("进阶调优（点按进入）", ShowAdvancedTuningPanel, "#C9D6E2");
@@ -256,9 +257,10 @@ public partial class MainActivity
         ShowToast(_precheckEnabled ? "预检握手：开" : "预检握手：关");
     }
 
-    // —— 显示大小（vc42 定稿梯子）：大=2/3、中=4/9、小=8/27；面板/字/间距同一系数整体缩放 ——
+    // —— 显示大小（真机反馈批#14 老板令 2026-11-15：三档整体再小 1/3，各档×2/3）：大=4/9、中=8/27、小=16/81；
+    // 面板/字/间距同一系数整体缩放（原 vc53 梯子 2/3·4/9·8/27 起步，本轮整体降一档） ——
 
-    private static readonly float[] DisplaySizeSteps = { 2f / 3f, 4f / 9f, 8f / 27f };
+    private static readonly float[] DisplaySizeSteps = { 4f / 9f, 8f / 27f, 16f / 81f };
     private static readonly string[] DisplaySizeLabels = { "大", "中", "小" };
 
     private static int DisplaySizeIndex(float f)
@@ -269,12 +271,12 @@ public partial class MainActivity
     }
 
     private string DisplaySizeLabel() => DisplaySizeLabels[DisplaySizeIndex(
-        _prefs.GetFloat("ui_scale", 4f / 9f))];
+        _prefs.GetFloat("ui_scale", 8f / 27f))];
 
     /// <summary>大→中→小循环，档位记忆；整界面重建即时生效（正在看的台自动接回）。</summary>
     private void CycleDisplaySize()
     {
-        int next = (DisplaySizeIndex(_prefs.GetFloat("ui_scale", 4f / 9f)) + 1) % DisplaySizeSteps.Length;
+        int next = (DisplaySizeIndex(_prefs.GetFloat("ui_scale", 8f / 27f)) + 1) % DisplaySizeSteps.Length;
         _prefs.Edit()?.PutFloat("ui_scale", DisplaySizeSteps[next])?.Apply();
         Recreate(); // 重建走 OnCreate 重定标，全套令牌按新档位重算
     }
@@ -283,6 +285,72 @@ public partial class MainActivity
 
     /// <summary>按尾偏移读日志尾部（fix53 口径），主线程 IO 有界。</summary>
     private static string ReadLogTail(string filePath, int maxBytes) => DiagLog.ReadTail(filePath, maxBytes);
+
+    /// <summary>运行统计聚合（真机反馈批#12 统计令 2026-11-15）：台账原文太长不好读，聚合成关键数字。
+    /// 只扫近期台账尾 1MB（崩溃日志 1MB×2 代轮转封顶，覆盖近期）；各标记行按前缀计数，末次值带出。
+    /// 纯解析无副作用，行格式与打点侧（MainActivity 埋点/取票/连接失败）逐一对齐，不猜行文。</summary>
+    internal static string BuildRunStats(string log)
+    {
+        int startupOk = 0, startupStall = 0; string lastStartup = "";
+        int smoothOk = 0, smoothStall = 0;
+        int videoIdle = 0, failover = 0; string lastFailover = "";
+        int connFail = 0, playerErr = 0, ticketOk = 0, ticketFail = 0, uncaught = 0;
+        foreach (var raw in log.Split('\n'))
+        {
+            var line = raw.TrimEnd();
+            if (line.Contains("[起播流畅]")) { startupOk++; lastStartup = line[(line.IndexOf("[起播流畅]", StringComparison.Ordinal) + 6)..].Trim(); }
+            else if (line.Contains("[画面平稳]")) { if (line.Contains("疑似卡顿")) smoothStall++; else smoothOk++; }
+            else if (line.Contains("[视频停滞]")) videoIdle++;
+            else if (line.Contains("[换源黑屏]")) { failover++; lastFailover = line[(line.IndexOf("[换源黑屏]", StringComparison.Ordinal) + 6)..].Trim(); }
+            else if (line.Contains("(player error", StringComparison.Ordinal)) playerErr++;
+            else if (line.Contains("[ConnectFailure]")) connFail++;
+            else if (line.Contains("[取票]")) { if (line.Contains("成功")) ticketOk++; else ticketFail++; }
+            else if (line.Contains("未捕获异常")) uncaught++;
+        }
+        return
+            "—— 播放流畅（近期台账）——\n" +
+            $"起播到平稳：{startupOk} 次（{lastStartup}）\n" +
+            $"起播窗卡顿：{startupStall} 次 · 平稳轮询疑点：{smoothStall} 轮\n" +
+            $"视频停滞（白屏只出声排查锚点）：{videoIdle} 次\n" +
+            $"换源恢复出画：{failover} 次（{lastFailover}）\n\n" +
+            "—— 稳定性 ——\n" +
+            $"全线路不可达：{connFail} 次 · 换源播放器报错：{playerErr} 次\n" +
+            $"取票：成功 {ticketOk} · 失败 {ticketFail}\n" +
+            $"未捕获异常：{uncaught} 次\n\n" +
+            "统计范围：近期 1MB 台账（轮转两代封顶）";
+    }
+
+    /// <summary>运行统计面板：只读聚合，无清理键防误操作；关闭键即回设置页。</summary>
+    private void ShowRunStatsPanel()
+    {
+        try
+        {
+            var path = new Java.IO.File(FilesDir, "taolive_crash.log");
+            if (!path.Exists()) { ShowToast("暂无运行台账"); return; }
+            var text = BuildRunStats(ReadLogTail(path.AbsolutePath!, 1024 * 1024));
+            var (box, pad) = BuildOverlayPanel("运行统计（近期）", text, out var scroll);
+            var btns = new LinearLayout(this) { Orientation = Orientation.Horizontal };
+            var close = new TextView(this) { Text = "关闭", Gravity = GravityFlags.Center };
+            close.SetPadding(pad, Dp(14), pad, Dp(14));
+            close.Click += (_, _) => CloseCrashPanel();
+            StyleOverlayButton(close, InkTranslucency.FocusDrawable());
+            int btnH = Dp(52);
+            btns.AddView(close, new LinearLayout.LayoutParams(-1, btnH));
+            box.AddView(btns, new LinearLayout.LayoutParams(-1, -2) { TopMargin = pad });
+
+            var overlay = new FrameLayout(this) { Clickable = true, LongClickable = true }; // 吃掉触摸防穿透
+            overlay.SetBackgroundColor(InkTranslucency.PanelColor(this));
+            overlay.AddView(box, new FrameLayout.LayoutParams(-1, -1));
+            _crashOverlay = overlay;
+            _crashScroll = scroll;
+            _crashCloseBtn = close;
+            _root.AddView(overlay, new FrameLayout.LayoutParams(-1, -1));
+            CloseSettingsPanel();
+            close.RequestFocus();
+        }
+        catch { ShowToast("统计读取失败"); }
+    }
+
 
     private void ShowCrashLog()
     {
@@ -503,8 +571,10 @@ public partial class MainActivity
         }
         catch (Exception ex) { versionLine = "版本：读取失败 " + ex.Message; }
 
-        // 时钟：当前墙钟 + 单调已运行时长 + 时区偏移
-        var up = TimeSpan.FromMilliseconds(System.Environment.TickCount64);
+        // 时钟：当前墙钟 + 应用进程已运行时长 + 时区偏移
+        // 真机反馈批#13 修（2026-11-15 真机照片归因）：原用 Environment.TickCount64（机器开机时长），
+        // 盒子 2.5 天没重启就被报成「已运行 61h02m」实锤；改按进程起始时刻算应用真实运行时长。
+        var up = DateTime.Now - System.Diagnostics.Process.GetCurrentProcess().StartTime;
         var clockLine = $"时钟：{DateTime.Now:yyyy-MM-dd HH:mm:ss} · 已运行 {(int)up.TotalHours}h{up.Minutes:D2}m · " +
                         $"时区 UTC{TimeZoneInfo.Local.BaseUtcOffset:hh\\:mm}";
 
@@ -540,7 +610,10 @@ public partial class MainActivity
         int failCount = 0, crashCount = 0;
         foreach (var line in tail.Split('\n'))
         {
-            if (line.Contains("[ConnectFailure]", StringComparison.Ordinal)) failCount++;
+            // 真机反馈批#13 修（2026-11-15 真机照片归因）：取流失败原只数 [ConnectFailure]，
+            // 换源时内核报的播放器错误（BAD_HTTP_STATUS 等 [换源]·player error 行）一条不数，账偏小实锤。
+            // 补数 player error 行：换源失败也是取流失败，口径与崩溃日志页逐行对齐。
+            if (line.Contains("[ConnectFailure]", StringComparison.Ordinal) || line.Contains("(player error", StringComparison.Ordinal)) failCount++;
             else if (line.Contains("未捕获异常", StringComparison.Ordinal)) crashCount++;
         }
         var startupLine = $"运行日志 {LogSizeLabel(tail.Length)}（截尾视图）· 取流失败 {failCount} 条 · 未捕获异常 {crashCount} 条";
