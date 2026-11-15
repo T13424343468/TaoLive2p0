@@ -57,6 +57,17 @@ jobs:
           BADGE=$($AAPT2 dump badging TaoLive.apk | grep -E "^package" | head -1)
           echo "$BADGE"
           echo "$BADGE" | grep -q "com.taolive.tv" || { echo "BADGING ANCHOR MISMATCH"; exit 1; }
+      - name: Signature chain verify (C1, vc55 同链)
+        run: |
+          ANDROID_HOME=$RUNNER_TEMP/android-sdk
+          CLT=$ANDROID_HOME/cmdline-tools/latest
+          [ -x "$(find $ANDROID_HOME -name apksigner | head -1)" ] || $CLT/bin/sdkmanager --sdk_root=$ANDROID_HOME "build-tools;34.0.0"
+          APKSIGNER=$(find $ANDROID_HOME -name apksigner | head -1)
+          echo "$APKSIGNER verify --print-certs TaoLive.apk"
+          $APKSIGNER verify TaoLive.apk || { echo "APK NOT SIGNED"; exit 1; }
+          CERT=$($APKSIGNER verify --print-certs TaoLive.apk | grep -i "SHA-256" | head -1)
+          echo "$CERT"
+          echo "$CERT" | grep -qi "c18030d3" || { echo "CERT CHAIN MISMATCH: expected C1 c18030d3..."; exit 1; }
 
   install-and-launch:
     runs-on: ubuntu-24.04
