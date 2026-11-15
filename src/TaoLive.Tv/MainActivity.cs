@@ -39,6 +39,8 @@ public partial class MainActivity : Activity
     private readonly SwitchDebouncer _debouncer = new();
     private SurfaceView _surface = default!;
     private TextView _toast = default!;
+    private TextView _emptyState = default!;
+    private readonly TaoLive.Session.NetGuard _netGuard = new();
     private readonly Handler _main = new(Looper.MainLooper!);
     private bool _onPlayerPage;
     private int _currentIndex;
@@ -128,10 +130,13 @@ public partial class MainActivity : Activity
             {
                 // 失败打点接真实事件：全线路不可达落运行日志
                 CrashNet.Record($"[ConnectFailure] {e.Session.CurrentChannel?.Name ?? "未知频道"} 全线路不可达");
-                ShowToast(TaoLive.Session.SwitchHud.AllLinesFailed);
+                // 失败终态驻留空态（方案书 v77，白屏镜红②）：重连耗尽转空态文案，不再用瞬时 Toast；
+                // 键位引导按树内真实键位：OK 重试（退避账管节奏）· 菜单键选台（呼列表）
+                ShowEmptyState("信号中断，全线路不可达\n按 OK 重试 · 菜单键选台");
             }
             else if (e.State == PlaybackState.Buffering)
             {
+                HideEmptyState();
                 // 断流自救（FailoverCount>0）零提示（方案书「热切断流自救全程零提示」，四镜·黑屏镜 11-15 修）：
                 // 不铺遮罩不弹 OSD，画面保持最后一帧直到新流就绪；换台过渡（FailoverCount=0）才走 SwitchRevealPolicy。
                 if (e.Session.FailoverCount == 0 && SwitchRevealPolicy.ShouldVeilOnSwitch(_surface.Holder?.Surface != null))
@@ -142,7 +147,12 @@ public partial class MainActivity : Activity
             }
             else if (e.State == PlaybackState.Playing)
             {
+                HideEmptyState();
                 if (SwitchRevealPolicy.ShouldReveal(true)) _surface.Visibility = ViewStates.Visible;
+            }
+            else
+            {
+                HideEmptyState();
             }
         };
 
@@ -304,6 +314,18 @@ public partial class MainActivity : Activity
         _playerPage.AddView(_toast, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WrapContent, ViewGroup.LayoutParams.WrapContent)
         { Gravity = GravityFlags.Center });
+
+        // 失败终态驻留空态（方案书 v77，白屏镜红②）：非瞬时，进失败态显示、离失败态即隐
+        _emptyState = new TextView(this) { Gravity = GravityFlags.Center };
+        _emptyState.SetTextColor(Color.White);
+        _emptyState.TextSize = 30;
+        _emptyState.SetBackgroundColor(Color.Argb(210, 0, 0, 0));
+        _emptyState.SetPadding(40, 24, 40, 24);
+        _emptyState.Visibility = ViewStates.Invisible;
+        _playerPage.AddView(_emptyState, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WrapContent, ViewGroup.LayoutParams.WrapContent)
+        { Gravity = GravityFlags.Center });
+
         _root.AddView(_playerPage, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.MatchParent));
     }
@@ -344,8 +366,24 @@ public partial class MainActivity : Activity
         ShowPlayer();
     }
 
-    /// <summary>预检轻探（vc53 口径）：Web 取票口换票成功即服务器可达（结果落 5 分钟缓存）；直连源只取头数据验证，不建视频传输。</summary>
+    /// <summary>预检轻探（vc53 口径）：Web 取票口换票成功即服务器可达（结果落 5 分钟缓存）；直连源只取头数据验证，不建视频传输。
+    /// 探测结果回灌断网监测（方案书 v82，白屏镜红①）：成功=网络可达；全源失败=一次失败回灌；
+    /// 恢复沿触发当前台静默自动重连。</summary>
     private async Task<bool> ProbeChannelAsync(Channel ch)
+    {
+        var ok = await ProbeChannelCoreAsync(ch).ConfigureAwait(false);
+        if (ok)
+        {
+            if (_netGuard.OnSuccess()) HandleNetRecovered();
+        }
+        else
+        {
+            _netGuard.OnFailure();
+        }
+        return ok;
+    }
+
+    private async Task<bool> ProbeChannelCoreAsync(Channel ch)
     {
         foreach (var ep in ch.Sources)
         {
@@ -368,6 +406,19 @@ public partial class MainActivity : Activity
             catch { /* 单源失败落下一源；全断才判死 */ }
         }
         return false;
+    }
+
+    /// <summary>断网恢复沿（方案书 v82）：网络恢复自动重连失败终态的当前台，静默自愈不打断用户操作；
+    /// 退避账窗内不抢跑（既有重试节奏不动），回主线程泵再动会话。</summary>
+    private void HandleNetRecovered()
+    {
+        _main.Post(() =>
+        {
+            var cur = _manager.Current;
+            if (cur is null || cur.State != PlaybackState.Failed) return;
+            if (!_manager.TryManualRetry(cur.CurrentChannel?.Id ?? string.Empty, out _)) return;
+            PlayAt(_currentIndex); // 静默重连：无 Toast，起播走既有状态机
+        });
     }
 
     /// <summary>常驻循环预检（vc53 口径）：保态复测列表不闪烁；轮间歇 20 秒；单轮失败下一轮再来。</summary>
@@ -751,6 +802,19 @@ public partial class MainActivity : Activity
         _main.PostDelayed(_toastHide, 2200);
     }
 
+    /// <summary>失败终态驻留空态（v77）：显示至离开失败态；仅播放页可见（列表页整页覆盖，无残留问题）。</summary>
+    private void ShowEmptyState(string text)
+    {
+        _emptyState.Text = text;
+        _emptyState.Visibility = ViewStates.Visible;
+    }
+
+    private void HideEmptyState()
+    {
+        if (_emptyState.Visibility != ViewStates.Visible) return;
+        _emptyState.Visibility = ViewStates.Invisible;
+    }
+
     // —— 列表适配器：收藏置顶组 + 分类头 + 编号台名（一期样式：纯文字，编号在左） ——
 
     private sealed class Row(string title, bool isHeader, Channel? channel)
@@ -788,7 +852,7 @@ public partial class MainActivity : Activity
             if (visible.Count == 0)
             {
                 rows.Add(new Row(tab == ListTabs.Tab.Favorite
-                    ? "收藏夹是空的，对着频道按确认可收藏" : "该分类暂无频道", true, null));
+                    ? "收藏夹是空的，长按 OK 收藏频道；按菜单键回播放" : "该分类暂无频道，按菜单键回播放", true, null));
                 return rows;
             }
             // 收藏置顶组（一期 FavoriteStore 口径：收藏非空才出组，置顶直达；收藏标签下整列即收藏）
