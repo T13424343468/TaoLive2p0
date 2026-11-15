@@ -1202,12 +1202,33 @@ public partial class MainActivity : Activity
             }
         }
 
-        // 设置面板开着：返回/菜单收起，其余交给面板焦点导航；左右键不呼列表不换台
+        // 设置面板开着：返回/菜单收起；#61 真机实锤——面板改流式一行多项后系统焦点搜索失灵，
+        // 方向键改显式焦点导航（SettingsFocusMove），确认键显式点当前行；不再依赖系统焦点导航
         if (_settingsPanelOpen)
         {
-            if (keyCode is Keycode.Back or Keycode.Menu) { CloseSettingsPanel(); return true; }
-            if (keyCode is Keycode.DpadLeft or Keycode.DpadRight) return true;
-            return base.OnKeyDown(keyCode, e);
+            switch (keyCode)
+            {
+                case Keycode.Back or Keycode.Menu:
+                    CloseSettingsPanel();
+                    return true;
+                case Keycode.DpadLeft:
+                    SettingsFocusMove(-1, 0);
+                    return true;
+                case Keycode.DpadRight:
+                    SettingsFocusMove(1, 0);
+                    return true;
+                case Keycode.DpadUp:
+                    SettingsFocusMove(0, -1);
+                    return true;
+                case Keycode.DpadDown:
+                    SettingsFocusMove(0, 1);
+                    return true;
+                case Keycode.DpadCenter or Keycode.Enter:
+                    (CurrentFocus as TextView)?.PerformClick();
+                    return true;
+                default:
+                    return true; // 其余键不穿透，防误触底层键位
+            }
         }
 
         // 收藏排序模式（v1.0.8 第14项）：独立状态机接管键位，退出恢复默认键位
@@ -1853,10 +1874,10 @@ public partial class MainActivity : Activity
                     if (resId != 0)
                     {
                         var img = new ImageView(ctx);
-                        img.SetAdjustViewBounds(true);
-                        img.SetMaxHeight((int)(28 * density * UiScale.Factor)); // #15 尺寸令
+                        // #61 尺寸令补漏：台标此前高度写死 28dp 不随档（AdjustViewBounds 在固定 LayoutParams 下无效）——
+                        // 改与首字占位块同框（40×28 基准×档位系数），ImageView 默认 FitCenter 框内等比不变形
                         img.SetImageResource(resId);
-                        line.AddView(img, new LinearLayout.LayoutParams(-2, (int)(28 * density))
+                        line.AddView(img, new LinearLayout.LayoutParams((int)(40 * density * UiScale.Factor), (int)(28 * density * UiScale.Factor))
                         { RightMargin = UiScale.Px(16), Gravity = GravityFlags.CenterVertical });
                     }
                 }
