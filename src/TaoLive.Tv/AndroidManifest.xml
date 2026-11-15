@@ -1,11 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.taolive.tv"
-    android:versionCode="2"
+    android:versionCode="56"
     android:versionName="2.0.0">
   <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="36" />
   <uses-permission android:name="android.permission.INTERNET" />
-  <application android:label="TaoLive" android:icon="@mipmap/ic_launcher">
+  <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+  <!-- 电视口径照搬 vc55：明文直播源放行 + 电视设备兼容声明 + 桌面横幅 + 全屏主题 -->
+  <uses-feature android:name="android.software.leanback" android:required="false" />
+  <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+  <application android:label="TaoLive" android:icon="@mipmap/ic_launcher"
+               android:banner="@drawable/tv_banner"
+               android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+               android:usesCleartextTraffic="true">
     <activity android:name="TaoLive.Tv.MainActivity" android:exported="true">
       <intent-filter>
         <action android:name="android.intent.action.MAIN" />
