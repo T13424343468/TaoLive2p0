@@ -27,8 +27,9 @@ namespace TaoLive.Tv;
 /// 即「vc53 的皮，2.0 的骨」。操作逻辑：菜单键呼/收抽屉、上下换台、左右切页签、确认收藏、频道号直达。
 /// </summary>
 [Activity(Label = "TaoLive", MainLauncher = true, Exported = true,
-    LaunchMode = ActivityInfo.LaunchMode.SingleTask,
-    ConfigurationChanges = ActivityInfo.Config.Orientation | ActivityInfo.Config.ScreenSize | ActivityInfo.Config.KeyboardHidden)]
+    LaunchMode = LaunchMode.SingleTask,
+    ScreenOrientation = ScreenOrientation.Landscape,
+    ConfigurationChanges = ConfigChanges.Orientation | ConfigChanges.ScreenSize | ConfigChanges.KeyboardHidden)]
 [IntentFilter(new[] { Intent.ActionMain },
     Categories = new[] { Intent.CategoryLauncher, Intent.CategoryLeanbackLauncher })]
 public partial class MainActivity : Activity
@@ -61,6 +62,10 @@ public partial class MainActivity : Activity
     private Java.Lang.Runnable _toastHide = default!;
     private readonly CntvEpgClient _epg = new();
     private HashSet<string> _favorites = new();
+    private readonly FavoriteStore _favStore = new(); // 收藏顺序（vc53 排序模式口径）
+    private bool _sortMode;      // 收藏排序状态机（v1.0.8 第14项）：列表内长按确认进入，退出恢复默认键位
+    private Channel? _sortChannel;
+    private readonly List<int> _sortBackup = new();
     private bool _precheckEnabled = true;   // 预检握手开关（vc53 v1.0.8 用户拍板：设置面板可切，持久化）
     private ChannelPrecheck _precheck = default!;
     private TicketResolver _resolver = default!;
@@ -168,6 +173,8 @@ public partial class MainActivity : Activity
         _manager.RetainedCapacity = PlaybackSessionManager.CapacityFor(activityManager?.MemoryClass ?? 0);
         _favorites = GetSharedPreferences("favorites", FileCreationMode.Private)!
             .GetStringSet("ids", new List<string>())!.ToHashSet();
+        // 收藏顺序（vc53 v1.0.8 第14项：顺序跨启动记忆；逗号编号串，坏段忽略）
+        _favStore.Restore(GetSharedPreferences("favorites", FileCreationMode.Private)!.GetString("order", null));
         // 备源耗尽提示（一期口径：全源不可达时明确提示，不静默装死；OK 键重试）
         // 只收当前会话事件（热备攒流/换台竞速不掺内部，画面不受热备起播影响——方案书 v5 口径）
         _manager.SessionStateChanged += (_, e) =>
@@ -449,7 +456,7 @@ public partial class MainActivity : Activity
         _list = new ListView(this) { Divider = null };
         // 全局透明化（v1.0.8 第15项）：焦点效果=低透明度细边框+极淡底色，不复用实色高亮
         _list.Selector = InkTranslucency.FocusDrawable();
-        _list.Adapter = new ChannelListAdapter(this, _channels, _favorites, ch => _precheck.MarkOf(ch), () => _channels[_currentIndex].Id);
+        _list.Adapter = new ChannelListAdapter(this, _channels, _favorites, ch => _precheck.MarkOf(ch), () => _channels[_currentIndex].Id, favoriteOrder: _favStore.Numbers);
         _list.ItemClick += (_, e) =>
         {
             // 行→频道→列表索引（收藏组行也指向同一频道，编号直达语义不变）
@@ -499,6 +506,37 @@ public partial class MainActivity : Activity
             _manager.Current?.AttachSurface(_surface.Holder.Surface.Handle);
         // v22 第 13 项：关抽屉后重新亮出节目单条（本台拉到过数据才亮），按 7 秒计时收起
         if (_epgHasData) ShowEpgBar();
+    }
+
+    /// <summary>vc53 口径：退出确认弹窗开着=取消继续播放；列表开着=先收抽屉回画面（不强制起播，
+    /// 当前台死流才补播，绝不让用户关掉列表面对黑屏）；都收着才弹退出确认。</summary>
+    private void ExitOrCollapseList()
+    {
+        if (_exitDialog != null)
+        {
+            _exitDialog.Dismiss();
+            _exitDialog = null;
+            return;
+        }
+        if (_listOpen)
+        {
+            var alive = _manager.Current is { State: PlaybackState.Playing or PlaybackState.Buffering or PlaybackState.Reconnecting };
+            ShowPlayer();
+            if (!alive) PlayAt(_currentIndex);
+            return;
+        }
+        ConfirmExit();
+    }
+
+    /// <summary>vc53 口径：播放页左右键=列表翻页/呼出——列表没开就呼出，开了整页翻，长按连滚。</summary>
+    private void ListNav(int dir)
+    {
+        if (!_listOpen) { ShowList(); return; }
+        if (dir == 0) return;
+        int first = _list.FirstVisiblePosition;
+        int visible = Math.Max(1, _list.LastVisiblePosition - first + 1);
+        int target = Math.Max(0, Math.Min(_list.Count - 1, first + dir * visible));
+        _list.SmoothScrollToPosition(target);
     }
 
     // —— 播放接线 ————————————————————————————————————————————
@@ -773,14 +811,15 @@ public partial class MainActivity : Activity
             return true;
         }
 
-        // 退出确认弹窗开着时按键全接管（vc53 v1.0.12）：左右键在「取消/退出」间显式切换
-        //（焦点切换不依赖系统焦点搜索，真机实测不可靠）；确认键=按当前焦点执行；返回键=第二次返回直接退出
+        // 退出确认弹窗开着时按键全接管：左右键在「取消/退出」间显式切换
+        //（焦点切换不依赖系统焦点搜索，真机实测不可靠）；确认键=按当前焦点执行；返回键=取消继续播放（vc53 v1.0.9 口径）
         if (_exitDialog != null)
         {
             switch (keyCode)
             {
                 case Keycode.Back:
-                    Finish();
+                    _exitDialog?.Dismiss(); // vc53 v1.0.9 口径：返回键=取消弹窗，继续播放
+                    _exitDialog = null;
                     return true;
                 case Keycode.DpadLeft:
                     _exitNo?.RequestFocus();
@@ -906,21 +945,21 @@ public partial class MainActivity : Activity
             return base.OnKeyDown(keyCode, e);
         }
 
+        // 收藏排序模式（v1.0.8 第14项）：独立状态机接管键位，退出恢复默认键位
+        if (_sortMode)
+        {
+            HandleSortKey(keyCode);
+            return true;
+        }
+
         // 频道抽屉开着（vc53 抽屉键位；画面在面板下继续）：返回=退出确认、菜单=收抽屉、左右切页签、
         // 上下交列表焦点导航、数字键直达（2.0 保留）
         if (_listOpen)
         {
             switch (keyCode)
             {
-                case Keycode.Back or Keycode.Escape:
-                    ConfirmExit();
-                    return true;
-                case Keycode.Menu or Keycode.Settings or Keycode.Info:
-                    // 菜单键收抽屉回播放（vc53 ToggleChannelList 口径）；无台在播则起播当前台
-                    if (_manager.Current is { State: PlaybackState.Playing or PlaybackState.Buffering or PlaybackState.Reconnecting })
-                        ShowPlayer();
-                    else
-                        PlayAt(_currentIndex);
+                case Keycode.Back or Keycode.Escape or Keycode.Menu:
+                    ExitOrCollapseList(); // vc53 口径：菜单/返回=先收抽屉回画面，收完再按返回才弹退出确认
                     return true;
                 case Keycode.DpadLeft or Keycode.DpadRight:
                     SelectTab(ListTabs.NextTab(_tab, keyCode == Keycode.DpadRight)); // 左右键切标签（vc53 抽屉口径）
@@ -955,11 +994,17 @@ public partial class MainActivity : Activity
                     ToggleFavoriteOnCurrent(); // vc53：确认键收藏当前台
                 }
                 return true;
-            case Keycode.Back or Keycode.Escape:
-                ShowList(); // 返回键呼抽屉（vc53 回列表口径）
+            case Keycode.DpadLeft:
+                ListNav(+1); // vc53 口径：列表没开就呼出到对应位置，开了就翻页
+                return true;
+            case Keycode.DpadRight:
+                ListNav(-1);
                 return true;
             case Keycode.Menu or Keycode.Settings or Keycode.Info:
                 ShowList(); // 菜单键呼抽屉（vc53：呼出同步无延迟）
+                return true;
+            case Keycode.Back or Keycode.Escape:
+                ExitOrCollapseList(); // vc53 口径：播放页返回=退出确认弹窗（返回管退出、菜单管呼列表）
                 return true;
             case >= Keycode.Num0 and <= Keycode.Num9:
                 FeedDigit((int)keyCode - (int)Keycode.Num0); // 频道号直达（W5 保留）
@@ -973,7 +1018,14 @@ public partial class MainActivity : Activity
         // 设置键单击在 KeyUp 分流（KeyDown 只复位长按标记）
         if ((int)keyCode == 4077)
         {
-            if (!_settingsLongFired) ToggleSettingsPanel();
+            if (!_settingsLongFired)
+            {
+                // 铁律：任何时刻最多一个层——设置面板开着才允许收起；列表/弹窗/其他面板开着时设置键不生效
+                if (_settingsPanelOpen) ToggleSettingsPanel();
+                else if (_exitDialog == null && !_listOpen && _advOverlay == null && _diagOverlay == null
+                         && _crashOverlay == null && _licenseOverlay == null)
+                    ToggleSettingsPanel();
+            }
             return true;
         }
         return base.OnKeyUp(keyCode, e);
@@ -985,15 +1037,18 @@ public partial class MainActivity : Activity
         if ((int)keyCode == 4077)
         {
             _settingsLongFired = true;
-            OpenSystemSettings();
+            // 铁律同上：任何层开着时长按设置键不跳系统设置，防叠层
+            if (_exitDialog == null && !_listOpen && _advOverlay == null && _diagOverlay == null
+                && _crashOverlay == null && _licenseOverlay == null)
+                OpenSystemSettings();
             return true;
         }
         if (keyCode is Keycode.DpadCenter or Keycode.Enter)
         {
             if (!_onPlayerPage)
             {
-                // 抽屉内长按 OK = 收藏/取消收藏（一期口径）；短按交 ListView 原生点击
-                ToggleFavoriteSelected();
+                // 列表内长按确认=进入收藏排序（v1.0.8 第14项 vc53 口径；非收藏台亮牌说明不硬进）
+                TryEnterSortMode();
                 return true;
             }
             // 播放页长按 OK = 切下一线路（W8 换线路入口，环形轮转）
@@ -1108,8 +1163,8 @@ public partial class MainActivity : Activity
     {
         var ch = _channels[_currentIndex];
         if (!_favorites.Add(ch.Id)) _favorites.Remove(ch.Id);
-        GetSharedPreferences("favorites", FileCreationMode.Private)!
-            .Edit()!.PutStringSet("ids", _favorites)!.Apply();
+        else _favStore.Toggle(ch.Number);
+        PersistFavorites();
         ShowToast(_favorites.Contains(ch.Id)
             ? $"{IndexOfChannel(ch, _channels)}  {ch.Name}  ★ 已收藏"
             : $"{IndexOfChannel(ch, _channels)}  {ch.Name}  已取消收藏");
@@ -1131,9 +1186,98 @@ public partial class MainActivity : Activity
         var channel = adapter.ChannelAt(pos);
         if (channel is null) return;
         if (!_favorites.Add(channel.Id)) _favorites.Remove(channel.Id);
-        GetSharedPreferences("favorites", FileCreationMode.Private)!
-            .Edit()!.PutStringSet("ids", _favorites)!.Apply();
-        adapter.Refresh(_favorites, _tab);
+        else _favStore.Toggle(channel.Number);
+        PersistFavorites();
+        adapter.Refresh(_favorites, _tab, _favStore.Numbers);
+    }
+
+    /// <summary>收藏状态与顺序一并持久化（StringSet 管「是否收藏」；order 串管顺序，vc53 口径）。</summary>
+    private void PersistFavorites()
+    {
+        GetSharedPreferences("favorites", FileCreationMode.Private)!.Edit()!
+            .PutStringSet("ids", _favorites)!
+            .PutString("order", _favStore.Serialize())!
+            .Apply();
+    }
+
+    // —— 收藏排序模式（vc53 v1.0.8 第14项 逐成员对照基线原文） ——
+
+    /// <summary>入口：列表内长按确认键且焦点在收藏台上；非收藏台亮牌说明，不硬进。</summary>
+    private void TryEnterSortMode()
+    {
+        if (_list.Adapter is not ChannelListAdapter adapter) return;
+        var pos = _list.SelectedItemPosition;
+        if (pos < 0 || pos >= adapter.Count) return;
+        var row = adapter.ChannelAt(pos);
+        if (row is null || !_favStore.IsFavorite(row.Number))
+        {
+            ShowToast("请在收藏组内长按确认键排序");
+            return;
+        }
+        _sortMode = true;
+        _sortChannel = row;
+        _sortBackup.Clear();
+        _sortBackup.AddRange(_favStore.Numbers);
+        ShowToast("排序中：上下移动，确认放下");
+        RefreshSortList();
+    }
+
+    /// <summary>排序键位（vc53 原文口径）：上下逐位挪、左右按屏快速挪、确认放下保存、返回取消复原、信息键一键置顶。</summary>
+    private void HandleSortKey(Keycode keyCode)
+    {
+        if (_sortChannel is null) { _sortMode = false; return; }
+        int num = _sortChannel.Number;
+        switch (keyCode)
+        {
+            case Keycode.DpadUp: _favStore.MoveUp(num); RefreshSortList(); break;
+            case Keycode.DpadDown: _favStore.MoveDown(num); RefreshSortList(); break;
+            case Keycode.DpadLeft:
+            case Keycode.DpadRight:
+            {
+                int page = Math.Max(1, _list.LastVisiblePosition - _list.FirstVisiblePosition + 1);
+                int dir = keyCode == Keycode.DpadLeft ? +page : -page; // 左=向下按屏挪，右=向上（vc53 原文）
+                _favStore.MoveBy(num, dir);
+                RefreshSortList();
+                break;
+            }
+            case Keycode.DpadCenter or Keycode.Enter: // 放下并立即保存（持久化）
+                _sortMode = false;
+                PersistFavorites();
+                _sortChannel = null;
+                ShowToast("排序已保存");
+                RefreshSortList();
+                break;
+            case Keycode.Back or Keycode.Menu: // 取消复原
+                _sortMode = false;
+                _favStore.Restore(string.Join(",", _sortBackup));
+                _sortChannel = null;
+                ShowToast("已取消排序");
+                RefreshSortList();
+                break;
+            case Keycode.Info: // 一键置顶
+                _favStore.MoveToTop(num);
+                RefreshSortList();
+                break;
+        }
+    }
+
+    /// <summary>排序中/排序后重建列表（焦点跟随被排序的台，vc53 RefreshSortList 口径）。</summary>
+    private void RefreshSortList()
+    {
+        if (!_listOpen) return;
+        if (_list.Adapter is not ChannelListAdapter adapter) return;
+        adapter.Refresh(_favorites, _tab, _favStore.Numbers);
+        // 焦点跟随被排序的台，不落到底层
+        var pos = PositionOfChannel(_sortChannel);
+        if (pos >= 0) _list.SetSelection(pos);
+    }
+
+    private int PositionOfChannel(Channel? channel)
+    {
+        if (channel is null || _list.Adapter is not ChannelListAdapter adapter) return -1;
+        for (var i = 0; i < adapter.Count; i++)
+            if (adapter.ChannelAt(i)?.Id == channel.Id) return i;
+        return -1;
     }
 
     private int Neighbor(int delta)
@@ -1294,9 +1438,11 @@ public partial class MainActivity : Activity
         private HashSet<string> _favorites;
         private ListTabs.Tab _tab;
         private List<Row> _rows;
+        private IReadOnlyList<int> _favOrder; // 收藏顺序（vc53 排序口径：收藏页签按此顺序铺开）
 
         public ChannelListAdapter(Context ctx, IReadOnlyList<Channel> channels, HashSet<string> favorites,
-            Func<Channel, ChannelHealth> markOf, Func<string?> currentId, ListTabs.Tab tab = ListTabs.Tab.All)
+            Func<Channel, ChannelHealth> markOf, Func<string?> currentId, ListTabs.Tab tab = ListTabs.Tab.All,
+            IReadOnlyList<int>? favoriteOrder = null)
         {
             _ctx = ctx;
             _channels = channels;
@@ -1304,20 +1450,29 @@ public partial class MainActivity : Activity
             _markOf = markOf;
             _currentId = currentId;
             _tab = tab;
-            _rows = BuildRows(channels, favorites, tab, markOf);
+            _favOrder = favoriteOrder ?? Array.Empty<int>();
+            _rows = BuildRows(channels, favorites, tab, markOf, _favOrder);
         }
 
         /// <summary>当前装配的行（宽度随内容重算用）。</summary>
         public IReadOnlyList<Row> Rows => _rows;
 
         /// <summary>行装配（vc53 DrawerSupport.BuildRows 口径一比一）：
-        /// 收藏标签=收藏顺次铺开+空态行；其余标签=收藏成组置顶（按收藏排序），无信号分组收口（全部标签），
+        /// 收藏标签=收藏顺次铺开（按 favoriteOrder，未入册的按频道表序缀后）+空态行；其余标签=收藏成组置顶，无信号分组收口（全部标签），
         /// 装配完无任何频道行补空态行（不白屏）。</summary>
         private static List<Row> BuildRows(IReadOnlyList<Channel> channels, HashSet<string> favorites,
-            ListTabs.Tab tab, Func<Channel, ChannelHealth> markOf)
+            ListTabs.Tab tab, Func<Channel, ChannelHealth> markOf, IReadOnlyList<int> favOrder)
         {
             var rows = new List<Row>();
-            var favOrdered = channels.Where(c => favorites.Contains(c.Id)).ToList();
+            // 收藏顺序铺开（vc53 排序口径）：order 在前的在前，未入 order 的收藏台按频道表序缀后
+            var favOrdered = new List<Channel>();
+            foreach (var n in favOrder)
+            {
+                var c = channels.FirstOrDefault(x => x.Number == n);
+                if (c != null && favorites.Contains(c.Id) && favOrdered.All(x => x.Id != c.Id)) favOrdered.Add(c);
+            }
+            foreach (var c in channels)
+                if (favorites.Contains(c.Id) && favOrdered.All(x => x.Id != c.Id)) favOrdered.Add(c);
 
             IEnumerable<Channel> baseList = tab switch
             {
@@ -1376,12 +1531,13 @@ public partial class MainActivity : Activity
             return -1;
         }
 
-        /// <summary>收藏/标签/健康账变化后重建行（保持选中位置不跳）。</summary>
-        public void Refresh(HashSet<string> favorites, ListTabs.Tab? tab = null)
+        /// <summary>收藏/标签/健康账变化后重建行（保持选中位置不跳）；favoriteOrder 传排序后的收藏顺序。</summary>
+        public void Refresh(HashSet<string> favorites, ListTabs.Tab? tab = null, IReadOnlyList<int>? favoriteOrder = null)
         {
             _favorites = favorites;
             _tab = tab ?? _tab;
-            _rows = BuildRows(_channels, favorites, _tab, _markOf);
+            if (favoriteOrder != null) _favOrder = favoriteOrder;
+            _rows = BuildRows(_channels, favorites, _tab, _markOf, _favOrder);
             NotifyDataSetChanged();
         }
 

@@ -55,6 +55,10 @@ public static class ListTabs
     /// <summary>按标签过滤频道（收藏标签=收藏频道顺次铺开；其余照 vc53 分类口径）。</summary>
 
     public static IReadOnlyList<Channel> Filter(Tab tab, IReadOnlyList<Channel> channels, Func<Channel, bool> isFavorite)
+        => Filter(tab, channels, isFavorite, null);
+
+    /// <summary>带收藏顺序的过滤：收藏页签按 favoriteOrder（收藏先后）顺次铺开，未入册的按频道表序（vc53 排序口径）。</summary>
+    public static IReadOnlyList<Channel> Filter(Tab tab, IReadOnlyList<Channel> channels, Func<Channel, bool> isFavorite, IReadOnlyList<int>? favoriteOrder)
 
     {
 
@@ -62,7 +66,7 @@ public static class ListTabs
 
         {
 
-            Tab.Favorite => channels.Where(isFavorite),
+            Tab.Favorite => OrderFavorites(channels, isFavorite, favoriteOrder),
 
             // vc53 v22 第 7 项（老板拍板）：CGTN 并回「央视」；专项（风云/第一/怀旧剧场、CETV、国学）随拍板并入央视口径
 
@@ -80,6 +84,24 @@ public static class ListTabs
 
         return q.ToList();
 
+    }
+
+    /// <summary>收藏顺序铺开：order 在前的在前；order 外的按频道表序缀后（vc53 TopGroup 口径 + 未入册兜底）。</summary>
+    private static List<Channel> OrderFavorites(IReadOnlyList<Channel> channels, Func<Channel, bool> isFavorite, IReadOnlyList<int>? favoriteOrder)
+    {
+        var result = new List<Channel>();
+        var used = new HashSet<int>();
+        if (favoriteOrder != null)
+        {
+            foreach (var n in favoriteOrder)
+            {
+                var ch = channels.FirstOrDefault(c => c.Number == n);
+                if (ch != null && isFavorite(ch) && used.Add(ch.Number)) result.Add(ch);
+            }
+        }
+        foreach (var ch in channels)
+            if (isFavorite(ch) && used.Add(ch.Number)) result.Add(ch);
+        return result;
     }
 
 }
