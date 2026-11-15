@@ -267,10 +267,10 @@ public partial class MainActivity : Activity
             while (!ct.IsCancellationRequested)
             {
                 try { await _precheck.RunAsync(_channels, ct, keepKnownState: true).ConfigureAwait(false); }
-                catch (OperationCanceledException) { return; }
+                catch (System.OperationCanceledException) { return; }
                 catch { /* 单轮失败不掀循环 */ }
                 try { await Task.Delay(20_000, ct).ConfigureAwait(false); }
-                catch (OperationCanceledException) { return; }
+                catch (System.OperationCanceledException) { return; }
             }
         });
     }
