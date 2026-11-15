@@ -164,6 +164,13 @@ public sealed class PlaybackSession
         _active = true;
         _channel = channel;
         _queue = channel.Sources.Where(s => s.IsValid).ToList();
+        if (_queue.Count == 0)
+        {
+            // 全端点无效（IsValid 只查端点数量不查有效性，闪退镜红③ 11-15）：判失败终态不越界，
+            // 交壳层失败终态空态文案与重试路径；不抛索引越界崩主线程。
+            Transition(PlaybackState.Failed, "no valid sources");
+            return;
+        }
         AppendFallbacks();
         _endpointIndex = 0;
         FailoverCount = 0;

@@ -21,6 +21,7 @@ public sealed class ExoPlayerPlayer : IPlayer
     private readonly Android.OS.Handler _main;
     private Func<TaoLive.Model.SourceEndpoint, Task<string?>>? _streamResolver;
     private bool _firstFrameRaisedThisPlay;
+    private int _playGeneration; // 播放代次（闪退镜红② 11-15）：迟到 resolver 回调对不上代次即弃，不碰已释放内核
     private IntPtr _surfaceHandle;
     private bool _hasSurface;
 
@@ -92,6 +93,7 @@ public sealed class ExoPlayerPlayer : IPlayer
     public void Play(PlaybackParams params_)
     {
         ArgumentNullException.ThrowIfNull(params_);
+        _playGeneration++; // 新一轮播放：作废旧代次迟到回调（闪退镜红②）
         _firstFrameRaisedThisPlay = false;
         // 频道上下文自取（双实例热切前提：每会话独享内核，壳层不再代设）
         if (!string.IsNullOrEmpty(params_.Channel.Id)) CurrentChannelKey = params_.Channel.Id;
@@ -105,6 +107,7 @@ public sealed class ExoPlayerPlayer : IPlayer
         var channelKey = CurrentChannelKey;
         var channelName = CurrentChannelName;
         var pending = params_;
+        var generation = _playGeneration;
         _ = Task.Run(async () =>
         {
             string? url = null;
@@ -112,6 +115,9 @@ public sealed class ExoPlayerPlayer : IPlayer
             catch { url = null; }
             _main.Post(() =>
             {
+                // 代次校验（闪退镜红② 11-15）：resolver 迟到回调落在 Stop/Dispose/新一轮 Play 之后即弃，
+                // 不对已让位或已释放的内核 StartMedia（防 IllegalStateException 与慢源覆盖后播流）
+                if (generation != _playGeneration) return;
                 if (string.IsNullOrEmpty(url))
                     HandleError("RESOLVE_FAILED", $"取流失败（{channelName ?? channelKey ?? "channel"}）");
                 else
@@ -175,6 +181,7 @@ public sealed class ExoPlayerPlayer : IPlayer
 
     public void Dispose()
     {
+        _playGeneration++; // 释放后作废一切在途回调（闪退镜红②）
         _player.RemoveListener(_forwarder);
         _player.Release();
     }

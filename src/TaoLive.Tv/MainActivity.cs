@@ -777,6 +777,7 @@ public partial class MainActivity : Activity
 
     private void FeedDigit(int d)
     {
+        if (_digits.Length >= 3) return; // 位数封顶（闪退镜红① 11-15）：连按不溢出，编号三位内直达
         _digits = (_digits + d.ToString()).TrimStart('0');
         ShowToast(_digits);
         _digitCommit?.Dispose();
