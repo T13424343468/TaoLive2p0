@@ -5,10 +5,8 @@ using TaoLive.Model;
 using TaoLive.Session;
 using Xunit;
 
-// 引擎搬回（vc53）：vc53 版 ChannelPrecheck/ChannelHealth 落 Session 层并保留原类名（审计对账要求），
-// 2.0 W8 简版状态机改名 ChannelWarmupPrecheck/ChannelWarmupHealth 让路；本文件测的是简版，别名指回 Catalog 版。
-using ChannelPrecheck = TaoLive.Catalog.ChannelWarmupPrecheck;
-using ChannelHealth = TaoLive.Catalog.ChannelWarmupHealth;
+// W8 测试归正（总镜子 R1 制度镜红②收口）：频道预检直接测生产 Session 版 ChannelPrecheck/ChannelHealth
+// （vc53 引擎一比一），不再走 Catalog 死副本别名——生产类必须有直接覆盖，假覆盖清零。
 
 namespace TaoLive.Tests;
 
@@ -19,6 +17,14 @@ namespace TaoLive.Tests;
 /// </summary>
 public class W8FeatureTests
 {
+    // 预检探测走全局单车道（画面平稳优先令）：本类每个用例前清车道状态，
+    // 防其他测试类遗留的「播放中」门控（≥10s 间隔）把探测拖进假死。
+    public W8FeatureTests()
+    {
+        BackgroundLane.SetPlaying(false);
+        BackgroundLane.SetFirstFrameLanded(true); // 首帧门控放行：测试环境无真实首帧，置 true 防车道无限等
+    }
+
     // ---- 换台去抖（SwitchDebouncer） ------------------------------------------
 
     [Fact]
@@ -259,7 +265,7 @@ public class W8FeatureTests
         Assert.False(WarmupPolicy.IsBatchSource("unknown-source"));
     }
 
-    // ---- 频道预检（ChannelWarmupPrecheck，2.0 W8 简版；vc53 Session 版同口径断言见 Vc53EngineTests） -------
+    // ---- 频道预检（生产 Session 版 ChannelPrecheck 直接覆盖） ---------------------------------------
 
     [Fact]
     public async Task Precheck_any_alive_source_marks_group_alive()
@@ -301,6 +307,7 @@ public class W8FeatureTests
     {
         var ch = new Channel("src-a", "CCTV-4", "央视",
             new[] { new SourceEndpoint("https://a/stream", SourceKind.Cdn, 1) });
+        ch.EpgKey = "cctv4"; // 生产契约：StateChanged 按频道组键（EpgKey）发，订阅方据此刷列表组
         var precheck = new ChannelPrecheck(_ => Task.FromResult(true));
         var events = new List<(string, ChannelHealth)>();
         precheck.StateChanged += (id, s) => events.Add((id, s));
@@ -308,7 +315,7 @@ public class W8FeatureTests
         precheck.MarkState(ch, ChannelHealth.Alive);
         precheck.MarkState(ch, ChannelHealth.Alive); // 重复标记不发事件
         await precheck.RunAsync(new[] { ch }, keepKnownState: true); // 复测保持已知状态，探后仍 Alive，无事件
-        Assert.Equal(new[] { ("src-a", ChannelHealth.Alive) }, events);
+        Assert.Equal(new[] { ("cctv4", ChannelHealth.Alive) }, events);
     }
 
     [Fact]
