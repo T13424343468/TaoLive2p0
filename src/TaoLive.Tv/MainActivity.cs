@@ -77,6 +77,9 @@ public partial class MainActivity : Activity
     private FrameLayout _loadingPanel = default!;
     private TextView _loadingText = default!;
     private int _loadingSeq;                 // 亮牌代数：换台即换代，旧牌绝不再亮
+    private bool _veilAwaitingReveal;        // 换台遮罩待真实出画（真机反馈批#11 续修：Ready≠出画）
+    private int _veilSeq;                    // 遮罩代数：迟到的撤牌只撤自己那一代（快速连切防串）
+    private int _prefetchSeq;                // 邻台预取代数：换台即换代，旧代延迟任务作废（真机反馈批#12）
     private LinearLayout? _epgPanel;
     private TextView? _epgNow;
     private TextView? _epgNext;
@@ -95,7 +98,7 @@ public partial class MainActivity : Activity
         // 持久化设置（vc53 口径）：UI 缩放档 + 后台预热开关 + 进阶调优旋钮，启动装载
         //（缩放档须在 BuildRoot 前就位，全套令牌按档位重算）
         _prefs = GetSharedPreferences("taolive_prefs", FileCreationMode.Private)!;
-        UiScale.Factor = _prefs.GetFloat("ui_scale", 4f / 9f);
+        UiScale.Factor = _prefs.GetFloat("ui_scale", 8f / 27f);
         // 收口批④开关合流：预热与预检共车道只留预检开关，预热（开机全量预热+换台邻台预取+开机默认台焐热）
         // 一律随 _precheckEnabled 同起同停——两个开关管同一条车道必出一个死开关（方案书收口批④原文）。
         _precheckEnabled = _prefs.GetBoolean("precheck_enabled", true);
@@ -117,7 +120,24 @@ public partial class MainActivity : Activity
             player.WithStreamResolver(endpoint =>
                 resolver.ResolveAsync(endpoint, player.CurrentChannelKey ?? "", player.CurrentChannelName ?? ""));
             WireFramePulse(player); // 画面平稳埋点（方案书 v76/v20：帧回调 10Hz → 滑窗 P95 断言）
+            WireVeilReveal(player); // 换台遮罩真实出画撤除（真机反馈批#11 续修 2026-11-15）
             return player;
+        }
+
+        // 换台遮罩真实出画撤除（真机反馈批#11 续修 2026-11-15）：内核 Ready 即撤遮罩会露旧台冻结帧
+        // （TextureView 停帧保留最后渲染内容，新流首帧渲染前那几秒「一直挂着上个台画面」实锤）。
+        // 改挂待撤旗：本台第一帧真渲染的帧节拍才准撤——键位对账：只有「当前会话本台」的帧节拍
+        // 有资格（热备攒流/自救尾帧不掺）；渲染线程回调落主线程执行，遮罩代数防快速连切串代。
+        void WireVeilReveal(ExoPlayerPlayer player)
+        {
+            player.OnFrameTick += (_, _) =>
+            {
+                if (!_veilAwaitingReveal) return;
+                if (!string.Equals(player.CurrentChannelKey, _manager.Current?.CurrentChannel?.Id, StringComparison.Ordinal)) return;
+                _veilAwaitingReveal = false;
+                int seq = _veilSeq;
+                _main.Post(() => { if (seq == _veilSeq) HideSwitchVeil(); });
+            };
         }
 
         // 画面平稳无感量化埋点（v20）：帧回调进滑窗，每 10 秒取数落 [画面平稳] 日志行；
@@ -127,9 +147,30 @@ public partial class MainActivity : Activity
         {
             var pulse = new FramePulse();
             DateTimeOffset lastReport = DateTimeOffset.UtcNow;
+            DateTimeOffset? startupFirstTick = null; // 起播流畅台账：本内核首个出帧时刻
+            bool startupStallSeen = false;           // 起播稳定窗内卡顿疑点
+            bool startupReported = false;            // 台账只记一次
             player.OnFrameTick += (_, e) =>
             {
                 pulse.Record(e.AtUtc);
+                // 起播流畅台账（真机反馈批#12 统计令 2026-11-15，统计不能少）：首帧出画到平稳的时长落
+                // 运行台账，修复效果（门槛 12 秒+预取让路）真机验收按此行核。平稳判据=首帧满 20 秒且
+                // 当前无疑点游程；窗内有疑点如实带出，不美化。
+                if (startupFirstTick is { } t0 && !startupReported)
+                {
+                    if (pulse.StallSuspicion) startupStallSeen = true;
+                    if (e.AtUtc - t0 >= TimeSpan.FromSeconds(20) && !pulse.StallSuspicion)
+                    {
+                        startupReported = true;
+                        CrashNet.Record(startupStallSeen
+                            ? $"[起播流畅] 首帧到平稳 {(e.AtUtc - t0).TotalSeconds:F1}s（起播窗含卡顿疑点）"
+                            : $"[起播流畅] 首帧到平稳 {(e.AtUtc - t0).TotalSeconds:F1}s（无卡顿疑点）");
+                    }
+                }
+                else if (startupFirstTick is null)
+                {
+                    startupFirstTick = e.AtUtc;
+                }
                 if (e.AtUtc - lastReport < TimeSpan.FromSeconds(10)) return;
                 lastReport = e.AtUtc;
                 var p95 = pulse.WindowP95Ms();
@@ -162,8 +203,23 @@ public partial class MainActivity : Activity
             .AddTaoLiveSession(KernelFactory, ch =>
             {
                 // 换台即触发邻台预取（火车道让路：首帧未落地铁道自动门控，画面平稳优先）；
-                // 预热随预检开关同起同停（收口批④开关合流）
-                if (_precheckEnabled) _ = Task.Run(() => prefetcher.PrefetchNeighborsAsync(ch, _channels));
+                // 真机反馈批#12 修 2026-11-15：预取原在首帧落地即排队上路——出画后内核正要抢带宽把
+                // 水位从起播线填满，预取插队即抢网，起播期卡顿实锤之一。改延后 15 秒（起播稳定窗）
+                // 再上路，换代作废旧延迟（快速连切只取最后一代）；预热随预检开关同起同停（收口批④开关合流）
+                if (_precheckEnabled)
+                {
+                    int seq = ++_prefetchSeq;
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await Task.Delay(TimeSpan.FromSeconds(15));
+                            if (seq != _prefetchSeq) return; // 已换台：旧代预取作废
+                            await prefetcher.PrefetchNeighborsAsync(ch, _channels);
+                        }
+                        catch { /* 预取失败不影响播放 */ }
+                    });
+                }
             })
             .BuildServiceProvider();
         _manager = _services.GetRequiredService<PlaybackSessionManager>();
@@ -202,12 +258,20 @@ public partial class MainActivity : Activity
                 // 失败打点接真实事件：全线路不可达落运行日志
                 CrashNet.Record($"[ConnectFailure] {e.Session.CurrentChannel?.Name ?? "未知频道"} 全线路不可达");
                 // 播放实测回写（真机反馈批#4 修 2026-11-15）：真实断流写健康账——
-                // 此前 ReportSourceResult 生产零接线，播放正常的台健康账永远不涨（圆点全灰实锤之一）
+                // 此前 ReportSourceResult 生产零接线，播放正常的台健康账永远不涨（圆点全灰实锤之一）；
+                // 时间戳=Unix 毫秒（真机日志镜修 2026-11-15：CheckedAtMs 契约为跨启动可比的 Unix 时基，
+                // 误传单调钟会把账本时间戳写花，健康提示排序与落盘合并全错账）
                 if (e.Session.CurrentChannel is { } failCh)
-                    _precheck.ReportSourceResult(failCh, false, System.Environment.TickCount64, playback: true);
+                    _precheck.ReportSourceResult(failCh, false, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), playback: true);
                 // 失败终态驻留空态（方案书 v77，白屏镜红②）：重连耗尽转空态文案，不再用瞬时 Toast；
-                // 键位引导按树内真实键位：OK 重试（退避账管节奏）· 菜单键选台（呼列表）
-                HideLoading();
+                // 键位引导按树内真实键位：OK 重试（退避账管节奏）· 菜单键选台（呼列表）。
+                // 真机反馈批#11 修 2026-11-15：失败终态此前只撤遮罩露旧台冻结帧（TextureView 停帧后
+                // 保留最后渲染内容），「新台没切过来一直挂着上个台画面」实锤——终态改铺全屏不透明
+                // 水墨深底盖旧画，空态文案叠其上（BuildRoot z 序：_emptyState 在 _loadingPanel 之上）。
+                // _loadingSeq 作废亮牌延迟（原 HideLoading 语义保留，只不清遮罩底）。
+                _loadingSeq++;
+                ShowSwitchVeil();
+                _veilAwaitingReveal = false; // 失败终态遮罩由空态文案管，不归帧节拍撤
                 ShowEmptyState("信号中断，全线路不可达\n按 OK 重试 · 菜单键选台");
             }
             else if (e.State == PlaybackState.Buffering)
@@ -227,7 +291,18 @@ public partial class MainActivity : Activity
             {
                 HideEmptyState();
                 HideLoading(); // vc53：首帧落地即撤亮牌文字
-                HideSwitchVeil(); // 首帧落地即撤换台遮罩（真机反馈批#2 修）
+                // 真机反馈批#11 续修 2026-11-15：Playing=内核 Ready（音视频齐），但新流首帧尚未真渲染，
+                // 此刻撤遮罩会露旧台冻结帧几秒（老板真机实锤「台已切过来但画面一直挂着上个台」）。
+                // 遮罩改挂待撤旗：本台第一帧真出画（OnFrameTick）才撤（WireVeilReveal）；
+                // 3 秒安全网兜底（纯音频流/帧监听缺失），防遮罩长挂死屏。
+                _veilAwaitingReveal = true;
+                int revealSeq = _veilSeq;
+                _main.PostDelayed(() =>
+                {
+                    if (!_veilAwaitingReveal || revealSeq != _veilSeq) return;
+                    _veilAwaitingReveal = false;
+                    HideSwitchVeil();
+                }, 3000);
                 // 换源黑屏埋点（黑屏镜黄④ 11-15）：换源起点到出画恢复的时长落运行台账（含 ≤500ms 快切段）
                 if (_failoverAtMs is { } from)
                 {
@@ -239,8 +314,9 @@ public partial class MainActivity : Activity
                 {
                     _prefs.Edit()!.PutString("last_channel", playingChannel.Id)!.Apply();
                     // 播放实测回写（真机反馈批#4 修 2026-11-15）：首帧真出画=强证据直接点亮圆点——
-                    // 此前播放正常的台健康账零回写，圆点只能等预检慢慢滚（真机「看过的台也不绿」实锤）
-                    _precheck.ReportSourceResult(playingChannel, true, System.Environment.TickCount64, playback: true);
+                    // 此前播放正常的台健康账零回写，圆点只能等预检慢慢滚（真机「看过的台也不绿」实锤）；
+                    // 时间戳=Unix 毫秒（真机日志镜修：时基契约同上）
+                    _precheck.ReportSourceResult(playingChannel, true, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), playback: true);
                 }
                 // 首帧撤遮罩由 HideSwitchVeil 承担（真机反馈批#2 修），载体不再显隐切换
             }
@@ -741,6 +817,7 @@ public partial class MainActivity : Activity
     /// 新流首帧到齐才撤；不再藏画面露根布局暖白底。文字亮灭独立计时（0.8 秒）。</summary>
     private void ShowSwitchVeil()
     {
+        _veilSeq++; // 遮罩换代：旧代迟到的撤牌/安全网全部作废（快速连切防串）
         _loadingText.Visibility = ViewStates.Gone;
         _loadingPanel.Visibility = ViewStates.Visible;
     }
