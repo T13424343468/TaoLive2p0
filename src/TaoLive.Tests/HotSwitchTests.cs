@@ -83,8 +83,8 @@ public class HotSwitchTests
         Assert.Equal(new IntPtr(1), manager.Current!.SurfaceHandle); // 输出面原面移交
         Assert.Equal(PlaybackState.Idle, manager.TryGet("cctv1")!.State); // 旧会话已让位
         Assert.Single(currentChanged);
-        // 接管次序：热备先挂面（Attach），旧内核后让位（Detach+Stop）——旧画面撑到最后一帧
-        Assert.Equal("Attach", players[1].Log[^1]);
+        // 接管次序：热备先挂面（Attach）后恢复出声（Resume）——音画同拍出，旧内核随后让位（Stop）
+        Assert.Equal(new[] { "Attach", "Resume" }, players[1].Log[^2..]);
         Assert.Contains("Stop", players[0].Log);
         // 热备内核未被重播（热切不重付起播成本）
         Assert.Single(players[1].PlayedUrls);

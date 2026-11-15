@@ -223,9 +223,9 @@ public sealed class PlaybackSession
             throw new ArgumentException($"Channel {channel.Id} has no valid sources", nameof(channel));
         }
         DetachSurface();
-        if (_state is PlaybackState.Playing or PlaybackState.Buffering or PlaybackState.Reconnecting)
+        if (_state is not PlaybackState.Idle)
         {
-            _player.Stop();
+            _player.Stop(); // vc68：含 Failed 态一律停（同 Supersede 口径），旧台音画必死
             Transition(PlaybackState.Idle, "channel switch");
         }
         _active = true;
@@ -268,9 +268,9 @@ public sealed class PlaybackSession
         {
             return; // 同线无操作：不打断在播画面
         }
-        if (_state is PlaybackState.Playing or PlaybackState.Buffering or PlaybackState.Reconnecting)
+        if (_state is not PlaybackState.Idle)
         {
-            _player.Stop();
+            _player.Stop(); // vc68：含 Failed 态一律停（同 Supersede 口径），旧台音画必死
             Transition(PlaybackState.Idle, "line switch");
         }
         _endpointIndex = endpointIndex;
@@ -307,6 +307,14 @@ public sealed class PlaybackSession
             Transition(PlaybackState.Playing, "first frame");
         }
     }
+
+    /// <summary>静音攒流（vc68 漏音根因①修复，热备专用）：暂停出声出画，内核照常缓冲攒流——
+    /// 此前热备起播 PlayWhenReady=true，备台攒流期间该台声音直接外放（「切台了还在出上个台的音」）。
+    /// Play 后即 Pause：READY 后解码器仍初始化、哑面预热不失效，热切门槛（State==Playing）不破坏。</summary>
+    public void PausePlayback() => _player.Pause();
+
+    /// <summary>恢复出声出画（vc68）：热备热切接管时调用，缓冲攒流不中断。</summary>
+    public void ResumePlayback() => _player.Resume();
 
     /// <summary>当前会话内核（vc66：壳层帧账归本会话用——热备攒流哑面解码的帧不再替当前台续零帧账）。</summary>
     public IPlayer Kernel => _player;
@@ -399,9 +407,9 @@ public sealed class PlaybackSession
         return false;
     }
 
-    /// <summary>vc67 慢灌放宽窗（起播）：首帧门槛 5s×3=15 秒——带宽 ≥1/3 流码率即灌得到，慢网盒子让够路。</summary>
-    public static readonly TimeSpan SlowStartWindow =
-        TimeSpan.FromMilliseconds(PrefetchCurve.FirstFrameGate.TotalMilliseconds * 3);
+    /// <summary>vc67 慢灌放宽窗（起播）：固定 15 秒（vc68 与首帧门槛解耦：vc68 首帧门槛降至 0.5 秒先出画，
+    /// 若仍按门槛×3 会缩成 1.5 秒——慢灌源带宽 ≥1/3 流码率即灌得到，放宽窗口径不变）。</summary>
+    public static readonly TimeSpan SlowStartWindow = TimeSpan.FromSeconds(15);
 
     /// <summary>vc67 慢灌放宽窗（重灌）：卡后重入门槛 12s×2=24 秒——重灌要满 12 秒媒体，带宽 ≥1/2 流码率即灌得到。</summary>
     public static readonly TimeSpan SlowRecoveryWindow =
@@ -499,14 +507,17 @@ public sealed class PlaybackSession
         return true;
     }
 
-    /// <summary>被管理器换下：停内核、摘面、状态归 Idle，此后不再响应内核事件。</summary>
+    /// <summary>被管理器换下：停内核、摘面、状态归 Idle，此后不再响应内核事件。
+    /// vc68 漏音根因②修复：停内核非 Idle 态一律执行——此前 Failed 态（看门狗/ForceFailover 烧光备源后）
+    /// 跳过 Stop，内核最后一路流的音频还在外放，切台后「画是新的音是旧的」。Idle 态内核已停（Stop 幂等
+    /// 且 Idle 只在停后/未起播出现），跳过无害；音画同源同一内核，Stop 同拆音视频渲染器，同进同出。</summary>
     public void Supersede()
     {
         _active = false;
         DetachSurface();
-        if (_state is PlaybackState.Playing or PlaybackState.Buffering or PlaybackState.Reconnecting)
+        if (_state is not PlaybackState.Idle)
         {
-            _player.Stop();
+            _player.Stop(); // vc68：含 Failed 态一律停，旧台音画必死
             Transition(PlaybackState.Idle, "superseded");
         }
     }

@@ -15,6 +15,10 @@ public interface IPlayer : IDisposable
     /// <summary>暂停。已停止/未起播时调用为无害操作。</summary>
     void Pause();
 
+    /// <summary>恢复播放（vc68 热备静音攒流）：暂停期间内核照常缓冲攒流，Resume 即出声出画。
+    /// 未暂停/已停止时调用为无害操作。</summary>
+    void Resume();
+
     /// <summary>停止并释放内部资源；不释放输出面（Surface 归属壳层）。</summary>
     void Stop();
 

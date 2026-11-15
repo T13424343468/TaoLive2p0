@@ -184,6 +184,7 @@ public sealed class PlaybackSessionManager
             Touch(channel.Id);
             _supersededAtMs.Remove(channel.Id); // 重新成为热备，超龄账清零
             existing.ChangeChannel(channel);
+            existing.PausePlayback(); // vc68 漏音根因①：备台静音攒流，不出声不出画（缓冲照常）
             Standby = existing;
             _standbySinceMs = _monotonicMs(); // 攒流超时账起算（v75）
             SessionTrace.Emit($"[热备] 备台 {channel.Name} 起播攒流（会话表复用）");
@@ -196,6 +197,7 @@ public sealed class PlaybackSessionManager
         WireSession(session);
         EvictIfOverCapacity();
         session.ChangeChannel(channel); // 无面起播：攒流到门槛线，不接管画面
+        session.PausePlayback(); // vc68 漏音根因①：备台静音攒流，不出声不出画（缓冲照常）
         Standby = session;
         _standbySinceMs = _monotonicMs();
         SessionTrace.Emit($"[热备] 备台 {channel.Name} 起播攒流（新会话）");
@@ -218,6 +220,7 @@ public sealed class PlaybackSessionManager
             SessionTrace.Emit($"[热备] 热切接管 {channel.Name}（攒流 {_monotonicMs() - _standbySinceMs}ms 后出画就绪）");
             // 新画面先挂面覆盖旧画面（同面后画覆盖先画，旧画面撑到让位不露黑）
             sb.AttachSurface(cur.SurfaceHandle);
+            sb.ResumePlayback(); // vc68 漏音根因①：备台静音攒流至此恢复出声出画（缓冲攒流不中断）
             cur.Supersede();
             MarkSuperseded(cur); // 超龄账起算（#21）
             Current = sb;

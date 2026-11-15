@@ -446,6 +446,8 @@ internal sealed class LoggingPlayer : IPlayer
 
     public void Pause() => Log.Add("Pause");
 
+    public void Resume() => Log.Add("Resume"); // vc68：热备静音攒流契约（IPlayer.Resume）
+
     public void Stop() => Log.Add("Stop");
 
     public void AttachSurface(IntPtr surfaceHandle) => Log.Add("Attach");

@@ -85,6 +85,7 @@ public sealed class StubPlayer : IPlayer
 
     public void Play(PlaybackParams params_) { }
     public void Pause() { }
+    public void Resume() { } // vc68：热备静音攒流契约（IPlayer.Resume）
     public void Stop() { }
     public void AttachSurface(IntPtr surfaceHandle) { }
     public void DetachSurface() { }

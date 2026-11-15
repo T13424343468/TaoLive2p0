@@ -198,6 +198,12 @@ public sealed class ExoPlayerPlayer : IPlayer
         _player.PlayWhenReady = false;
     }
 
+    /// <summary>vc68 热备静音攒流：备台热切接管时恢复出声出画（PlayWhenReady=true，缓冲攒流不中断）。</summary>
+    public void Resume()
+    {
+        _player.PlayWhenReady = true;
+    }
+
     public void Stop()
     {
         _firstFrameRaisedThisPlay = false;
