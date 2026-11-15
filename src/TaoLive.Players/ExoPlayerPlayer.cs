@@ -65,10 +65,10 @@ public sealed class ExoPlayerPlayer : IPlayer
         catch { /* 内存探测失败按低配保守（BufferPolicy 未知内存=30s） */ }
         int watermarkMs = BufferPolicy.MaxWatermarkSeconds(totalMem) * 1000;
         int startupGateMs = (int)PrefetchCurve.StartupThreshold.TotalMilliseconds;
-        return new AndroidX.Media3.ExoPlayer.DefaultLoadControl.Builder()
-            // 绑定只挂 4 参重载（min,max,起播门槛,重缓门槛）；回退缓冲等走默认（0/不保留）
-            .SetBufferDurationsMs(watermarkMs, watermarkMs, startupGateMs, startupGateMs)
-            .Build()!;
+        // 步进式 builder（消 CS8602 可空链，同构造器口径）：绑定 fluent 链挂在可空返回上会报空解引用
+        var loadBuilder = new AndroidX.Media3.ExoPlayer.DefaultLoadControl.Builder();
+        loadBuilder.SetBufferDurationsMs(watermarkMs, watermarkMs, startupGateMs, startupGateMs);
+        return loadBuilder.Build()!;
     }
 
     /// <summary>频道上下文：缓存键与整表行匹配名（nmtv/gxtv 按 name 定位），Play 前由壳层设置。</summary>
