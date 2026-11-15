@@ -5,6 +5,11 @@ using TaoLive.Model;
 using TaoLive.Session;
 using Xunit;
 
+// 引擎搬回（vc53）：vc53 版 ChannelPrecheck/ChannelHealth 落 Session 层并保留原类名（审计对账要求），
+// 2.0 W8 简版状态机改名 ChannelWarmupPrecheck/ChannelWarmupHealth 让路；本文件测的是简版，别名指回 Catalog 版。
+using ChannelPrecheck = TaoLive.Catalog.ChannelWarmupPrecheck;
+using ChannelHealth = TaoLive.Catalog.ChannelWarmupHealth;
+
 namespace TaoLive.Tests;
 
 /// <summary>
@@ -254,7 +259,7 @@ public class W8FeatureTests
         Assert.False(WarmupPolicy.IsBatchSource("unknown-source"));
     }
 
-    // ---- 频道预检（ChannelPrecheck） -----------------------------------------------
+    // ---- 频道预检（ChannelWarmupPrecheck，2.0 W8 简版；vc53 Session 版同口径断言见 Vc53EngineTests） -------
 
     [Fact]
     public async Task Precheck_any_alive_source_marks_group_alive()

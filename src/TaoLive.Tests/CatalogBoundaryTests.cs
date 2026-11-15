@@ -151,9 +151,9 @@ public class CatalogBoundaryTests
         int lastCat = -1;
         foreach (var c in channels)
         {
-            int idx = Array.IndexOf(order, c.Category);
-            Assert.True(idx >= 0, $"未知分类 {c.Category}");
-            Assert.True(idx >= lastCat, $"分类乱序：{c.Category} 出现在 {order[Math.Max(lastCat, 0)]} 之后");
+            int idx = Array.IndexOf(order, c.CategoryName);
+            Assert.True(idx >= 0, $"未知分类 {c.CategoryName}");
+            Assert.True(idx >= lastCat, $"分类乱序：{c.CategoryName} 出现在 {order[Math.Max(lastCat, 0)]} 之后");
             lastCat = idx;
         }
         // Id 无重复（编号即列表顺序，重复即错台）

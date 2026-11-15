@@ -120,9 +120,9 @@ public class CatalogTests
         Assert.Equal(123, channels.Count);
         Assert.All(channels, c => Assert.True(c.IsValid));
         // 编号顺序：分类依序（央视→CGTN→专项→省台→城市台），同分类内不乱序
-        var catIndexes = channels.Select(c => Array.IndexOf(ChannelTable.CategoryOrder, c.Category)).ToList();
+        var catIndexes = channels.Select(c => Array.IndexOf(ChannelTable.CategoryOrder, c.CategoryName)).ToList();
         Assert.Equal(catIndexes, catIndexes.OrderBy(i => i).ToList());
-        Assert.Equal("央视", channels[0].Category);
+        Assert.Equal("央视", channels[0].CategoryName);
         Assert.StartsWith("c_", channels[0].Id);
     }
 

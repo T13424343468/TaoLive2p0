@@ -1,0 +1,203 @@
+﻿using TaoLive.Model;
+using TaoLive.Session;
+using Xunit;
+
+namespace TaoLive.Tests;
+
+/// <summary>
+/// M3 热切接线用例（方案书 v5：Current+Standby 双实例热切）：
+/// 热备攒流不掺画面、就绪即换面接管不露黑、未就绪回落冷切、
+/// 旧热备让位不白烧网络、LRU 资源闸淘汰让位会话释放内核、
+/// 换台钩子真实触发邻台预取。固定时钟快拍不真等。
+/// </summary>
+public class HotSwitchTests
+{
+    private static readonly DateTimeOffset T0 = DateTimeOffset.Parse("2026-11-15T00:00:00Z");
+
+    private static Channel MakeChannel(string id, params string[] urls)
+    {
+        var sources = urls.Select((u, i) =>
+            new SourceEndpoint(u, i == 0 ? SourceKind.PureIp : SourceKind.Cdn, 10 - i)).ToList();
+        return new Channel(id, $"频道-{id}", "测试", sources);
+    }
+
+    private static (PlaybackSessionManager Manager, List<LoggingPlayer> Players) MakeManager(
+        Action<Channel>? onSwitchingChannel = null)
+    {
+        var players = new List<LoggingPlayer>();
+        var manager = new PlaybackSessionManager(
+            () => { var p = new LoggingPlayer(); players.Add(p); return new PlaybackSession(p, new FixedClock(T0)); },
+            dispatcher: null, onSwitchingChannel, hotStandbyEnabled: true);
+        return (manager, players);
+    }
+
+    private static void MakePlaying(PlaybackSession session)
+    {
+        session.NotifyFirstFrame();
+        Assert.Equal(PlaybackState.Playing, session.State);
+    }
+
+    [Fact]
+    public void Prepare_standby_buffers_without_surface()
+    {
+        var (manager, players) = MakeManager();
+        var ch1 = MakeChannel("cctv1", "https://s/a.m3u8");
+        var ch2 = MakeChannel("cctv2", "https://s/b.m3u8");
+
+        manager.SwitchTo(ch1);
+        manager.Current!.AttachSurface(new IntPtr(1));
+        MakePlaying(manager.Current);
+
+        var standby = manager.PrepareStandby(ch2);
+        Assert.NotNull(standby);
+        Assert.Equal(PlaybackState.Buffering, standby!.State); // 无面起播：攒流不接管画面
+        Assert.Equal(IntPtr.Zero, standby.SurfaceHandle);       // 热备不占输出面
+        Assert.Equal(standby, manager.Standby);
+        Assert.Equal(manager.Current, manager.TryGet("cctv1")); // 当前画面不动
+        // 当前会话内核未被热备起播打扰（Stop 未出现于当前内核日志）
+        Assert.DoesNotContain("Stop", players[0].Log);
+    }
+
+    [Fact]
+    public void Switch_to_ready_standby_takes_over_surface_hot()
+    {
+        var (manager, players) = MakeManager();
+        var ch1 = MakeChannel("cctv1", "https://s/a.m3u8");
+        var ch2 = MakeChannel("cctv2", "https://s/b.m3u8");
+
+        manager.SwitchTo(ch1);
+        manager.Current!.AttachSurface(new IntPtr(1));
+        MakePlaying(manager.Current);
+        var standby = manager.PrepareStandby(ch2)!;
+        MakePlaying(standby); // 热备攒到门槛线（Playing）
+
+        var currentChanged = new List<PlaybackSession>();
+        manager.CurrentChanged += (_, s) => currentChanged.Add(s);
+
+        var taken = manager.SwitchTo(ch2);
+
+        // 热切：热备接管画面，旧会话让位，主界面无感
+        Assert.Equal(standby, taken);
+        Assert.Equal(standby, manager.Current);
+        Assert.Null(manager.Standby);
+        Assert.Equal(new IntPtr(1), manager.Current!.SurfaceHandle); // 输出面原面移交
+        Assert.Equal(PlaybackState.Idle, manager.TryGet("cctv1")!.State); // 旧会话已让位
+        Assert.Single(currentChanged);
+        // 接管次序：热备先挂面（Attach），旧内核后让位（Detach+Stop）——旧画面撑到最后一帧
+        Assert.Equal("Attach", players[1].Log[^1]);
+        Assert.Contains("Stop", players[0].Log);
+        // 热备内核未被重播（热切不重付起播成本）
+        Assert.Single(players[1].PlayedUrls);
+    }
+
+    [Fact]
+    public void Switch_to_unready_standby_falls_back_to_cold_switch()
+    {
+        var (manager, players) = MakeManager();
+        var ch1 = MakeChannel("cctv1", "https://s/a.m3u8");
+        var ch2 = MakeChannel("cctv2", "https://s/b.m3u8");
+
+        manager.SwitchTo(ch1);
+        manager.Current!.AttachSurface(new IntPtr(1));
+        MakePlaying(manager.Current);
+        var standby = manager.PrepareStandby(ch2)!;
+        // 热备仍在 Buffering（未到门槛线）
+
+        var taken = manager.SwitchTo(ch2);
+
+        // 冷切回落：目标会话复用（不另建内核），重新起播至 Playing 前
+        Assert.Equal(standby, taken);
+        Assert.Equal(standby, manager.Current);
+        Assert.Null(manager.Standby);
+        Assert.Equal(2, players[1].PlayedUrls.Count); // 攒流一次 + 冷切重播一次
+        Assert.Equal(PlaybackState.Buffering, manager.Current!.State);
+    }
+
+    [Fact]
+    public void New_standby_supersedes_old_standby_to_stop_wasting_network()
+    {
+        var (manager, players) = MakeManager();
+        var ch1 = MakeChannel("cctv1", "https://s/a.m3u8");
+        var ch2 = MakeChannel("cctv2", "https://s/b.m3u8");
+        var ch3 = MakeChannel("cctv3", "https://s/c.m3u8");
+
+        manager.SwitchTo(ch1);
+        MakePlaying(manager.Current!);
+        var sb1 = manager.PrepareStandby(ch2)!;
+        var sb2 = manager.PrepareStandby(ch3)!;
+
+        // 换备目标：旧热备让位（停内核），新热备接管预备位
+        Assert.Equal(PlaybackState.Idle, sb1.State);
+        Assert.Equal(sb2, manager.Standby);
+        Assert.Contains("Stop", players[1].Log);
+    }
+
+    [Fact]
+    public void Shared_kernel_manager_has_no_hot_standby()
+    {
+        var clock = new FixedClock(T0);
+        var sharedPlayer = new LoggingPlayer();
+        var manager = new PlaybackSessionManager(() => new PlaybackSession(sharedPlayer, clock));
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8");
+
+        Assert.Null(manager.PrepareStandby(ch)); // 共用单内核不开热备（W1 冷切契约不变）
+        Assert.Null(manager.Standby);
+    }
+
+    [Fact]
+    public void Session_table_evicts_lru_superseded_sessions_and_disposes_kernels()
+    {
+        var (manager, players) = MakeManager();
+        var channels = Enumerable.Range(1, 10)
+            .Select(i => MakeChannel($"ch{i}", $"https://s/{i}.m3u8")).ToList();
+
+        manager.SwitchTo(channels[0]);
+        for (int i = 1; i < channels.Count; i++)
+        {
+            manager.SwitchTo(channels[i]);
+        }
+
+        // 资源闸：会话表封顶，超容的最久未用已让位会话被淘汰并释放内核
+        Assert.True(manager.Sessions.Count <= PlaybackSessionManager.MaxRetainedSessions,
+            $"会话表超容：{manager.Sessions.Count}");
+        Assert.NotNull(manager.Current);
+        var disposedCount = players.Count(p => p.Log.Contains("Dispose"));
+        Assert.True(disposedCount > 0, "超容会话未释放内核");
+        // 最早被换下的会话已不在表
+        Assert.Null(manager.TryGet("ch1"));
+        Assert.NotNull(manager.TryGet($"ch{channels.Count}"));
+    }
+
+    [Fact]
+    public void Switching_channel_triggers_prefetch_hook_with_switched_channel()
+    {
+        var prefetched = new List<Channel>();
+        var (manager, _) = MakeManager(onSwitchingChannel: ch => prefetched.Add(ch));
+        var ch1 = MakeChannel("cctv1", "https://s/a.m3u8");
+        var ch2 = MakeChannel("cctv2", "https://s/b.m3u8");
+
+        manager.SwitchTo(ch1);
+        manager.SwitchTo(ch2);
+
+        Assert.Equal(new[] { ch1, ch2 }, prefetched); // 每次换台即触发（壳层接 ChannelPrefetcher 邻台预取）
+    }
+
+    [Fact]
+    public void Standby_surface_handover_does_not_touch_current_before_takeover()
+    {
+        var (manager, players) = MakeManager();
+        var ch1 = MakeChannel("cctv1", "https://s/a.m3u8");
+        var ch2 = MakeChannel("cctv2", "https://s/b.m3u8");
+
+        manager.SwitchTo(ch1);
+        manager.Current!.AttachSurface(new IntPtr(1));
+        MakePlaying(manager.Current);
+        var standby = manager.PrepareStandby(ch2)!;
+        MakePlaying(standby);
+
+        // 热备就绪但用户未切台：当前会话画面持续（无 Detach/Stop）
+        Assert.DoesNotContain("Stop", players[0].Log);
+        Assert.Equal(PlaybackState.Playing, manager.Current!.State);
+        Assert.Equal(standby, manager.Standby);
+    }
+}

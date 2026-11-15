@@ -60,6 +60,9 @@ public sealed class PlaybackSession
     /// <summary>本会话累计断流自救切换次数；换台归零。</summary>
     public int FailoverCount { get; private set; }
 
+    /// <summary>当前输出面句柄（管理器热切换移交用）；未接面为 IntPtr.Zero。</summary>
+    public IntPtr SurfaceHandle => _surfaceHandle;
+
     /// <summary>状态迁移完成事件（迁移成功后触发，含换台与自救引发的迁移）。</summary>
     public event EventHandler<PlaybackState>? StateChanged;
 
@@ -257,6 +260,19 @@ public sealed class PlaybackSession
             _player.Stop();
             Transition(PlaybackState.Idle, "superseded");
         }
+    }
+
+    /// <summary>
+    /// 释放内核（独享内核场景下管理器 LRU 淘汰会话用）：仅限已让位（Superseded）会话，
+    /// 释放后本会话不可再起播。在播/在备会话调用抛异常（资源闸不误杀热备）。
+    /// </summary>
+    public void ReleaseKernel()
+    {
+        if (_active)
+        {
+            throw new InvalidOperationException("ReleaseKernel only legal on superseded sessions");
+        }
+        _player.Dispose();
     }
 
     private void OnPlayerError(string code)

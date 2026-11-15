@@ -5,17 +5,27 @@ namespace TaoLive.Session;
 
 /// <summary>
 /// DI 装配点（方案书 v5 口径）：壳层只调用 AddTaoLiveSession() 一次，
-/// 避免各壳各拼导致行为漂移。播放内核由壳层以 IPlayer 注册进来。
+/// 避免各壳各拼导致行为漂移。
+/// kernelFactory（可选）：注入后每会话独享内核实例（Current+Standby 双实例热切的资源前提）；
+/// 不注入则沿用共用单内核（仅冷切，W1 契约不变）。
+/// onSwitchingChannel（可选）：换台钩子，壳层接 ChannelPrefetcher（邻台预取，单车道让路口径）。
 /// </summary>
 public static class ServiceCollectionExtensions
 {
-    public static IServiceCollection AddTaoLiveSession(this IServiceCollection services)
+    public static IServiceCollection AddTaoLiveSession(this IServiceCollection services,
+        Func<IPlayer>? kernelFactory = null, Action<Model.Channel>? onSwitchingChannel = null)
     {
         services.AddSingleton<PlaybackSessionManager>(sp =>
         {
-            var player = sp.GetRequiredService<IPlayer>();
             var clock = sp.GetService<IClock>() ?? new SystemClock();
             var dispatcher = sp.GetService<IMainThreadDispatcher>() ?? new ImmediateMainThreadDispatcher();
+            if (kernelFactory is not null)
+            {
+                return new PlaybackSessionManager(
+                    () => new PlaybackSession(kernelFactory(), clock), dispatcher,
+                    onSwitchingChannel, hotStandbyEnabled: true);
+            }
+            var player = sp.GetRequiredService<IPlayer>();
             return new PlaybackSessionManager(() => new PlaybackSession(player, clock), dispatcher);
         });
         return services;

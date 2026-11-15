@@ -235,8 +235,9 @@ public static class ChannelTable
             list.Add(new Channel($"cd_{name}", name, cat, new[] { new SourceEndpoint(url, kind, 1) }));
         }
         // 分类归组重排（一期 ChannelCatalog.Rebuild 口径）：编号按分类依序分配，同分类内保持登记序
+        // 引擎搬回适配：Channel 换 vc53 原型后经 CategoryName 兼容面过滤
         var grouped = ChannelTable.CategoryOrder
-            .Select(cat => list.Where(c => c.Category == cat).ToList())
+            .Select(cat => list.Where(c => c.CategoryName == cat).ToList())
             .Where(g => g.Count > 0)
             .SelectMany(g => g);
         return grouped.ToList();

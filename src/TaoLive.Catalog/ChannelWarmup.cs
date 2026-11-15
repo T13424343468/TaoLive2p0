@@ -103,8 +103,10 @@ public class SourceBackoffLedger
     public void Clear() => _frozen.Clear();
 }
 
-/// <summary>频道可连状态（v1.0.8 开机预检口径逐字移植）：未探测/探测中/可用/失效。</summary>
-public enum ChannelHealth
+/// <summary>频道可连状态（v1.0.8 开机预检口径逐字移植，2.0 W8）：未探测/探测中/可用/失效。
+/// 引擎搬回（vc53）：vc53 版 ChannelPrecheck/ChannelHealth 已进 Session 层并保留原类名（审计对账要求），
+/// 本 W8 简版状态机改名让路，与 Session 版口径互不替代。</summary>
+public enum ChannelWarmupHealth
 {
     Unknown,
     Checking,
@@ -113,22 +115,22 @@ public enum ChannelHealth
 }
 
 /// <summary>
-/// 频道预检（v1.0.8/v1.0.9 口径移植，2.0 W8）：
+/// 频道预检·W8 简版状态机（v1.0.8/v1.0.9 口径移植，2.0 W8）：
 /// - 按台单顺序逐台轻量探测（只取票，不建视频传输），限速执行防被判异常流量；
 /// - 同名频道各来源变体逐一探测，任一来源可达即整台可用，全源不可达才进失效组；
 /// - 失效台可复测（Requeue），票据/网络恢复即转回可用。
 /// probe 由装配层注入（生产=取票器轻探，测试=可脚本假探针），纯状态机可测。
 /// </summary>
-public class ChannelPrecheck
+public class ChannelWarmupPrecheck
 {
     private readonly Func<Channel, Task<bool>> _probe;
     private readonly int _intervalMs;
-    private readonly ConcurrentDictionary<string, ChannelHealth> _states = new();
+    private readonly ConcurrentDictionary<string, ChannelWarmupHealth> _states = new();
 
     /// <summary>状态变化事件：(频道 Id, 新状态)。壳层订阅后刷新列表。</summary>
-    public event Action<string, ChannelHealth>? StateChanged;
+    public event Action<string, ChannelWarmupHealth>? StateChanged;
 
-    public ChannelPrecheck(Func<Channel, Task<bool>> probe, int intervalMs = 600)
+    public ChannelWarmupPrecheck(Func<Channel, Task<bool>> probe, int intervalMs = 600)
     {
         _probe = probe ?? throw new ArgumentNullException(nameof(probe));
         _intervalMs = Math.Max(0, intervalMs);
@@ -136,7 +138,7 @@ public class ChannelPrecheck
 
     private static string GroupKey(Channel ch) => NormalizeName(ch.Name);
 
-    /// <summary>同频道各来源归并键：台名去空格后一致视为同一频道（一期 ChannelPrecheck.NormalizeName 口径）。</summary>
+    /// <summary>同频道各来源归并键：台名去空格后一致视为同一频道（一期 NormalizeName 口径；与 Session 版 ChannelPrecheck.NormalizeName 同源）。</summary>
     internal static string NormalizeName(string name)
     {
         var trimmed = (name ?? "").Replace(" ", "").Replace("　", "");
@@ -144,11 +146,11 @@ public class ChannelPrecheck
     }
 
     /// <summary>查询某台当前状态（未探测=Unknown）。同频道任一来源可达=可用。</summary>
-    public ChannelHealth Of(Channel ch) =>
-        _states.TryGetValue(ch.Id, out var s) ? s : ChannelHealth.Unknown;
+    public ChannelWarmupHealth Of(Channel ch) =>
+        _states.TryGetValue(ch.Id, out var s) ? s : ChannelWarmupHealth.Unknown;
 
     /// <summary>直接标记状态（播放实测/预检覆盖写）。仅在状态真正变化时发事件，防重复刷列表。</summary>
-    public void MarkState(Channel ch, ChannelHealth state)
+    public void MarkState(Channel ch, ChannelWarmupHealth state)
     {
         var prev = Of(ch);
         if (prev == state) return;
@@ -157,7 +159,7 @@ public class ChannelPrecheck
     }
 
     /// <summary>失效台复测入口：置回探测中，探测轮次走完自动更新。</summary>
-    public void Requeue(Channel ch) => MarkState(ch, ChannelHealth.Checking);
+    public void Requeue(Channel ch) => MarkState(ch, ChannelWarmupHealth.Checking);
 
     /// <summary>
     /// 按台单顺序逐台探测，每台之间限速间隔。不阻塞调用方播放流程。
@@ -172,8 +174,8 @@ public class ChannelPrecheck
             if (ct.IsCancellationRequested) return;
             var variants = group.ToList();
             var lead = variants[0];
-            if (!keepKnownState || Of(lead) == ChannelHealth.Unknown)
-                MarkState(lead, ChannelHealth.Checking);
+            if (!keepKnownState || Of(lead) == ChannelWarmupHealth.Unknown)
+                MarkState(lead, ChannelWarmupHealth.Checking);
             var anyOk = false;
             foreach (var ch in variants)
             {
@@ -189,7 +191,7 @@ public class ChannelPrecheck
                 }
             }
             foreach (var ch in variants)
-                MarkState(ch, anyOk ? ChannelHealth.Alive : ChannelHealth.Dead);
+                MarkState(ch, anyOk ? ChannelWarmupHealth.Alive : ChannelWarmupHealth.Dead);
         }
     }
 }

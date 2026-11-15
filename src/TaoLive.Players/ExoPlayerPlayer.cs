@@ -19,7 +19,7 @@ public sealed class ExoPlayerPlayer : IPlayer
     private readonly Forwarder _forwarder;
     private readonly AndroidX.Media3.ExoPlayer.IExoPlayer _player;
     private readonly Android.OS.Handler _main;
-    private readonly Func<TaoLive.Model.SourceEndpoint, Task<string?>>? _streamResolver;
+    private Func<TaoLive.Model.SourceEndpoint, Task<string?>>? _streamResolver;
     private bool _firstFrameRaisedThisPlay;
     private IntPtr _surfaceHandle;
     private bool _hasSurface;
@@ -34,15 +34,59 @@ public sealed class ExoPlayerPlayer : IPlayer
     {
         ArgumentNullException.ThrowIfNull(context);
         _forwarder = new Forwarder(this);
-        _player = new AndroidX.Media3.ExoPlayer.ExoPlayerBuilder(context).Build()!;
+        _player = new AndroidX.Media3.ExoPlayer.ExoPlayerBuilder(context)
+            .SetLoadControl(BuildLoadControl(context))
+            .Build()!;
         _player.AddListener(_forwarder);
         _main = new Android.OS.Handler(Android.OS.Looper.MainLooper!);
         _streamResolver = streamResolver;
     }
 
+    /// <summary>
+    /// 缓冲深水接线（vc53 fix56 思路在 ExoPlayer 内核原生落位）：
+    /// - 起播门槛线=7 秒（PrefetchCurve.StartupThreshold）：缓冲到线即出画，首帧快字当头，不等满水位；
+    /// - 预取水位线=按设备内存自适应安全水位（BufferPolicy.MaxWatermarkSeconds：内存足 60s、低配 30-45s），
+    ///   出画后内核后台继续把窗口填满——保满预取即此；
+    /// - 水位读写下沉 Players 适配层口径：水位由内核 LoadControl 承担，会话层不掺内部。
+    /// </summary>
+    private static AndroidX.Media3.ExoPlayer.DefaultLoadControl BuildLoadControl(Android.Content.Context context)
+    {
+        long totalMem = 0;
+        try
+        {
+            if (context.GetSystemService(Android.Content.Context.ActivityService)
+                is Android.App.ActivityManager am)
+            {
+                var mi = new Android.App.ActivityManager.MemoryInfo();
+                am.GetMemoryInfo(mi);
+                totalMem = mi.TotalMem;
+            }
+        }
+        catch { /* 内存探测失败按低配保守（BufferPolicy 未知内存=30s） */ }
+        int watermarkMs = BufferPolicy.MaxWatermarkSeconds(totalMem) * 1000;
+        int startupGateMs = (int)PrefetchCurve.StartupThreshold.TotalMilliseconds;
+        return new AndroidX.Media3.ExoPlayer.DefaultLoadControl.Builder()
+            .SetBufferDurationsMs(
+                minBufferMs: watermarkMs,
+                maxBufferMs: watermarkMs,
+                bufferForPlaybackMs: startupGateMs,
+                bufferForPlaybackAfterRebufferMs: startupGateMs,
+                backBufferDurationMs: 0,
+                resetPositionOnBackBuffer: true,
+                prioritizeTimeOverSizeThresholds: true)
+            .Build();
+    }
+
     /// <summary>频道上下文：缓存键与整表行匹配名（nmtv/gxtv 按 name 定位），Play 前由壳层设置。</summary>
     public string? CurrentChannelKey { get; set; }
     public string? CurrentChannelName { get; set; }
+
+    /// <summary>构造后补挂取流注入点（内核工厂场景：独享内核创建后挂本实例的解析器）。</summary>
+    public ExoPlayerPlayer WithStreamResolver(Func<TaoLive.Model.SourceEndpoint, Task<string?>> resolver)
+    {
+        _streamResolver = resolver ?? throw new ArgumentNullException(nameof(resolver));
+        return this;
+    }
 
     // —— 事件出口（契约语义，供会话层订阅）——
 
@@ -55,6 +99,9 @@ public sealed class ExoPlayerPlayer : IPlayer
     {
         ArgumentNullException.ThrowIfNull(params_);
         _firstFrameRaisedThisPlay = false;
+        // 频道上下文自取（双实例热切前提：每会话独享内核，壳层不再代设）
+        if (!string.IsNullOrEmpty(params_.Channel.Id)) CurrentChannelKey = params_.Channel.Id;
+        if (!string.IsNullOrEmpty(params_.Channel.Name)) CurrentChannelName = params_.Channel.Name;
         if (_streamResolver is null)
         {
             StartMedia(params_.Endpoint.Url);

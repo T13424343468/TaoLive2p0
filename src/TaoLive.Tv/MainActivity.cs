@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using Android.App;
 using Android.Content;
 using Android.Graphics;
@@ -26,7 +26,6 @@ public class MainActivity : Activity
 {
     private IServiceProvider _services = default!;
     private PlaybackSessionManager _manager = default!;
-    private ExoPlayerPlayer _player = default!;
     private readonly IReadOnlyList<Channel> _channels = ChannelTable.Build();
 
     private FrameLayout _root = default!;
@@ -50,20 +49,44 @@ public class MainActivity : Activity
         base.OnCreate(savedInstanceState);
 
         var resolver = new TicketResolver();
-        _player = new ExoPlayerPlayer(this, endpoint => resolver.ResolveAsync(endpoint,
-            _player?.CurrentChannelKey ?? "", _player?.CurrentChannelName ?? ""));
+
+        // 每会话独享内核（Current+Standby 双实例热切的资源前提）；
+        // 取流解析器闭包持有本实例，频道上下文由内核 Play 自取（双实例不共用上下文）
+        Func<IPlayer> KernelFactory()
+        {
+            ExoPlayerPlayer? player = null;
+            player = new ExoPlayerPlayer(this).WithStreamResolver(endpoint =>
+                resolver.ResolveAsync(endpoint, player!.CurrentChannelKey ?? "", player!.CurrentChannelName ?? ""));
+            return player;
+        }
+
+        // 换台邻台预取（vc53 任务8）：取票落 ChannelWarmer 既有 5 分钟缓存（归一纪律，不建第二本账），
+        // DNS 预解析失败静默（取流链路自带兜底）；全程过 BackgroundLane 单车道 Standard 档让路播放
+        var prefetcher = new ChannelPrefetcher(
+            async ch =>
+            {
+                try { return await new ChannelWarmer(resolver).WarmChannelAsync(ch) ? new ResolvedStream { Channel = ch } : null; }
+                catch { return null; }
+            },
+            async host => { try { await System.Net.Dns.GetHostAddressesAsync(host); } catch { /* 预解析失败不挡预取 */ } });
+
         _services = new ServiceCollection()
-            .AddSingleton<IPlayer>(_player)
             .AddSingleton<IClock, global::TaoLive.Session.SystemClock>()
             .AddSingleton<IMainThreadDispatcher>(new AndroidMainThreadDispatcher(_main))
-            .AddTaoLiveSession()
+            .AddTaoLiveSession(KernelFactory, ch =>
+            {
+                // 换台即触发邻台预取（火车道让路：首帧未落地铁道自动门控，画面平稳优先）
+                _ = Task.Run(() => prefetcher.PrefetchNeighborsAsync(ch, _channels));
+            })
             .BuildServiceProvider();
         _manager = _services.GetRequiredService<PlaybackSessionManager>();
         _favorites = GetSharedPreferences("favorites", FileCreationMode.Private)!
             .GetStringSet("ids", new List<string>())!.ToHashSet();
         // 备源耗尽提示（一期口径：全源不可达时明确提示，不静默装死；OK 键重试）
+        // 只收当前会话事件（热备攒流/换台竞速不掺内部，画面不受热备起播影响——方案书 v5 口径）
         _manager.SessionStateChanged += (_, e) =>
         {
+            if (e.Session != _manager.Current) return;
             if (e.State == PlaybackState.Failed)
                 ShowToast(TaoLive.Session.SwitchHud.AllLinesFailed);
             else if (e.State == PlaybackState.Buffering)
@@ -170,9 +193,7 @@ public class MainActivity : Activity
     private void SwitchToCurrent()
     {
         var ch = _channels[_currentIndex];
-        // 频道上下文先进内核（缓存键+整表行匹配名），再进会话（ChangeChannel 内即触发取票）
-        _player.CurrentChannelKey = ch.Id;
-        _player.CurrentChannelName = ch.Name;
+        // 频道上下文由内核 Play 自取（每会话独享内核，双实例不共用上下文）
         if (_manager.Current is { } cur && cur.CurrentChannel?.Id == ch.Id)
         {
             cur.ChangeChannel(ch); // 同频道原地重起播（切回口径）
@@ -327,6 +348,8 @@ public class MainActivity : Activity
     {
         if (index < 0 || index >= _channels.Count) return;
         var ch = _channels[index];
+        // 换台竞速：去抖窗口内即备热备（攒流到起播门槛线，停稳时热切接管不露黑）
+        _ = _manager.PrepareStandby(ch);
         _debouncer.Tap(System.Environment.TickCount64, ch.Id);
         ShowToast(ch.Name);
         _main.PostDelayed(() =>
@@ -402,7 +425,7 @@ public class MainActivity : Activity
             }
             foreach (var cat in ChannelTable.CategoryOrder)
             {
-                var group = channels.Where(c => c.Category == cat).ToList();
+                var group = channels.Where(c => c.CategoryName == cat).ToList();
                 if (group.Count == 0) continue;
                 rows.Add(new Row(cat, true, null));
                 // 编号=整表顺序（一期口径：编号永久直达）
