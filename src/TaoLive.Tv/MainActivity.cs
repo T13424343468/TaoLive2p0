@@ -113,6 +113,9 @@ public partial class MainActivity : Activity
         //（缩放档须在 BuildRoot 前就位，全套令牌按档位重算）
         _prefs = GetSharedPreferences("taolive_prefs", FileCreationMode.Private)!;
         UiScale.Factor = _prefs.GetFloat("ui_scale", 5f / 9f);
+        // #69 屏宽自适应令：以屏宽长边对 1920px 基准定标（老板 1080p 电视=1:1，中档 28/22/18 逐字一致）；
+        // 更宽的屏整体放大、更窄的屏整体缩小，档位照常叠加——写死必有跨屏兼容问题（老板令）。
+        UiScale.ScreenScale = Math.Max(Resources!.DisplayMetrics!.WidthPixels, Resources.DisplayMetrics.HeightPixels) / 1920f;
         // 收口批④开关合流：预热与预检共车道只留预检开关，预热（开机全量预热+换台邻台预取+开机默认台焐热）
         // 一律随 _precheckEnabled 同起同停——两个开关管同一条车道必出一个死开关（方案书收口批④原文）。
         _precheckEnabled = _prefs.GetBoolean("precheck_enabled", true);

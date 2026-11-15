@@ -6,6 +6,7 @@
 /// 大=2/3(24sp)、中=5/9(20sp)、小=1/3(12sp)，默认中；覆盖 #14 的整体×2/3 压缩口径。
 /// #68 语义字号令（2026-11-15 老板拍板）：标题/项/说明三类语义字号（Title/Item/Caption），
 /// 同角色跨页面同字号；Sp/Px 入参重定标为「中档实值」（#15 时把最终观感值又乘了一遍档系数的错账就此拨正）。
+/// #69 屏宽自适应令（2026-11-15 老板拍板）：全部实值随屏宽走（1920px 宽=基准 1:1），防写死兼容性问题。
 /// Sp(裸字号)/Px(裸像素)随档缩放（#16-#19 全元素跟档口径保留），prefs 键 ui_scale / taolive_prefs；
 /// 改档由 CycleDisplaySize 走 Recreate() 即时生效——真机反馈批#15 原地换皮：会话跨重建存活，正在看的台不断流。
 /// </summary>
@@ -15,10 +16,14 @@ public static class UiScale
     public const float SpecBase = 20f; // #68 语义字号令：中档实字号基准（#61 拍板「中档=20sp」）
     public static float Factor { get; set; } = 5f / 9f; // 默认「中」=基准 20sp（#61 回抬令）
 
-    /// <summary>总缩放系数（#68 重定标）：裸最终值 × Scale = 当前档实值；中档=1.0 原值直出。</summary>
-    public static float Scale => BaseSize / SpecBase * Factor;
+    /// <summary>#69 屏宽自适应定标（2026-11-15 老板令）：实值随屏宽走，1920px 宽=基准 1:1；
+    /// 更宽的屏整体放大、更窄的屏整体缩小，档位在基准上照常叠加可调。OnCreate 装载。</summary>
+    public static float ScreenScale { get; set; } = 1f;
 
-    public static float T(float f) => f * BaseSize * Factor;
+    /// <summary>总缩放系数（#68 重定标+#69 屏宽自适应）：裸最终值 × Scale = 当前档实值；中档 1920 宽=1.0 原值直出。</summary>
+    public static float Scale => BaseSize / SpecBase * Factor * ScreenScale;
+
+    public static float T(float f) => f * BaseSize * Factor * ScreenScale;
 
     /// <summary>#68 语义字号令：标题/项/说明三类，同角色同字号，列表/设置/弹窗观感一致。</summary>
     public static float Title => T(1.4f);   // 标题：28sp@中（抽屉页头/设置面板标题/退出弹窗标题）
