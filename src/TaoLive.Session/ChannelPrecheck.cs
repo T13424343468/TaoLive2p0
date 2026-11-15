@@ -109,6 +109,23 @@ public class ChannelPrecheck
     public SourceHealthEntry? SourceHealthOf(Channel ch) =>
         _sourceHealth.TryGetValue(SourceKey(ch), out var e) ? e : null;
 
+    /// <summary>列表健康点门槛：连续探活成功达此次数才亮绿（方案书收口批②：近 3 轮探活全通=绿）。</summary>
+    public const int MarkGreenMinConsecutiveOks = 3;
+
+    /// <summary>
+    /// 列表健康点三态（方案书收口批②）：近 3 轮探活全通=绿（Alive）、部分通/检测中/未探=灰（Checking）、
+    /// 全败=红（Dead）。只读健康账展示，不写账（v33 条款）。
+    /// </summary>
+    public ChannelHealth MarkOf(Channel ch)
+    {
+        var state = Of(ch);
+        if (state == ChannelHealth.Dead) return ChannelHealth.Dead;
+        if (state == ChannelHealth.Alive)
+            return SourceHealthOf(ch) is { ConsecutiveOks: >= MarkGreenMinConsecutiveOks }
+                ? ChannelHealth.Alive : ChannelHealth.Checking;
+        return ChannelHealth.Checking;
+    }
+
     /// <summary>
     /// 该台在健康表里最近验证可用的来源变体（v1.0.9 第⑬项）：
     /// 播放选源与卡死自救换源优先取它；同频道没有已验证来源时返回当前台本身。

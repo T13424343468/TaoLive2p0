@@ -29,8 +29,13 @@ public partial class MainActivity : Activity
     private readonly IReadOnlyList<Channel> _channels = ChannelTable.Build();
 
     private FrameLayout _root = default!;
+    private LinearLayout _listPage = default!;
     private ListView _list = default!;
     private FrameLayout _playerPage = default!;
+    private TextView? _logoBadge;
+    private readonly List<TextView> _tabViews = new();
+    private ListTabs.Tab _tab = ListTabs.Tab.All;
+    private long _healthLastAtMs;
     private readonly SwitchDebouncer _debouncer = new();
     private SurfaceView _surface = default!;
     private TextView _toast = default!;
@@ -158,11 +163,65 @@ public partial class MainActivity : Activity
         try { _precheck.AttachHealthStore(new SourceHealthStore(FilesDir!.AbsolutePath)); }
         catch { /* 账本初始化失败按账空跑，预检不挡启动 */ }
         if (_precheckEnabled) StartPrecheckLoop();
+        _precheck.StateChanged += OnPrecheckHealthChanged; // ④列表健康点：读账刷新展示（5 秒节流）
 
         Window!.AddFlags(WindowManagerFlags.KeepScreenOn);
         BuildRoot();
         SetContentView(_root);
         ShowList();
+
+        // ⑥开机默认台（方案书收口批②）：开机自启链路（BootReceiver 拉起带 from_boot）才走；
+        // 手动打开 App 仍进列表（一期口径不变）
+        if (Intent?.GetBooleanExtra("from_boot", false) == true) _ = EnterByBootAsync();
+    }
+
+    /// <summary>
+    /// 开机链路（方案书收口批②⑤⑥）：等网就绪再进默认台——轻量 TCP 连通探测（非 Wi-Fi 状态位，防假在线），
+    /// 初值 15 秒，超时照常进；预检先焐热取票缓存，默认台随后起播（顺序定死）；预热超时/失败照常进，起播走既有重试。
+    /// </summary>
+    private async Task EnterByBootAsync()
+    {
+        try
+        {
+            ShowToast("等待网络…");
+            await NetReadiness.WaitAsync(report: m => CrashNet.Record(m)); // ≤15 秒，超时照常放行
+            _main.Post(async () =>
+            {
+                try
+                {
+                    var idx = DefaultChannelIndex();
+                    ShowToast($"正在打开 {_channels[idx].Name}");
+                    if (_warmupEnabled)
+                    {
+                        try
+                        {
+                            var warm = new ChannelWarmer(_resolver).WarmChannelAsync(_channels[idx]); // 预检先焐热取票缓存
+                            await Task.WhenAny(warm, Task.Delay(15_000)); // 预热超时照常进默认台
+                        }
+                        catch (Exception ex) { CrashNet.Record($"[Boot] 预热未完成照常进默认台：{ex.Message}"); }
+                    }
+                    if (!_onPlayerPage) PlayAt(idx); // 用户已手动进台不抢
+                }
+                catch (Exception ex) { CrashNet.Record($"[Boot] 开机链路异常照常进默认台：{ex.Message}"); }
+            });
+        }
+        catch (Exception ex)
+        {
+            CrashNet.Record($"[Boot] 开机链路异常照常进默认台：{ex.Message}");
+            _main.Post(() => { if (!_onPlayerPage) PlayAt(DefaultChannelIndex()); });
+        }
+    }
+
+    /// <summary>默认台来源（方案书收口批②）：设置项指定台（开机默认台设置行），未设进频道列表首位。</summary>
+    private int DefaultChannelIndex()
+    {
+        var saved = _prefs.GetString("default_channel", null);
+        if (!string.IsNullOrEmpty(saved))
+        {
+            var i = _channels.ToList().FindIndex(c => c.Id == saved);
+            if (i >= 0) return i;
+        }
+        return 0; // 未设=列表首位
     }
 
     protected override void OnDestroy()
@@ -181,8 +240,26 @@ public partial class MainActivity : Activity
         _toastHide = new Java.Lang.Runnable(() =>
             _toast.Visibility = ViewStates.Invisible);
 
+        _listPage = new LinearLayout(this) { Orientation = Orientation.Vertical };
+
+        // ②五标签行（方案书收口批②，照 vc53 DrawerSupport 名册：全部/收藏/央视/卫视/地方台；枚举序即行序）
+        _tabViews.Clear();
+        var tabBar = new LinearLayout(this) { Orientation = Orientation.Horizontal };
+        tabBar.SetPadding(Dp(24), Dp(16), Dp(24), Dp(8));
+        foreach (ListTabs.Tab t in Enum.GetValues(typeof(ListTabs.Tab)))
+        {
+            var tv = new TextView(this) { Text = ListTabs.Label(t), Gravity = GravityFlags.Center };
+            tv.TextSize = 18f;
+            tv.SetPadding(Dp(20), Dp(8), Dp(20), Dp(8));
+            tv.Click += (_, _) => SelectTab(t);
+            tabBar.AddView(tv, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f));
+            _tabViews.Add(tv);
+        }
+        StyleTabs();
+        _listPage.AddView(tabBar);
+
         _list = new ListView(this) { CacheColorHint = Color.Transparent };
-        _list.Adapter = new ChannelListAdapter(this, _channels, _favorites);
+        _list.Adapter = new ChannelListAdapter(this, _channels, _favorites, ch => _precheck.MarkOf(ch));
         _list.ItemClick += (_, e) =>
         {
             // 行→频道→列表索引（收藏组行也指向同一频道，编号直达语义不变）
@@ -190,13 +267,34 @@ public partial class MainActivity : Activity
             if (channel is null) return;
             PlayAt(_channels.ToList().FindIndex(c => c.Id == channel.Id));
         };
-        _root.AddView(_list, new FrameLayout.LayoutParams(
+        _listPage.AddView(_list, new LinearLayout.LayoutParams(-1, 0, 1f));
+        _root.AddView(_listPage, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.MatchParent));
 
         _playerPage = new FrameLayout(this) { Visibility = ViewStates.Gone };
         _surface = new SurfaceView(this);
         _playerPage.AddView(_surface, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.MatchParent));
+
+        // ②台标（方案书收口批②）：播放画面台标行，纯展示；2.0 无台标素材→台名文字代标
+        //（照 vc53 vc44① 水墨文字台标样式：水墨圆角底+纸色字），素材缺失不留空块
+        _logoBadge = new TextView(this)
+        {
+            Gravity = GravityFlags.Center,
+            TextSize = 16f,
+        };
+        _logoBadge!.SetTextColor(Color.ParseColor("#E7E2D6"));
+        var inkBg = new Android.Graphics.Drawables.GradientDrawable();
+        inkBg.SetColor(Color.ParseColor("#3A4750"));
+        inkBg.SetCornerRadius(Dp(12));
+        inkBg.SetStroke(1, Color.ParseColor("#4E5D68"));
+        _logoBadge.Background = inkBg;
+        _logoBadge.SetPadding(Dp(24), Dp(8), Dp(24), Dp(8));
+        _logoBadge.Visibility = ViewStates.Gone;
+        _playerPage.AddView(_logoBadge, new FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WrapContent, ViewGroup.LayoutParams.WrapContent)
+        { Gravity = GravityFlags.Top | GravityFlags.Start, LeftMargin = Dp(28), TopMargin = Dp(20) });
+
         _toast = new TextView(this) { Gravity = GravityFlags.Center };
         _toast.SetTextColor(Color.White);
         _toast.TextSize = 34;
@@ -213,15 +311,22 @@ public partial class MainActivity : Activity
     {
         _manager.Current?.DetachSurface();
         _playerPage.Visibility = ViewStates.Gone;
-        _list.Visibility = ViewStates.Visible;
+        _logoBadge!.Visibility = ViewStates.Gone; // 台标行只在播放画面
+        _listPage.Visibility = ViewStates.Visible;
         _onPlayerPage = false;
+        // 焦点默认落当前台行（方案书收口批②）：呼出即定位到正在看的台
+        var current = _channels[_currentIndex];
+        var pos = (_list.Adapter as ChannelListAdapter)?.PositionOf(current.Id) ?? -1;
+        if (pos >= 0) _list.SetSelection(pos);
     }
 
     private void ShowPlayer()
     {
-        _list.Visibility = ViewStates.Gone;
+        _listPage.Visibility = ViewStates.Gone;
         _playerPage.Visibility = ViewStates.Visible;
         _onPlayerPage = true;
+        _logoBadge!.Text = _channels[_currentIndex].Name; // ②台标：台名文字代标（素材缺失不留空块）
+        _logoBadge.Visibility = ViewStates.Visible;
         EnsureWatchdog();
         // 播放页已就绪而 Surface 早已创建（返回再进场景）：补挂输出面
         if (_surface.Holder?.Surface != null && _surface.Holder.Surface.IsValid)
@@ -475,6 +580,15 @@ public partial class MainActivity : Activity
             case Keycode.Back or Keycode.Escape when _onPlayerPage:
                 ShowList();
                 return true;
+            case Keycode.Menu or Keycode.Settings or Keycode.Info when _onPlayerPage:
+                ShowList(); // ②键位表原样接（照 vc53）：菜单键呼列表，呼出同步无延迟（≤200ms）
+                return true;
+            case Keycode.Menu or Keycode.Settings or Keycode.Info:
+                PlayAt(_currentIndex); // 列表页菜单键=回播放（vc53 ToggleChannelList 口径）
+                return true;
+            case Keycode.DpadLeft or Keycode.DpadRight when !_onPlayerPage:
+                SelectTab(ListTabs.NextTab(_tab, keyCode == Keycode.DpadRight)); // ②左右键切标签（照 vc53 抽屉口径）
+                return true;
             case Keycode.Back or Keycode.Escape:
                 ConfirmExit(); // 列表页返回：退出对话框（一期 ExitDialogFocus 口径）
                 return true;
@@ -558,6 +672,38 @@ public partial class MainActivity : Activity
         return i < 0 ? i + _channels.Count : i;
     }
 
+    // —— ②五标签切换（方案书收口批②，照 vc53 抽屉口径：当前标签强调底高亮） ——
+
+    private void SelectTab(ListTabs.Tab tab)
+    {
+        if (_tab == tab) return;
+        _tab = tab;
+        (_list.Adapter as ChannelListAdapter)?.Refresh(_favorites, tab);
+        StyleTabs();
+    }
+
+    private void StyleTabs()
+    {
+        for (int i = 0; i < _tabViews.Count; i++)
+        {
+            var active = (ListTabs.Tab)i == _tab;
+            _tabViews[i].SetBackgroundColor(active
+                ? Color.Argb(255, InkTranslucency.AccentR, InkTranslucency.AccentG, InkTranslucency.AccentB) // 朱砂强调底（照 vc55 列表页强调色）
+                : Color.Transparent);
+            _tabViews[i].SetTextColor(Color.ParseColor(active ? "#FFFFFF" : InkTranslucency.TextSecondary));
+        }
+    }
+
+    /// <summary>健康点刷新节流（方案书收口批②：更新节流 5 秒）。只读账刷新展示，不写账。</summary>
+    private void OnPrecheckHealthChanged(string epgKey, ChannelHealth state)
+    {
+        if (_onPlayerPage) return; // 播放页不见列表
+        var now = System.Environment.TickCount64;
+        if (now - _healthLastAtMs < 5000) return;
+        _healthLastAtMs = now;
+        _main.Post(() => (_list.Adapter as ChannelListAdapter)?.Refresh(_favorites, _tab));
+    }
+
     /// <summary>换台去抖入口（W8 SwitchDebouncer 口径）：窗口内连按取末次按键，停稳才真切。</summary>
     private void DebouncedSwitch(int index)
     {
@@ -617,22 +763,35 @@ public partial class MainActivity : Activity
     {
         private readonly Context _ctx;
         private readonly IReadOnlyList<Channel> _channels;
+        private readonly Func<Channel, ChannelHealth> _markOf; // ④健康点：只读账（预检 MarkOf 三态）
         private HashSet<string> _favorites;
+        private ListTabs.Tab _tab;
         private List<Row> _rows;
 
-        public ChannelListAdapter(Context ctx, IReadOnlyList<Channel> channels, HashSet<string> favorites)
+        public ChannelListAdapter(Context ctx, IReadOnlyList<Channel> channels, HashSet<string> favorites,
+            Func<Channel, ChannelHealth> markOf, ListTabs.Tab tab = ListTabs.Tab.All)
         {
             _ctx = ctx;
             _channels = channels;
             _favorites = favorites;
-            _rows = BuildRows(channels, favorites);
+            _markOf = markOf;
+            _tab = tab;
+            _rows = BuildRows(channels, favorites, tab);
         }
 
-        private static List<Row> BuildRows(IReadOnlyList<Channel> channels, HashSet<string> favorites)
+        private static List<Row> BuildRows(IReadOnlyList<Channel> channels, HashSet<string> favorites, ListTabs.Tab tab)
         {
             var rows = new List<Row>();
-            // 收藏置顶组（一期 FavoriteStore 口径：收藏非空才出组，置顶直达）
-            var favs = channels.Where(c => favorites.Contains(c.Id)).ToList();
+            // ②五标签过滤（照 vc53 DrawerSupport 口径；收藏标签空态照 vc53 v22 第 6/15 项，不白屏）
+            var visible = ListTabs.Filter(tab, channels, favorites.Contains);
+            if (visible.Count == 0)
+            {
+                rows.Add(new Row(tab == ListTabs.Tab.Favorite
+                    ? "收藏夹是空的，对着频道按确认可收藏" : "该分类暂无频道", true, null));
+                return rows;
+            }
+            // 收藏置顶组（一期 FavoriteStore 口径：收藏非空才出组，置顶直达；收藏标签下整列即收藏）
+            var favs = visible.Where(c => favorites.Contains(c.Id)).ToList();
             if (favs.Count > 0)
             {
                 rows.Add(new Row("收藏", true, null));
@@ -640,7 +799,7 @@ public partial class MainActivity : Activity
             }
             foreach (var cat in ChannelTable.CategoryOrder)
             {
-                var group = channels.Where(c => c.CategoryName == cat).ToList();
+                var group = visible.Where(c => c.CategoryName == cat).ToList();
                 if (group.Count == 0) continue;
                 rows.Add(new Row(cat, true, null));
                 // 编号=整表顺序（一期口径：编号永久直达）
@@ -662,11 +821,20 @@ public partial class MainActivity : Activity
         public Channel? ChannelAt(int position) =>
             position >= 0 && position < _rows.Count ? _rows[position].Channel : null;
 
-        /// <summary>收藏变化后重建行（保持选中位置不跳）。</summary>
-        public void Refresh(HashSet<string> favorites)
+        /// <summary>频道所在行位置（呼出列表焦点落当前台行用）；不在表内返回 -1。</summary>
+        public int PositionOf(string channelId)
+        {
+            for (var i = 0; i < _rows.Count; i++)
+                if (_rows[i].Channel?.Id == channelId) return i;
+            return -1;
+        }
+
+        /// <summary>收藏/标签变化后重建行（保持选中位置不跳）。</summary>
+        public void Refresh(HashSet<string> favorites, ListTabs.Tab? tab = null)
         {
             _favorites = favorites;
-            _rows = BuildRows(_channels, favorites);
+            _tab = tab ?? _tab;
+            _rows = BuildRows(_channels, favorites, _tab);
             NotifyDataSetChanged();
         }
 
@@ -690,6 +858,28 @@ public partial class MainActivity : Activity
                 tv.SetPadding(40, 22, 40, 22);
             }
             tv.Text = row.Title;
+            if (row.Channel is { } rowChannel)
+            {
+                // ④列表健康点（方案书收口批②）：绿●可用/灰●检测中或未探/红✕连不上（色值照 vc53 v1.0.8 口径）。
+                // 点染在行首字符上（Spannable），行结构不变，纯读账展示。
+                var (markChar, markColor) = _markOf(rowChannel) switch
+                {
+                    ChannelHealth.Alive => ("●", "#7ED182"),
+                    ChannelHealth.Dead => ("✕", "#E97F7F"),
+                    ChannelHealth.Checking => ("●", "#B5C4D0"),
+                    _ => ("●", "#8894A0"),
+                };
+                var span = new Android.Text.SpannableString($"{markChar}  {row.Title}");
+                span.SetSpan(new Android.Text.Style.ForegroundColorSpan(Color.ParseColor(markColor)),
+                    0, 1, Android.Text.SpanTypes.ExclusiveEx);
+                span.SetSpan(new Android.Text.Style.ForegroundColorSpan(Color.White),
+                    1, span.Length(), Android.Text.SpanTypes.ExclusiveEx);
+                tv.TextFormatted = span;
+            }
+            else
+            {
+                tv.Text = row.Title;
+            }
             tv.SetTextColor(Color.White);
             tv.SetBackgroundColor(row.IsHeader ? Color.Argb(255, 20, 24, 32) : Color.Transparent);
             return tv;

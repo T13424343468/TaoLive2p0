@@ -13,7 +13,8 @@ namespace TaoLive.Tv;
 /// <summary>
 /// 软件设置面板 + 三子页（崩溃日志全屏 / 自诊断 / 进阶调优）+ 显示大小档 + 三级跳。
 /// UI 布局与文案照 vc53（eef464b MainActivity 对应段）；2.0 只接真实接线面：
-/// 预检握手已接真（常驻循环预检，MainActivity.StartPrecheckLoop）；开机自启在 2.0 无 BootReceiver 承接，砍行不留死旋钮；
+/// 预检握手已接真（常驻循环预检，MainActivity.StartPrecheckLoop）；
+/// 开机自启已接真（方案书收口批②：BootReceiver+开关行，BootReceiver.OnReceive 读同一份偏好）；
 /// 后台预热开关真实控制开机全量预热与换台邻台预取。
 /// </summary>
 public partial class MainActivity
@@ -150,7 +151,7 @@ public partial class MainActivity
             tv.SetPadding(Dp(24), Dp(18), Dp(24), Dp(6));
             _settingsList!.AddView(tv);
         }
-        void AddRow(string text, Action onClick, string color)
+        void AddRow(string text, Action onClick, string color, Action? onLongClick = null)
         {
             var tv = new TextView(this) { Text = text, TextSize = UiScale.T(1.1875f) };
             tv.SetTextColor(Color.ParseColor(color));
@@ -163,10 +164,16 @@ public partial class MainActivity
                 else if (tv.Background == focusDrawable) tv.Background = null;
             };
             tv.Click += (_, _) => onClick();
+            if (onLongClick is not null) tv.LongClick += (_, _) => onLongClick();
             _settingsList!.AddView(tv);
         }
 
         AddLabel("── 软件设置 ──");
+        // ⑤开机自启（方案书收口批②：BootReceiver+开关行）：安装默认开启（照 vc53 v22 第 15 项），与 BootReceiver 同读一份偏好
+        AddRow($"开机自启：{(_prefs.GetBoolean("autostart_enabled", true) ? "开" : "关")}（确认切换 · 长按跳系统自启管理）",
+            ToggleAutoStart, "#F7F5EE", OpenAutoStartSettings);
+        // ⑥开机默认台（方案书收口批②）：设置项指定台，未设进频道列表首位；确认=循环下一个台（含「未指定」档）
+        AddRow($"开机默认台：{DefaultChannelLabel()}（确认切换）", CycleDefaultChannel, "#F7F5EE");
         // 后台预热：真实控制开机全量预热与换台邻台预取（关=两条链路同步停）
         AddRow($"后台预热：{(_warmupEnabled ? "开" : "关")}（确认键切换）", ToggleWarmup, "#F7F5EE");
         // 预检握手（vc53 v1.0.8 一比一）：真实控制常驻循环预检（关=循环同停）
@@ -187,6 +194,39 @@ public partial class MainActivity
                 row.RequestRectangleOnScreen(new Rect(0, row.Top, row.Right, row.Bottom), true);
             }
         }
+    }
+
+    /// <summary>⑤开机自启开关（方案书收口批②）：与 BootReceiver 同读一份偏好（默认开）。</summary>
+    private void ToggleAutoStart()
+    {
+        var next = !_prefs.GetBoolean("autostart_enabled", true);
+        _prefs.Edit()?.PutBoolean("autostart_enabled", next)?.Apply();
+        RefreshSettingsRows();
+        ShowToast(next ? "开机自启：开" : "开机自启：关");
+    }
+
+    /// <summary>长按自启行跳系统自启管理（照 vc53 三级降级口径，遥控器放行入口）。</summary>
+    private void OpenAutoStartSettings() => OpenSystemSettings();
+
+    /// <summary>⑥默认台当前文案（方案书收口批②）：未指定=列表第一个。</summary>
+    private string DefaultChannelLabel()
+    {
+        var saved = _prefs.GetString("default_channel", null);
+        if (string.IsNullOrEmpty(saved)) return "未指定（列表第一个）";
+        var ch = _channels.FirstOrDefault(c => c.Id == saved);
+        return ch?.Name ?? "未指定（列表第一个）";
+    }
+
+    /// <summary>⑥确认循环选默认台（方案书收口批②）：未指定→频道 1→频道 2→…→回未指定。</summary>
+    private void CycleDefaultChannel()
+    {
+        var saved = _prefs.GetString("default_channel", null);
+        var channels = _channels.ToList();
+        var idx = string.IsNullOrEmpty(saved) ? -1 : channels.FindIndex(c => c.Id == saved);
+        var next = idx + 1 >= channels.Count ? -1 : idx + 1;
+        _prefs.Edit()?.PutString("default_channel", next < 0 ? "" : channels[next].Id)?.Apply();
+        RefreshSettingsRows();
+        ShowToast(next < 0 ? "开机默认台：未指定（列表第一个）" : $"开机默认台：{channels[next].Name}");
     }
 
     private void ToggleWarmup()
