@@ -40,8 +40,10 @@ public partial class MainActivity
 
     private ISharedPreferences _prefs = default!;
 
-    /// <summary>密度换算（#15 尺寸令：乘 UiScale.Factor 随三档缩放——所有页面所有元素跟档位走，间距不豁免）。</summary>
-    private int Dp(float v) => (int)(v * Resources!.DisplayMetrics!.Density * UiScale.Factor + 0.5f);
+    /// <summary>密度换算（#15 尺寸令：所有页面所有元素跟档位走，间距不豁免；真机反馈批#70 口径归一：
+    /// 乘 UiScale.Scale 与字体侧同账——此前只乘 Factor 漏了 BaseSize/SpecBase×ScreenScale，
+    /// 间距/按钮高度相对字体整体缩水 1.8 倍，装不下字就盖字、旋钮色块对不齐符号）。</summary>
+    private int Dp(float v) => (int)(v * Resources!.DisplayMetrics!.Density * UiScale.Scale + 0.5f);
 
     // —— 崩溃/失败打点（接真实事件：逐次换源） ——
 
@@ -422,7 +424,7 @@ public partial class MainActivity
             close.SetPadding(pad, Dp(14), pad, Dp(14));
             close.Click += (_, _) => CloseCrashPanel();
             StyleOverlayButton(close, InkTranslucency.FocusDrawable());
-            int btnH = Dp(52);
+            int btnH = Dp(60); // #70 口径归一后实值直出：52dp 装不下 22sp 文字+28dp 内边距，抬到 60dp 保字完整
             btns.AddView(close, new LinearLayout.LayoutParams(-1, btnH));
             box.AddView(btns, new LinearLayout.LayoutParams(-1, -2) { TopMargin = pad });
 
@@ -470,7 +472,7 @@ public partial class MainActivity
             close.NextFocusLeftId = clean.Id;
             StyleOverlayButton(clean, InkTranslucency.AccentFocusDrawable()); // 一键清理=朱砂（危险项）
             StyleOverlayButton(close, InkTranslucency.FocusDrawable()); // 关闭=纸白
-            int btnH = Dp(52); // 按钮行固定底栏，不论日志多少行按钮始终在屏幕底部
+            int btnH = Dp(60); // 按钮行固定底栏，不论日志多少行按钮始终在屏幕底部；#70 口径归一后实值直出，抬到 60dp 保字完整
             btns.AddView(clean, new LinearLayout.LayoutParams(0, btnH, 1f));
             btns.AddView(close, new LinearLayout.LayoutParams(0, btnH, 1f));
             box.AddView(btns, new LinearLayout.LayoutParams(-1, -2) { TopMargin = pad });
@@ -603,7 +605,7 @@ public partial class MainActivity
             close.NextFocusLeftId = export.Id;
             StyleOverlayButton(export, InkTranslucency.FocusDrawable());
             StyleOverlayButton(close, InkTranslucency.FocusDrawable());
-            int btnH = Dp(52);
+            int btnH = Dp(60); // #70 口径归一后实值直出：52dp 装不下 22sp 文字+28dp 内边距，抬到 60dp 保字完整
             btns.AddView(export, new LinearLayout.LayoutParams(0, btnH, 1f));
             btns.AddView(close, new LinearLayout.LayoutParams(0, btnH, 1f));
             box.AddView(btns, new LinearLayout.LayoutParams(-1, -2) { TopMargin = pad });
@@ -667,7 +669,7 @@ public partial class MainActivity
             close.Click += (_, _) => CloseLicensePanel();
             close.Id = View.GenerateViewId();
             StyleOverlayButton(close, InkTranslucency.FocusDrawable());
-            int btnH = Dp(52);
+            int btnH = Dp(60); // #70 口径归一后实值直出：52dp 装不下 22sp 文字+28dp 内边距，抬到 60dp 保字完整
             btns.AddView(close, new LinearLayout.LayoutParams(0, btnH, 1f));
             box.AddView(btns, new LinearLayout.LayoutParams(-1, -2) { TopMargin = pad });
             var overlay = new FrameLayout(this) { Clickable = true, LongClickable = true };
@@ -922,7 +924,7 @@ public partial class MainActivity
             close.NextFocusLeftId = reset.Id;
             StyleOverlayButton(reset, InkTranslucency.AccentFocusDrawable()); // 还原=朱砂（改动性按钮）
             StyleOverlayButton(close, InkTranslucency.FocusDrawable());
-            int btnH = Dp(52);
+            int btnH = Dp(60); // #70 口径归一后实值直出：52dp 装不下 22sp 文字+28dp 内边距，抬到 60dp 保字完整
             btns.AddView(reset, new LinearLayout.LayoutParams(0, btnH, 1f));
             btns.AddView(close, new LinearLayout.LayoutParams(0, btnH, 1f));
             box.AddView(btns, new LinearLayout.LayoutParams(-1, -2) { TopMargin = padAdv });
