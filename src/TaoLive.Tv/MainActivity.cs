@@ -8,6 +8,7 @@ using Android.Graphics;
 using Android.Graphics.Drawables;
 using Android.OS;
 using Android.Runtime;
+using Android.Text;
 using Android.Views;
 using Android.Widget;
 using Microsoft.Extensions.DependencyInjection;
@@ -662,6 +663,7 @@ public partial class MainActivity : Activity
         foreach (ListTabs.Tab t in Enum.GetValues(typeof(ListTabs.Tab)))
         {
             var tv = new TextView(this) { Text = ListTabs.Label(t), TextSize = UiScale.Item };
+            tv.SetSingleLine(true); // vc65 老板令：页签永不换行（「地方台」不再被挤折行），面板下限已并入页签行最小宽
             tv.SetPadding(UiScale.Px(12), UiScale.Px(10), UiScale.Px(12), UiScale.Px(10));
             InkTranslucency.ApplyReadabilityShadow(tv);
             tv.Click += (_, _) => SelectTab(t);
@@ -705,7 +707,7 @@ public partial class MainActivity : Activity
         if (_list.Adapter is ChannelListAdapter adapter)
         {
             adapter.Refresh(_favorites, _tab);
-            ApplyListWidth(adapter.Rows); // 宽度随内容（vc53 v1.0.8：越小越好，上限半屏、下限 360dp）
+            ApplyListWidth(_channels); // vc65：恒定估宽（全表+页签行兜底），打开宽度不再随页签/收藏漂移
         }
         // 焦点默认落当前台行（方案书收口批②）：呼出即定位到正在看的台
         var current = _channels[_currentIndex];
@@ -1686,10 +1688,12 @@ public partial class MainActivity : Activity
         }
     }
 
-    /// <summary>列表宽度随内容（vc53 ApplyListWidth + ListMetrics v1.0.8 口径）：越小越好，下限 300dp、上限半屏。
-    /// #15 尺寸令：估宽基准与下限全部随档缩放——「小」档行字缩了，抽屉宽度跟着收，不留大片空白。
-    /// #72 列表贴内容（老板真机反馈① 2026-11-15）：估宽计入台标+边距、去掉与行内 padding 重复的额外留白、下限 360→300dp。</summary>
-    private void ApplyListWidth(IReadOnlyList<Row> rows)
+    /// <summary>列表宽度恒定（vc65 老板令 2026-11-15：列表页每次打开宽度都一样，「地方台」页签不换行）。
+    /// 根因（#72 口径的副作用）：宽度按当前页签 adapter.Rows 贴内容估——打开所在页签/收藏不同，面板就漂移；
+    /// 面板窄于页签行自然宽时最后签被挤换行。修法：估宽改按<b>全表</b>最长频道行（含收藏星位），恒定公式不随页签/收藏变；
+    /// 页签行最小宽并入下限兜底；上限半屏、下限 300dp 钳制不变。
+    /// #15 尺寸令：估宽基准随档缩放；#72 列表贴内容口径保留（行宽计入台标+边距，无重复留白）。</summary>
+    private void ApplyListWidth(IReadOnlyList<Channel> channels)
     {
         float density = Resources!.DisplayMetrics!.Density;
         float scale = UiScale.Scale;
@@ -1700,22 +1704,25 @@ public partial class MainActivity : Activity
             foreach (var c in s) w += c > 127 ? px : px * 0.55f;
             return w;
         }
+        // 频道行恒定公式（vc65：逐台估宽取最大，不再读当前页签的行集——页签/收藏变化不再带动面板漂移）
+        // 行宽 = 左右 padding(48×2) + 台标+边距(40+16) + 号(3字符) + 间距(32) + 星(1字符) + 间距(24) + 台名(Item) + 状态标识(Caption) + 左距(24)
         float max = 0;
-        foreach (var r in rows)
+        foreach (var ch in channels)
         {
-            if (r.Header != null)
-                max = Math.Max(max, Estimate(r.Header, 20));
-            else if (r.Channel != null)
-            {
-                // #72 列表贴内容（老板真机反馈①：右侧空白太多）——行宽计入台标(40)+边距(16)；
-                // 行宽 = 左右 padding(48×2) + 台标+边距(40+16) + 号(3字符) + 间距(32) + 星(1字符) + 间距(24) + 台名 + 状态标识
-                var w = 96 * scale + 56 * scale + Estimate(new string('0', 3), 20) + 32 * scale
-                        + Estimate("★", 20) + 24 * scale + Estimate(r.Channel.Name, 22)
-                        + Estimate("●", 20) + 24 * scale;
-                max = Math.Max(max, w);
-            }
+            var w = 96 * scale + 56 * scale + Estimate(new string('0', 3), UiScale.Item) + 32 * scale
+                    + Estimate("★", UiScale.Item) + 24 * scale + Estimate(ch.Name, UiScale.Item)
+                    + Estimate("●", UiScale.Caption) + 24 * scale;
+            max = Math.Max(max, w);
         }
-        // ListMetrics（vc53 v1.0.8）：行内已有 48×2 padding 不再加额外留白（#72：去掉重复预留，面板宽度贴住最长行），下限 300dp，上限半屏
+        // 空态提示行同为恒定文案，取最长一并兜进（单行不换行口径下不被截断）
+        max = Math.Max(max, 96 * scale + Estimate("收藏夹是空的，对着频道按确认可收藏", UiScale.Caption));
+        // 页签行最小宽兜底（vc65：面板窄于页签行时「地方台」被挤换行）——
+        // = 行左右 padding(48×2) + 五签文本(Item) + 每签内边距(12×2) + 非首签间距(8×4)
+        string[] tabLabels = { "全部", "央视", "卫视", "地方台", "收藏" };
+        float tabRowMin = 96 * scale + 4 * 8 * scale;
+        foreach (var label in tabLabels) tabRowMin += Estimate(label, UiScale.Item) + 24 * scale;
+        max = Math.Max(max, tabRowMin);
+        // ListMetrics（vc53 v1.0.8）：下限 300dp，上限半屏
         float total = max;
         float lo = 300f * density * scale;
         float hi = Resources.DisplayMetrics.WidthPixels / 2f;
@@ -1736,7 +1743,7 @@ public partial class MainActivity : Activity
         {
             if (_list.Adapter is not ChannelListAdapter adapter) return;
             adapter.Refresh(_favorites, _tab);
-            ApplyListWidth(adapter.Rows); // vc53 RefreshListStatuses：重建行即重算宽度
+            ApplyListWidth(_channels); // vc65：同上恒定口径（健康账刷新不再带动宽度漂移）
         });
     }
 
@@ -1942,6 +1949,7 @@ public partial class MainActivity : Activity
             {
                 tv.SetTextColor(Color.ParseColor(color));
                 tv.TextSize = size;
+                tv.SetSingleLine(true); // vc65 老板令：列表行永不换行——行内文本一律单行，超宽走省略号不折行
             }
 
             if (row.Header != null)
@@ -1949,6 +1957,7 @@ public partial class MainActivity : Activity
                 var h = new TextView(ctx) { Text = row.Header };
                 bool isNote = row.IsNote; // vc53 v22 第 15 项：空态行次色平铺，不作分组标题渲染
                 Style(h, isNote ? InkTranslucency.TextSecondary : "#A9CFEC", UiScale.Caption);
+                h.Ellipsize = TextUtils.TruncateAt.End; // vc65：面板钳到半屏等极端场景走省略号，不折行
                 InkTranslucency.ApplyReadabilityShadow(h);
                 line.AddView(h);
                 line.SetBackgroundColor(Color.Transparent);
@@ -2004,6 +2013,7 @@ public partial class MainActivity : Activity
             line.AddView(star);
 
             var name = new TextView(ctx) { Text = ch.Name };
+            name.Ellipsize = TextUtils.TruncateAt.End; // vc65：半屏钳制兜底，宁省略不折行
             var isCur = _currentId() == ch.Id;
             Style(name, isCur ? "#FFFFFF" : InkTranslucency.TextSecondary, UiScale.Item);
             InkTranslucency.ApplyReadabilityShadow(name);
