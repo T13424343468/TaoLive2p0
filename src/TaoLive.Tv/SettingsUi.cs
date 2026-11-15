@@ -641,26 +641,26 @@ public partial class MainActivity
                 Refresh();
             }
 
-            // 5 个旋钮（每项下挂一行人话作用说明）：写入 AdvancedTuning 即时生效（NetSelfHeal 读门面）
-            AddKnob("网络解析出毛病时，撑几次失败才启动本地中转自救——调低自救快但易误伤，调高稳但自救慢",
+            // 4 个旋钮（每项下挂一行人话作用说明）：写入 AdvancedTuning 即时生效（播放链读门面）
+            AddKnob("网络解析出毛病时，撑几次失败才启动自救判别——调低自救快但易误伤，调高稳但自救慢",
                 AdvGateSteps,
                 () => $"自愈门槛：连败 {AdvancedTuning.SelfHealFailGate} 次（默认 3）",
-                v => AdvancedTuning.Apply(v, AdvancedTuning.SelfHealReprobeMs, AdvancedTuning.ListCacheSec, AdvancedTuning.RetryBaseMs, AdvancedTuning.RetryMaxMs, AdvancedTuning.ProxyPort),
+                v => AdvancedTuning.Apply(v, AdvancedTuning.SelfHealReprobeMs, AdvancedTuning.ListCacheSec, AdvancedTuning.RetryBaseMs, AdvancedTuning.RetryMaxMs),
                 () => AdvancedTuning.SelfHealFailGate);
             AddKnob("自救起来之后，隔多久偷偷试一次能否回直连——调低回得快但探测勤，调高省流量回得慢",
                 AdvReprobeMinSteps,
                 () => $"自愈回探：{AdvancedTuning.SelfHealReprobeMs / 60_000} 分钟（默认 5）",
-                v => AdvancedTuning.Apply(AdvancedTuning.SelfHealFailGate, v * 60_000L, AdvancedTuning.ListCacheSec, AdvancedTuning.RetryBaseMs, AdvancedTuning.RetryMaxMs, AdvancedTuning.ProxyPort),
+                v => AdvancedTuning.Apply(AdvancedTuning.SelfHealFailGate, v * 60_000L, AdvancedTuning.ListCacheSec, AdvancedTuning.RetryBaseMs, AdvancedTuning.RetryMaxMs),
                 () => (int)(AdvancedTuning.SelfHealReprobeMs / 60_000));
             AddKnob("频道清单数据在手上留多久不重取——留久省流量，留短换台信息更新鲜",
                 AdvCacheSecSteps,
                 () => $"清单缓存：{AdvancedTuning.ListCacheSec} 秒（默认 60）",
-                v => AdvancedTuning.Apply(AdvancedTuning.SelfHealFailGate, AdvancedTuning.SelfHealReprobeMs, v, AdvancedTuning.RetryBaseMs, AdvancedTuning.RetryMaxMs, AdvancedTuning.ProxyPort),
+                v => AdvancedTuning.Apply(AdvancedTuning.SelfHealFailGate, AdvancedTuning.SelfHealReprobeMs, v, AdvancedTuning.RetryBaseMs, AdvancedTuning.RetryMaxMs),
                 () => AdvancedTuning.ListCacheSec);
             AddKnob("被源服务器拒绝后退多远再试——跟风控博弈的分寸：调急了容易挨打，调钝了台恢复慢（封顶恒 2 小时）",
                 AdvRetrySecSteps,
                 () => $"重试节奏：起步 {AdvancedTuning.RetryBaseMs / 1000} 秒（默认 120）",
-                v => AdvancedTuning.Apply(AdvancedTuning.SelfHealFailGate, AdvancedTuning.SelfHealReprobeMs, AdvancedTuning.ListCacheSec, v * 1000L, AdvancedTuning.RetryMaxMs, AdvancedTuning.ProxyPort),
+                v => AdvancedTuning.Apply(AdvancedTuning.SelfHealFailGate, AdvancedTuning.SelfHealReprobeMs, AdvancedTuning.ListCacheSec, v * 1000L, AdvancedTuning.RetryMaxMs),
                 () => (int)(AdvancedTuning.RetryBaseMs / 1000));
 
             var tip = new TextView(this)

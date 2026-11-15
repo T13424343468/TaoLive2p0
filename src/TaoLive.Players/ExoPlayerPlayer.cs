@@ -7,7 +7,7 @@ namespace TaoLive.Players;
 
 /// <summary>
 /// ExoPlayer（Media3）适配器：2.0 第一内核（老板 2026-11-15 03:37 拍板，不采用 LibVLC 打底）。
-/// 实现契约：Foundation/IPlayer——事件语义（次序即文档）与双内核口径保持一致，
+/// 实现契约：Foundation/IPlayer——事件语义（次序即文档）与 IPlayer 契约保持一致，
 /// 会话层只认 IPlayer 不认内核本尊。
 /// 事件映射：
 ///   内核进入 Buffering → OnBufferingStart；

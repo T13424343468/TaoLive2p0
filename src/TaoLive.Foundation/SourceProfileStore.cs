@@ -53,7 +53,7 @@ public sealed class SourceProfileStore
 
     private const int FlushDebounceMs = TaoLive.Foundation.PersistencePolicy.FlushDebounceMs; // 归一（规范〇.7.3）：节拍唯一事实源在 Foundation.PersistencePolicy
 
-    /// <summary>打点委托（BLL 不反引 UI，口径同 SelfHealProxyKernel.Reporter）：UI 启动注入，未注入时静默。</summary>
+    /// <summary>打点委托（BLL 不反引 UI，口径同诊断打点通道）：UI 启动注入，未注入时静默。</summary>
     public static Action<string>? Reporter { get; set; }
     private readonly object _gate = new();
     private readonly ConcurrentDictionary<string, SourceProfile> _profiles = new(StringComparer.Ordinal);

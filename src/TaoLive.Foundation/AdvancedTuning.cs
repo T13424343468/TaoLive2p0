@@ -15,7 +15,6 @@ public static class AdvancedTuning
     public const int DefaultListCacheSec = 60;
     public const long DefaultRetryBaseMs = 120_000;
     public const long DefaultRetryMaxMs = 7_200_000;
-    public const int DefaultProxyPort = 47618;
 
     // ---- 合法范围（Apply 钳制） ----
     public const int FailGateMin = 1, FailGateMax = 20;
@@ -23,7 +22,6 @@ public static class AdvancedTuning
     public const int ListCacheSecMin = 5, ListCacheSecMax = 600;
     public const long RetryBaseMsMin = 10_000, RetryBaseMsMax = 30 * 60_000;
     public const long RetryMaxMsMin = 60_000, RetryMaxMsMax = 24 * 60 * 60_000;
-    public const int ProxyPortMin = 1024, ProxyPortMax = 65535;
 
     /// <summary>自愈门槛：连续起播失败几次才启动自救判别（低=自救快但易误伤，高=稳但自救慢）。</summary>
     public static int SelfHealFailGate { get; private set; } = DefaultFailGate;
@@ -35,12 +33,10 @@ public static class AdvancedTuning
     public static long RetryBaseMs { get; private set; } = DefaultRetryBaseMs;
     /// <summary>被拒重试封顶：指数退避最深退到几时（低=恢复探测勤，高=长退避省请求）。</summary>
     public static long RetryMaxMs { get; private set; } = DefaultRetryMaxMs;
-    /// <summary>自救通道端口：本地中转监听口（改后下次播放生效；仅与其他软件撞号才需要动）。</summary>
-    public static int ProxyPort { get; private set; } = DefaultProxyPort;
 
     /// <summary>写入并钳制（UI 设置页与批量还原同一入口）。retryMax &lt; retryBase 时按 retryBase 收敛。</summary>
     public static void Apply(int failGate, long reprobeMs, int listCacheSec,
-        long retryBaseMs, long retryMaxMs, int proxyPort)
+        long retryBaseMs, long retryMaxMs)
     {
         SelfHealFailGate = Math.Clamp(failGate, FailGateMin, FailGateMax);
         SelfHealReprobeMs = Math.Clamp(reprobeMs, ReprobeMsMin, ReprobeMsMax);
@@ -48,10 +44,9 @@ public static class AdvancedTuning
         RetryBaseMs = Math.Clamp(retryBaseMs, RetryBaseMsMin, RetryBaseMsMax);
         RetryMaxMs = Math.Clamp(retryMaxMs, RetryMaxMsMin, RetryMaxMsMax);
         if (RetryMaxMs < RetryBaseMs) RetryMaxMs = RetryBaseMs;
-        ProxyPort = Math.Clamp(proxyPort, ProxyPortMin, ProxyPortMax);
     }
 
     /// <summary>一键还原默认：全部回出厂值（设置页「一键还原默认」唯一入口）。</summary>
     public static void ResetToDefaults() =>
-        Apply(DefaultFailGate, DefaultReprobeMs, DefaultListCacheSec, DefaultRetryBaseMs, DefaultRetryMaxMs, DefaultProxyPort);
+        Apply(DefaultFailGate, DefaultReprobeMs, DefaultListCacheSec, DefaultRetryBaseMs, DefaultRetryMaxMs);
 }

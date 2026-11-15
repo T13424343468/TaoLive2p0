@@ -3,9 +3,9 @@
 namespace TaoLive.Foundation;
 
 /// <summary>
-/// 播放内核统一契约：双内核（LibVLC / ExoPlayer）都要长成这个形状，
-/// 会话层只认接口不认内核本尊（老板 2026-11-15 02:32 双内核热切拍板）。
-/// 实现方必须保证两个内核的事件语义完全一致，Tests 有契约用例把关。
+/// 播放内核统一契约：内核实现都要长成这个形状，
+/// 会话层只认接口不认内核本尊（2.0 单内核=ExoPlayer，老板 2026-11-15 03:37 拍板；
+/// 热切靠 Current+Standby 双实例，双实例共用同一内核类，事件语义一致由 Tests 契约用例把关）。
 /// </summary>
 public interface IPlayer : IDisposable
 {
