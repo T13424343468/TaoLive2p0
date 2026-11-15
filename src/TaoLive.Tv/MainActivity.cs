@@ -112,7 +112,7 @@ public partial class MainActivity : Activity
         // 持久化设置（vc53 口径）：UI 缩放档 + 后台预热开关 + 进阶调优旋钮，启动装载
         //（缩放档须在 BuildRoot 前就位，全套令牌按档位重算）
         _prefs = GetSharedPreferences("taolive_prefs", FileCreationMode.Private)!;
-        UiScale.Factor = _prefs.GetFloat("ui_scale", 5f / 9f);
+        UiScale.Factor = _prefs.GetFloat("ui_scale", 17f / 36f); // #77 档位重定：默认中档=17sp
         // #69 屏宽自适应令：以屏宽长边对 1920px 基准定标（老板 1080p 电视=1:1，中档 28/22/18 逐字一致）；
         // 更宽的屏整体放大、更窄的屏整体缩小，档位照常叠加——写死必有跨屏兼容问题（老板令）。
         UiScale.ScreenScale = Math.Max(Resources!.DisplayMetrics!.WidthPixels, Resources.DisplayMetrics.HeightPixels) / 1920f;

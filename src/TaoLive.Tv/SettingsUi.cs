@@ -349,7 +349,7 @@ public partial class MainActivity
     // —— 显示大小（真机反馈批 #61 尺寸回抬令 2026-11-15 19:3x：中档定「肉眼最舒适」=基准 20sp，
     // 三档整体重定标：大=2/3(24sp)、中=5/9(20sp)、小=1/3(12sp)，默认中；覆盖 #14 的 ×2/3 压缩口径） ——
 
-    private static readonly float[] DisplaySizeSteps = { 2f / 3f, 5f / 9f, 1f / 3f };
+    private static readonly float[] DisplaySizeSteps = { 21f / 36f, 17f / 36f, 13f / 36f }; // #77 档位重定：大21/中17/小13（换算实值÷基准36）
     private static readonly string[] DisplaySizeLabels = { "大", "中", "小" };
 
     private static int DisplaySizeIndex(float f)
@@ -360,13 +360,13 @@ public partial class MainActivity
     }
 
     private string DisplaySizeLabel() => DisplaySizeLabels[DisplaySizeIndex(
-        _prefs.GetFloat("ui_scale", 5f / 9f))];
+        _prefs.GetFloat("ui_scale", 17f / 36f))];
 
     /// <summary>大→中→小循环，档位记忆；界面重建即时生效——真机反馈批#15 原地换皮：会话跨 Recreate 存活，
     /// 正在看的台不断流不重连。</summary>
     private void CycleDisplaySize()
     {
-        int next = (DisplaySizeIndex(_prefs.GetFloat("ui_scale", 5f / 9f)) + 1) % DisplaySizeSteps.Length;
+        int next = (DisplaySizeIndex(_prefs.GetFloat("ui_scale", 17f / 36f)) + 1) % DisplaySizeSteps.Length;
         _prefs.Edit()?.PutFloat("ui_scale", DisplaySizeSteps[next])?.Apply();
         Recreate(); // 重建走 OnCreate 重定标，全套令牌按新档位重算
     }

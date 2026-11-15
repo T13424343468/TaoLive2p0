@@ -14,7 +14,7 @@ public static class UiScale
 {
     public const float BaseSize = 36f; // 基准字号（sp），系数 1.0 时的实字号
     public const float SpecBase = 20f; // #68 语义字号令：中档实字号基准（#61 拍板「中档=20sp」）
-    public static float Factor { get; set; } = 5f / 9f; // 默认「中」=基准 20sp（#61 回抬令）
+    public static float Factor { get; set; } = 17f / 36f; // 默认「中」=基准 17sp（#77 档位重定 2026-11-15 老板定值：大21/中17/小13=换算实值÷基准36；存量档位值不匹配走回落「中」）
 
     /// <summary>#69 屏宽自适应定标（2026-11-15 老板令）：实值随屏宽走，1920px 宽=基准 1:1；
     /// 更宽的屏整体放大、更窄的屏整体缩小，档位在基准上照常叠加可调。OnCreate 装载。</summary>
@@ -26,9 +26,9 @@ public static class UiScale
     public static float T(float f) => f * BaseSize * Factor * ScreenScale;
 
     /// <summary>#68 语义字号令：标题/项/说明三类，同角色同字号，列表/设置/弹窗观感一致。</summary>
-    public static float Title => T(1.4f);   // 标题：28sp@中（抽屉页头/设置面板标题/退出弹窗标题）
-    public static float Item => T(1.1f);    // 项：22sp@中（频道行/页签/设置行/按钮/当前节目）
-    public static float Caption => T(0.9f); // 说明：18sp@中（台数/帮助行/次要说明/下档节目）
+    public static float Title => T(1.4f);   // 标题：23.8sp@中档17（抽屉页头/设置面板标题/退出弹窗标题）
+    public static float Item => T(1.1f);    // 项：18.7sp@中档17（频道行/页签/设置行/按钮/当前节目）
+    public static float Caption => T(0.9f); // 说明：15.3sp@中档17（台数/帮助行/次要说明/下档节目）
 
     /// <summary>
     /// 裸最终 sp 字号随档缩放（真机反馈批#15 尺寸令 2026-11-15 老板拍板：所有页面所有元素跟三档走；
