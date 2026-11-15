@@ -110,6 +110,22 @@ public sealed class PlaybackSessionManager
         set => _primaryAliveConfirmed = value;
     }
 
+    /// <summary>#74 源队列健康排序（2026-11-15 老板令）：转配到全部会话（后建会话经 WireSession 同挂）；
+    /// 未设=按原表序。</summary>
+    public Func<Channel, IEnumerable<SourceEndpoint>, IEnumerable<SourceEndpoint>>? QueueOrderer
+    {
+        get => _queueOrderer;
+        set
+        {
+            _queueOrderer = value;
+            foreach (var session in _sessions.Values)
+            {
+                session.QueueOrderer = value;
+            }
+        }
+    }
+    private Func<Channel, IEnumerable<SourceEndpoint>, IEnumerable<SourceEndpoint>>? _queueOrderer;
+
     /// <summary>当前前台会话；尚未切换过为空。</summary>
     public PlaybackSession? Current { get; private set; }
 
@@ -413,6 +429,7 @@ public sealed class PlaybackSessionManager
     private void WireSession(PlaybackSession session)
     {
         session.FallbackSourceProvider = _fallbackProvider;
+        session.QueueOrderer = _queueOrderer; // #74 健康排序：后建会话同挂
         session.Failover += (s, _) =>
         {
             // 回主源计时账（方案书 v12 单调钟）：每次断流自救切换重新起窗（回后若再断重新计时）

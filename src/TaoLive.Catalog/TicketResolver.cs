@@ -24,8 +24,8 @@ public sealed class TicketResolver
     private readonly Dictionary<string, (string Url, long FetchedAt)> _cache = new();
     private static readonly TimeSpan RenewInterval = TimeSpan.FromMinutes(5);
 
-    /// <summary>可注入 HttpClient（测试换假实现）；缺省静态实例。</summary>
-    public static HttpClient Http { get; set; } = new() { Timeout = TimeSpan.FromSeconds(10) };
+    /// <summary>可注入 HttpClient（测试换假实现）；缺省静态实例。#74 切台提速（2026-11-15）：10→5 秒，死源取票快判快走。</summary>
+    public static HttpClient Http { get; set; } = new() { Timeout = TimeSpan.FromSeconds(5) };
 
     /// <summary>
     /// 取票台账出口（埋点补充 2026-11-15）：壳层接 CrashNet 落运行台账；未接线为空操作。

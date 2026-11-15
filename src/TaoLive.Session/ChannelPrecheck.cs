@@ -62,17 +62,10 @@ public class ChannelPrecheck
     /// <summary>状态变化事件：(台 EPG 键, 新状态)。UI 层订阅后刷新列表。</summary>
     public event Action<string, ChannelHealth>? StateChanged;
 
-    /// <summary>源健康账持久化（v1.0.10）：UI 注入后，每次健康表变化自动节流落盘；启动时经 Attach 灌回历史账。</summary>
+    /// <summary>源健康账持久化（v1.0.10）：UI 注入后，每次健康表变化自动节流落盘；启动时经 Attach 灌回历史账。
+    /// #78 健康账唯一令（2026-11-15）：全应用有且只有这一本账——所有选源读它、所有选源动作（预检探活/播放实测/自救换线）写它。
+    /// 幽灵评分账（SourceScoreStore）退役：产线从未挂载、零写入，留着即「第二本账」违规。</summary>
     public SourceHealthStore? HealthStore { get; private set; }
-
-    /// <summary>v28 主线③·源健康度评分账（可空注入：账空退化既有顺序，行为绝不倒退）。</summary>
-    public SourceScoreStore? ScoreStore { get; private set; }
-
-    /// <summary>注入评分账本（与健康账同口径：先建后注均可）。</summary>
-    public void AttachScoreStore(SourceScoreStore store)
-    {
-        ScoreStore = store ?? throw new ArgumentNullException(nameof(store));
-    }
 
     /// <summary>
     /// 注入持久化存储：会话内已有结论与历史账合并（同键取核验时间新者）后，
@@ -141,9 +134,8 @@ public class ChannelPrecheck
     /// </summary>
     public Channel? BestAliveSource(Channel ch, IEnumerable<Channel> catalog)
     {
-        // v28 主线③：评分账非空时按分排序（分高者胜，同分取核验时间新者）；无分/账空退化既有「最新核验优先」。
-        var scored = new List<(Channel Ch, double Score, long At)>();
-        bool anyScored = false;
+        // #78 健康账唯一令（2026-11-15）：幽灵评分账退役——选源一律读唯一健康账，同分序退化「最新核验优先」
+        // （v28 既有退化路径，无第二本账可读）。
         Channel? bestFallback = null;
         long bestAt = -1;
         foreach (var cand in catalog)
@@ -151,22 +143,11 @@ public class ChannelPrecheck
             if (GroupKey(cand) != GroupKey(ch) || cand.Unavailable) continue;
             var entry = SourceHealthOf(cand);
             if (entry is null || entry.State != ChannelHealth.Alive) continue;
-            var score = ScoreStore?.ScoreOf(cand.SourceId, cand.EpgKey);
-            if (score.HasValue)
-            {
-                anyScored = true;
-                scored.Add((cand, score.Value, entry.CheckedAtMs));
-            }
             if (entry.CheckedAtMs > bestAt)
             {
                 bestAt = entry.CheckedAtMs;
                 bestFallback = cand;
             }
-        }
-        if (anyScored)
-        {
-            scored.Sort((a, b) => b.Score != a.Score ? b.Score.CompareTo(a.Score) : b.At.CompareTo(a.At));
-            return scored[0].Ch;
         }
         return bestFallback ?? (Of(ch) == ChannelHealth.Alive ? ch : null);
     }
@@ -195,12 +176,9 @@ public class ChannelPrecheck
     }
 
     /// <summary>统一写入口径：探活结论、连续失败淘汰、落盘脏标记都在这一处（预检循环与播放实测共用）。
-    /// v28 主线③：同一入口向评分账喂入（成功记速度 0 时不计；预检轻探不计耗时，喂入 ok 无 ms）。
-    /// playback=播放实测（真机反馈批#4 修 2026-11-15）：首帧真出画/真实断流的结论是强证据——
-    /// 成功直接视为圆点绿门槛达标（此后仍随预检轮滚动更新），失败照常计连败淘汰。</summary>
+    /// #78 健康账唯一令（2026-11-15）：写账只落唯一健康账；幽灵评分账写入已随账退役。</summary>
     private void WriteSourceResult(Channel ch, bool ok, long nowMs, long ms = 0, bool timeout = false, bool playback = false)
     {
-        ScoreStore?.Report(ch.SourceId, ch.EpgKey, ok, ms, timeout);
         var key = SourceKey(ch);
         var entry = _sourceHealth.GetOrAdd(key, _ => new SourceHealthEntry
         {

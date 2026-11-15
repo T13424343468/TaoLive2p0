@@ -62,8 +62,9 @@ public sealed class PlaybackSession
         }
     }
 
-    /// <summary>起播超时（看门狗阈值）：缓冲超过此时长即视为断流，走备源切换。</summary>
-    public static TimeSpan DefaultOpenTimeout { get; } = TimeSpan.FromSeconds(15);
+    /// <summary>起播超时（看门狗阈值）：缓冲超过此时长即视为断流，走备源切换。
+    /// #74 切台提速（2026-11-15 老板定值）：15 秒→3 秒——死源撞满钟是切台黑屏 8-10 秒主账，快切快走。</summary>
+    public static TimeSpan DefaultOpenTimeout { get; } = TimeSpan.FromSeconds(3);
 
     /// <summary>本会话的起播超时阈值，测试可调。</summary>
     public TimeSpan OpenTimeout { get; set; } = DefaultOpenTimeout;
@@ -93,6 +94,10 @@ public sealed class PlaybackSession
     /// （URL 去重，本台已有同址不重复入队）；空=不吃内置表（既有契约不变，测试可注空）。
     /// </summary>
     public Func<Channel, IReadOnlyList<SourceEndpoint>>? FallbackSourceProvider { get; set; }
+
+    /// <summary>#74 源队列健康排序（2026-11-15 老板令）：建队（含备源追加后）整体重排——本台源死账时
+    /// 死源沉底、健康候选补位。壳层接健康账（账空=原表序不猜）；未设=按原表序（既有契约与测试不变）。</summary>
+    public Func<Channel, IEnumerable<SourceEndpoint>, IEnumerable<SourceEndpoint>>? QueueOrderer { get; set; }
 
     /// <summary>当前输出面句柄（管理器热切换移交用）；未接面为 IntPtr.Zero。</summary>
     public IntPtr SurfaceHandle => _surfaceHandle;
@@ -180,6 +185,7 @@ public sealed class PlaybackSession
         _channel = p.Channel;
         _queue = p.Channel.Sources.Where(s => s.IsValid).ToList();
         AppendFallbacks();
+        if (QueueOrderer is { } orderer2) _queue = orderer2(p.Channel, _queue).ToList(); // #74 健康排序：备源入队后整体重排
         _endpointIndex = _queue.FindIndex(s => s.Url == p.Endpoint.Url);
         if (_endpointIndex < 0) _endpointIndex = 0; // 未入队端点（闪退镜黄④ 11-15）：记账归 0，防 -1 越界 TryFailover
         _preferLowLatency = p.PreferLowLatency;
@@ -216,6 +222,7 @@ public sealed class PlaybackSession
             return;
         }
         AppendFallbacks();
+        if (QueueOrderer is { } orderer) _queue = orderer(channel, _queue).ToList(); // #74 健康排序：备源入队后整体重排，死源沉底
         _endpointIndex = 0;
         FailoverCount = 0;
         _stallTimes.Clear(); // 欠载趋势账随换台清零（老板令 #26）：账只记本台画质，不跟人走

@@ -59,6 +59,8 @@ public partial class MainActivity : Activity
     private Java.Lang.Runnable? _digitCommit;
     private bool _watchdogRunning;
     private bool _watchdogStopped;
+    private long _lastVideoFrameAtMs;   // #75 音画同出兜底：最近一次视频帧单调时刻（0=尚未出过帧）
+    private int _stallRebuildCount;     // #75：同源快速重建连续计数（有帧即清账，2 次封顶切线路）
     private long? _failoverAtMs; // 换源黑屏埋点账（黑屏镜黄④）：换源起点 → Playing 出画恢复时长落运行台账
     private Java.Lang.Runnable _toastHide = default!;
     private readonly CntvEpgClient _epg = new();
@@ -91,7 +93,7 @@ public partial class MainActivity : Activity
     private bool _veilAwaitingReveal;        // 换台遮罩待真实出画（真机反馈批#11 续修：Ready≠出画）
     private int _veilSeq;                    // 遮罩代数：迟到的撤牌只撤自己那一代（快速连切防串）
     private Java.Lang.Runnable? _veilCountdown; // 真机反馈批#16：出画倒计时句柄（换台/出画即作废）
-    private string _veilChannelName = "";    // #16：倒计时文案台名
+    private string? _veilChannelName = "";   // #16：倒计时文案台名（#73 修：失败终态清空可空）
     private long _switchAtMs;                // #16：本台切换起点（出画耗时账起点）
     private static double RevealEtaMs = 3000; // #16：出画耗时指数均值（进程级自校准，倒计时基准）
     private LinearLayout? _epgPanel;
@@ -171,6 +173,7 @@ public partial class MainActivity : Activity
             bool startupReported = false;            // 台账只记一次
             player.OnFrameTick += (_, e) =>
             {
+                _lastVideoFrameAtMs = System.Environment.TickCount64; // #75 音画同出兜底：视频帧活着，账随帧走
                 pulse.Record(e.AtUtc);
                 // 起播流畅台账（真机反馈批#12 统计令 2026-11-15，统计不能少）：首帧出画到平稳的时长落
                 // 运行台账，修复效果（门槛 12 秒+预取让路）真机验收按此行核。平稳判据=首帧满 20 秒且
@@ -297,6 +300,19 @@ public partial class MainActivity : Activity
         _precheck = new ChannelPrecheck(ProbeChannelAsync, 600);
         try { _precheck.AttachHealthStore(new SourceHealthStore(FilesDir!.AbsolutePath)); }
         catch { /* 账本初始化失败按账空跑，预检不挡启动 */ }
+        // #74 源队列健康排序（2026-11-15 老板令）：本台源死账（健康账 Dead）时本台端点垫底、
+        // 内置表健康候选补位——此前死源排队首撞满看门狗才是切台黑屏主账。
+        // 账空/活账=保持既有序（本台优先、备援吃 FromRegistry 健康轻排序），不猜。
+        _manager.QueueOrderer = (ch, endpoints) =>
+        {
+            if (_precheck.SourceHealthOf(ch) is not { State: ChannelHealth.Dead }) return endpoints;
+            var ownUrls = new HashSet<string>(ch.Sources.Select(s => s.Url), StringComparer.Ordinal);
+            return endpoints
+                .Select((e, i) => (e, i, own: ownUrls.Contains(e.Url) ? 1 : 0))
+                .OrderBy(t => t.own) // 本台（死账）沉底；内置表健康候选补位
+                .ThenBy(t => t.i)    // 稳定序：组内保既有纪律序
+                .Select(t => t.e);
+        };
         if (_precheckEnabled) StartPrecheckLoop();
         _precheck.StateChanged += OnPrecheckHealthChanged; // ④列表健康点：读账刷新展示（5 秒节流）
 
@@ -349,6 +365,7 @@ public partial class MainActivity : Activity
             // 水墨深底盖旧画，空态文案叠其上（BuildRoot z 序：_emptyState 在 _loadingPanel 之上）。
             // _loadingSeq 作废亮牌延迟（原 HideLoading 语义保留，只不清遮罩底）。
             _loadingSeq++;
+            _veilChannelName = null; // #73 修：失败终态清台名——ShowSwitchVeil 不再带「正在连接」字样，空态文案接管
             ShowSwitchVeil();
             _veilAwaitingReveal = false; // 失败终态遮罩由空态文案管，不归帧节拍撤
             ShowEmptyState("信号中断，全线路不可达\n按 OK 重试 · 菜单键选台");
@@ -356,6 +373,8 @@ public partial class MainActivity : Activity
         else if (e.State == PlaybackState.Buffering)
         {
             HideEmptyState();
+            _lastVideoFrameAtMs = System.Environment.TickCount64; // #75：进过渡即续账，恢复 Playing 后给 5 秒出帧宽限
+            _stallRebuildCount = 0;
             // 断流自救（FailoverCount>0）零提示（方案书「热切断流自救全程零提示」，四镜·黑屏镜 11-15 修）：
             // 不铺遮罩不弹 OSD，画面保持最后一帧直到新流就绪；换台过渡（FailoverCount=0）才走 SwitchRevealPolicy。
             // 真机反馈批#2/#8 修 2026-11-15：铺遮罩=立即盖上不透明水墨深底（vc53 L588-605 口径），
@@ -374,7 +393,7 @@ public partial class MainActivity : Activity
             // 真机反馈批#11 续修 2026-11-15：Playing=内核 Ready（音视频齐），但新流首帧尚未真渲染，
             // 此刻撤遮罩会露旧台冻结帧几秒（老板真机实锤「台已切过来但画面一直挂着上个台」）。
             // 遮罩改挂待撤旗：本台第一帧真出画（OnFrameTick）才撤（WireVeilReveal）；
-            // 3 秒安全网兜底（纯音频流/帧监听缺失），防遮罩长挂死屏。
+            // 10 秒安全网兜底（纯音频流/帧监听缺失，#75 音画同出口径），防遮罩长挂死屏。
             _veilAwaitingReveal = true;
             int revealSeq = _veilSeq;
             _main.PostDelayed(() =>
@@ -382,7 +401,10 @@ public partial class MainActivity : Activity
                 if (!_veilAwaitingReveal || revealSeq != _veilSeq) return;
                 _veilAwaitingReveal = false;
                 HideSwitchVeil();
-            }, 3000);
+                // #75 音画同出修（2026-11-15 老板令）：安全网 3 秒→10 秒——内核 Ready 而视频帧未出时
+                // 此前 3 秒即撤遮罩，露「只出声」黑屏（老板实锤「出音不出画」）。出画判定必须音画齐：
+                // 视频帧到（VeilFrameTick）才撤；安全网只兜纯音频流的死屏长挂，给音画同出让路。
+            }, 10000);
             // 换源黑屏埋点（黑屏镜黄④ 11-15）：换源起点到出画恢复的时长落运行台账（含 ≤500ms 快切段）
             if (_failoverAtMs is { } from)
             {
@@ -867,6 +889,8 @@ public partial class MainActivity : Activity
     private void SwitchToCurrent()
     {
         var ch = _channels[_currentIndex];
+        _lastVideoFrameAtMs = System.Environment.TickCount64; // #75：换台即续账，防旧台陈帧误触只出声兜底
+        _stallRebuildCount = 0;
         // 频道上下文由内核 Play 自取（每会话独享内核，双实例不共用上下文）
         if (_manager.Current is { } cur && cur.CurrentChannel?.Id == ch.Id)
         {
@@ -902,12 +926,23 @@ public partial class MainActivity : Activity
     }
 
     /// <summary>换台遮罩（vc53 铺干净底色口径，真机反馈批#2/#8 修）：换台过渡即铺不透明水墨深底盖旧画面，
-    /// 新流首帧到齐才撤；不再藏画面露根布局暖白底。文字亮灭独立计时（0.8 秒）。</summary>
+    /// 新流首帧到齐才撤。#73 Loading 全程在场修（2026-11-15 老板令）：内核反复上报缓冲会多次走到这里——
+    /// 此前每次重铺都把字样藏掉、停掉倒计时，老板实锤「全程全黑屏没有 Loading」。改：字样跟遮罩同寿命，
+    /// 有台名即亮字并重启倒计时（亮到真出画一并撤）；失败终态由调用方先清台名（空态接管）。</summary>
     private void ShowSwitchVeil()
     {
         _veilSeq++; // 遮罩换代：旧代迟到的撤牌/安全网全部作废（快速连切防串）
-        StopVeilCountdown(); // #16：换代即停旧倒计时
-        _loadingText.Visibility = ViewStates.Gone;
+        StopVeilCountdown();
+        if (_veilChannelName is { } name)
+        {
+            _loadingText.Text = $"正在连接 {name}";
+            _loadingText.Visibility = ViewStates.Visible;
+            StartVeilCountdown(name);
+        }
+        else
+        {
+            _loadingText.Visibility = ViewStates.Gone;
+        }
         _loadingPanel.Visibility = ViewStates.Visible;
     }
 
@@ -924,10 +959,14 @@ public partial class MainActivity : Activity
         StopVeilCountdown();
         var runnable = new Java.Lang.Runnable(() =>
         {
-            if (!_veilAwaitingReveal || _loadingPanel.Visibility != ViewStates.Visible) return;
-            var remainMs = RevealEtaMs - (System.Environment.TickCount64 - _switchAtMs);
-            int remain = Math.Max(1, (int)Math.Round(remainMs / 1000.0));
-            _loadingText.Text = $"正在连接 {channelName}\n约还需 {remain} 秒出画";
+            if (_loadingPanel.Visibility != ViewStates.Visible) return; // 遮罩已撤：倒计时随亡
+            if (_veilAwaitingReveal)
+            {
+                // #73 修：等待出画才刷倒计时；未到 Playing 前只续拍（字样保持「正在连接 X」不闪断）
+                var remainMs = RevealEtaMs - (System.Environment.TickCount64 - _switchAtMs);
+                int remain = Math.Max(1, (int)Math.Round(remainMs / 1000.0));
+                _loadingText.Text = $"正在连接 {channelName}\n约还需 {remain} 秒出画";
+            }
             _main.PostDelayed(_veilCountdown!, 1000);
         });
         _veilCountdown = runnable;
@@ -1054,6 +1093,45 @@ public partial class MainActivity : Activity
 
     // —— 看门狗泵（会话层 Tick：缓冲超时/卡流自救） ——————————————————
 
+    /// <summary>#75 音画同出兜底（2026-11-15 老板令，泵 3 秒节拍内调）：
+    /// 「放 1 秒卡半秒/出音不出画」=内核 READY 态视频断供，音频照走——既有看门狗不覆盖此态（无 Buffering 事件）。
+    /// 播放中 5 秒零视频帧即介入：同源快速重建（ChangeChannel 原台重起，优先同源恢复），
+    /// 连续 2 次未救回才切下一线路；有帧即清账。换台过渡期（遮罩挂起）不掺和，避免与自救竞速。</summary>
+    private void PumpAudioOnlyGuard()
+    {
+        if (_manager.Current is not { } cur
+            || cur.State != PlaybackState.Playing
+            || cur.CurrentChannel is not { } ch
+            || _veilAwaitingReveal)
+        {
+            return;
+        }
+        if (_lastVideoFrameAtMs != 0 && System.Environment.TickCount64 - _lastVideoFrameAtMs < 5_000)
+        {
+            _stallRebuildCount = 0; // 有帧即清账：画面健康，重建计数归零
+            return;
+        }
+        if (_lastVideoFrameAtMs == 0) return; // 尚未出过帧：起播期归看门狗管，不抢
+        _lastVideoFrameAtMs = System.Environment.TickCount64; // 介入即重置：3 秒泵不连发
+        if (_stallRebuildCount < 2)
+        {
+            _stallRebuildCount++;
+            CrashNet.Record($"[只出声兜底] 5 秒零视频帧，同源重建第 {_stallRebuildCount} 次（{ch.Name}）");
+            cur.ChangeChannel(ch); // 同源快速重建：FailoverCount 归零，先试原路
+        }
+        else if (cur.CurrentLineIndex + 1 < cur.LineCount)
+        {
+            CrashNet.Record($"[只出声兜底] 同源重建 2 次未救回，切线路 {cur.CurrentLineIndex + 2}/{cur.LineCount}（{ch.Name}）");
+            _stallRebuildCount = 0;
+            cur.SwitchLine(cur.CurrentLineIndex + 1);
+        }
+        else
+        {
+            CrashNet.Record($"[只出声兜底] 已到最后线路，交会话备源自救（{ch.Name}）");
+            _stallRebuildCount = 0;
+        }
+    }
+
     private void EnsureWatchdog()
     {
         if (_watchdogRunning) return;
@@ -1067,6 +1145,7 @@ public partial class MainActivity : Activity
                 if (_watchdogStopped) return; // OnDestroy 后停泵（闪退镜黄⑦）：不泄漏 Activity
                 // 抽屉开着画面也在播：自救泵跟会话走，不跟面板键位走（vc53 画面常驻口径）
                 if (_manager.Current is not null) _manager.Tick();
+                PumpAudioOnlyGuard(); // #75 音画同出兜底：播放中 5 秒零视频帧即介入（内核 READY 态看门狗覆盖不到）
                 Pump();
             }, 3000);
         }

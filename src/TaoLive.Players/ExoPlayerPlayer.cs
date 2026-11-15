@@ -42,6 +42,17 @@ public sealed class ExoPlayerPlayer : IPlayer
         _forwarder = new Forwarder(this);
         var playerBuilder = new AndroidX.Media3.ExoPlayer.ExoPlayerBuilder(context);
         playerBuilder.SetLoadControl(BuildLoadControl(context));
+        // #76 锁画质防抖（2026-11-15 老板令，治「放 1 秒卡半秒」循环）：默认 ABR 在估速贴档位线抖动时
+        // 逐秒重选流——每次切换渲染器拆建一遍（真机「视频渲染器停用」实锤），画面停半秒再续。
+        // 改黏性自适应：升档要缓冲满 30 秒、降档判据放宽到 60 秒、估速按五折取档——宁稳勿抖，
+        // 起播按当前带宽选一档合理画质放住，不再随估速逐秒换挡。
+        playerBuilder.SetTrackSelector(new AndroidX.Media3.ExoPlayer.TrackSelection.DefaultTrackSelector(
+            context,
+            new AndroidX.Media3.ExoPlayer.TrackSelection.AdaptiveTrackSelection.Factory(
+                /* minDurationForQualityIncreaseMs */ 30_000,
+                /* maxDurationForQualityDecreaseMs */ 60_000,
+                /* minDurationToRetainAfterDiscardMs */ 25_000,
+                /* bandwidthFraction */ 0.5f)));
         _player = playerBuilder.Build()!;
         _player.AddListener(_forwarder);
         _frameForwarder = new FrameTickForwarder(this); // 帧回调（v76：10Hz 节流）随内核装配一次，Play 全程复用
