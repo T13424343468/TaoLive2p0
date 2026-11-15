@@ -23,6 +23,13 @@ public class FallbackQueueTests
     // ---- 活性按健康账轻排序（收口批①+v28：同台活源在前、账新者在前，只动同台内排序） ----
 
     [Fact]
+    public void FallbackRegistry_table_anchors_84_entries()
+    {
+        // R2-27 后补锚（99f7e69 头注承诺「测试断言 Table.Length==84 锚定」此前无实体断言）：防表漂移——收录须按老板令增删并同步此锚
+        Assert.Equal(84, FallbackSourceRegistry.Table.Length);
+    }
+
+    [Fact]
     public void FromRegistry_light_sorts_alive_sources_first_by_recency()
     {
         // 注册表真实候选（新疆卫视 3 路）：按候选顺序注入健康账提示——
