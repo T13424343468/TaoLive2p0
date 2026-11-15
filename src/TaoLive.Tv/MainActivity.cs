@@ -235,8 +235,8 @@ public partial class MainActivity : Activity
                 if (pulse.StallSuspicion) c.NotifySmoothnessSuspect();
                 // 台账行带台名（vc70）：此前[画面平稳]行不带台名，真机账对不上是哪台的账
                 CrashNet.Record(pulse.StallSuspicion
-                    ? $"[画面平稳] {c.CurrentChannel?.Name ?? c.CurrentChannelKey ?? "?"} 疑似卡顿：连续 3 窗帧间隔 P95 {ms}ms 超阈 {FramePulse.P95ThresholdMs}ms"
-                    : $"[画面平稳] {c.CurrentChannel?.Name ?? c.CurrentChannelKey ?? "?"} 帧间隔 P95 {ms}ms（阈 {FramePulse.P95ThresholdMs}ms）");
+                    ? $"[画面平稳] {c.CurrentChannel?.Name ?? c.CurrentChannel?.Id ?? "?"} 疑似卡顿：连续 3 窗帧间隔 P95 {ms}ms 超阈 {FramePulse.P95ThresholdMs}ms"
+                    : $"[画面平稳] {c.CurrentChannel?.Name ?? c.CurrentChannel?.Id ?? "?"} 帧间隔 P95 {ms}ms（阈 {FramePulse.P95ThresholdMs}ms）");
             };
         }
 
