@@ -200,4 +200,66 @@ public class HotSwitchTests
         Assert.Equal(PlaybackState.Playing, manager.Current!.State);
         Assert.Equal(standby, manager.Standby);
     }
+
+    [Fact]
+    public void Standby_not_ready_within_window_is_superseded_on_tick()
+    {
+        var players = new List<LoggingPlayer>();
+        long now = 0;
+        var manager = new PlaybackSessionManager(
+            () => { var p = new LoggingPlayer(); players.Add(p); return new PlaybackSession(p, new FixedClock(T0)); },
+            dispatcher: null, null, hotStandbyEnabled: true, monotonicMs: () => now);
+        var ch1 = MakeChannel("cctv1", "https://s/a.m3u8");
+        var ch2 = MakeChannel("cctv2", "https://s/b.m3u8");
+
+        manager.SwitchTo(ch1);
+        manager.Current!.AttachSurface(new IntPtr(1));
+        MakePlaying(manager.Current);
+        var standby = manager.PrepareStandby(ch2)!;
+        Assert.Equal(PlaybackState.Buffering, standby.State);
+
+        // 窗口未满：热备照常攒流不放弃
+        now = (long)PlaybackSessionManager.StandbyAccumulateWindow.TotalMilliseconds - 1;
+        manager.Tick();
+        Assert.Equal(standby, manager.Standby);
+        Assert.DoesNotContain("Stop", players[1].Log);
+
+        // 窗口满仍攒不到门槛：放弃热备转冷切（方案书 v75），不再烧网络
+        now = (long)PlaybackSessionManager.StandbyAccumulateWindow.TotalMilliseconds;
+        manager.Tick();
+        Assert.Null(manager.Standby);
+        Assert.Equal(PlaybackState.Idle, standby.State); // 已让位：内核已停
+        Assert.Contains("Stop", players[1].Log);
+        // 会话留表：冷切复用不重建
+        Assert.Equal(standby, manager.TryGet("cctv2"));
+
+        // 冷切仍可用：超时放弃后 SwitchTo 走既有冷切路径
+        var taken = manager.SwitchTo(ch2);
+        Assert.Equal(standby, taken);
+        Assert.Equal(taken, manager.Current);
+    }
+
+    [Fact]
+    public void Ready_standby_survives_tick_past_window()
+    {
+        var players = new List<LoggingPlayer>();
+        long now = 0;
+        var manager = new PlaybackSessionManager(
+            () => { var p = new LoggingPlayer(); players.Add(p); return new PlaybackSession(p, new FixedClock(T0)); },
+            dispatcher: null, null, hotStandbyEnabled: true, monotonicMs: () => now);
+        var ch1 = MakeChannel("cctv1", "https://s/a.m3u8");
+        var ch2 = MakeChannel("cctv2", "https://s/b.m3u8");
+
+        manager.SwitchTo(ch1);
+        manager.Current!.AttachSurface(new IntPtr(1));
+        MakePlaying(manager.Current);
+        var standby = manager.PrepareStandby(ch2)!;
+        MakePlaying(standby); // 窗口内已攒到门槛线
+
+        // 已达门槛的热备不受窗口约束，常备待热切（v75 只清「攒不到」的）
+        now = (long)PlaybackSessionManager.StandbyAccumulateWindow.TotalMilliseconds * 10;
+        manager.Tick();
+        Assert.Equal(standby, manager.Standby);
+        Assert.DoesNotContain("Stop", players[1].Log);
+    }
 }

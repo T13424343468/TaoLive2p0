@@ -27,6 +27,9 @@ public sealed class PlaybackSessionManager
     /// <summary>回主源健康账门槛：主源预检轮次连续命中 OK 至少此次数（复用预检结果，不另起独立探测）。</summary>
     public const int ReturnToPrimaryMinConsecutiveOks = 3;
 
+    /// <summary>热备攒流窗口（方案书 v75）：窗口内攒不到起播门槛线（切片预取双曲线 7 秒同口径）即放弃热备转冷切，不无限等；终值随真机定标。</summary>
+    public static readonly TimeSpan StandbyAccumulateWindow = TimeSpan.FromSeconds(7);
+
     /// <summary>会话表容量（收口批③·LRU 按内存分档）：高配 8（兼作既有常量默认）；低配 4。</summary>
     public const int HighMemorySessions = 8;
 
@@ -53,6 +56,7 @@ public sealed class PlaybackSessionManager
     private Func<Channel, bool>? _primaryAliveConfirmed;
     private PlaybackSession? _returnStableSession;
     private long _returnStableSinceMs;
+    private long _standbySinceMs;
     private long _stamp;
 
     public PlaybackSessionManager(Func<PlaybackSession> sessionFactory, IMainThreadDispatcher? dispatcher = null,
@@ -159,6 +163,7 @@ public sealed class PlaybackSessionManager
             Touch(channel.Id);
             existing.ChangeChannel(channel);
             Standby = existing;
+            _standbySinceMs = _monotonicMs(); // 攒流超时账起算（v75）
             return existing;
         }
         var session = _sessionFactory();
@@ -168,6 +173,7 @@ public sealed class PlaybackSessionManager
         EvictIfOverCapacity();
         session.ChangeChannel(channel); // 无面起播：攒流到门槛线，不接管画面
         Standby = session;
+        _standbySinceMs = _monotonicMs();
         return session;
     }
 
@@ -222,17 +228,33 @@ public sealed class PlaybackSessionManager
     public PlaybackSession? TryGet(string channelId) =>
         _sessions.TryGetValue(channelId, out var session) ? session : null;
 
-    /// <summary>看门狗泵：由壳层定时器周期调用，仅作用于当前会话；顺带跑回主源迟滞判据。</summary>
+    /// <summary>看门狗泵：由壳层定时器周期调用，仅作用于当前会话；顺带跑回主源迟滞判据与热备攒流超时账。</summary>
     public void Tick()
     {
         var current = Current;
         if (current is null)
         {
             lock (_returnGate) _returnStableSession = null;
+            TryStandbyTimeout();
             return;
         }
         current.CheckWatchdog();
         TryReturnToPrimary(current);
+        TryStandbyTimeout();
+    }
+
+    /// <summary>
+    /// 热备攒流超时（方案书 v75）：窗口内未达门槛（Playing）即 Supersede 热备转冷切，不无限等——
+    /// 用户侧由后续 SwitchTo 自然走冷切路径不卡死，但不再烧网络白攒；
+    /// 已达门槛（Playing）的热备不受窗口约束，常备待热切。计时按单调钟（v12）。
+    /// </summary>
+    private void TryStandbyTimeout()
+    {
+        var sb = Standby;
+        if (sb is null || ReferenceEquals(sb, Current) || sb.State == PlaybackState.Playing) return;
+        if (_monotonicMs() - _standbySinceMs < StandbyAccumulateWindow.TotalMilliseconds) return;
+        sb.Supersede(); // 攒不到门槛即放弃热备；会话留表，冷切可复用
+        Standby = null;
     }
 
     /// <summary>
