@@ -109,6 +109,58 @@ public class SessionTests
     }
 
     [Fact]
+    public void Proactive_failover_on_sustained_smoothness_suspicion()
+    {
+        // vc70 慢帧流（老板真机「画面不停地抖」台账定案）：帧在上游被节流（画面每半秒一帧），
+        // 探活通/库存足/带宽够/解码无错，既有自救全不触发——壳层平稳疑点攒满 3 次=坏线，预防性换源
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer { BufferedMs = 20_000 };
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8");
+        session.ChangeChannel(ch);
+        session.NotifyFirstFrame();
+        Assert.Equal(PlaybackState.Playing, session.State);
+
+        for (int i = 0; i < 2; i++) // 前两次疑点：账不够，不切
+        {
+            session.NotifySmoothnessSuspect();
+            clock.Advance(TimeSpan.FromSeconds(10));
+            Assert.False(session.CheckProactiveFailover());
+            Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url);
+        }
+
+        session.NotifySmoothnessSuspect(); // 第三次：满 3 次坐实慢帧流
+        Assert.True(session.CheckProactiveFailover());
+        Assert.Equal("https://s/b.m3u8", session.CurrentEndpoint?.Url);
+        Assert.Equal(1, session.FailoverCount);
+
+        session.NotifyFirstFrame(); // 新线回播放：平稳账已清，不跟去新线
+        clock.Advance(TimeSpan.FromSeconds(10));
+        Assert.False(session.CheckProactiveFailover());
+        Assert.Equal(1, session.FailoverCount);
+    }
+
+    [Fact]
+    public void Smoothness_suspects_outside_window_do_not_trip()
+    {
+        // vc70：疑点账滚动窗（90 秒）滑出即不坐实——偶发疑点不切线，宁稳勿烧
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer { BufferedMs = 20_000 };
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8");
+        session.ChangeChannel(ch);
+        session.NotifyFirstFrame();
+
+        session.NotifySmoothnessSuspect();
+        clock.Advance(TimeSpan.FromSeconds(91)); // 首个疑点滑出窗
+        session.NotifySmoothnessSuspect();
+        session.NotifySmoothnessSuspect();
+        Assert.False(session.CheckProactiveFailover());
+        Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url);
+        Assert.Equal(0, session.FailoverCount);
+    }
+
+    [Fact]
     public void Exhausted_sources_fires_all_failed_and_stays_failed()
     {
         var player = new LoggingPlayer();

@@ -298,6 +298,7 @@ public sealed class PlaybackSession
         _ticketRetrySinceMs = null;
         _proactiveCount = 0; // vc67：换台重给预防介入预算
         _stallTimes.Clear(); // 欠载趋势账随换台清零（老板令 #26）：账只记本台画质，不跟人走
+        _smoothnessTimes.Clear(); // vc70：平稳疑点账同口径，换台清零不跟人走
         Transition(PlaybackState.Buffering, "change channel");
         _player.Play(new PlaybackParams(channel, _queue[0], _preferLowLatency));
         ReattachSurface();
@@ -332,6 +333,8 @@ public sealed class PlaybackSession
         _freshTicketRetried = false; // vc69：手动换线重记坏票重试机会
         _ticketRetrySinceMs = null;
         _proactiveCount = 0; // vc67：手动换线=老板意图，重给预防介入预算
+        _stallTimes.Clear(); // 手动换线：欠载账随线清零
+        _smoothnessTimes.Clear(); // vc70：平稳账随线清零
         Transition(PlaybackState.Buffering, "manual line switch");
         _player.Play(new PlaybackParams(_channel, _queue[endpointIndex], _preferLowLatency));
         ReattachSurface();
@@ -409,6 +412,27 @@ public sealed class PlaybackSession
     {
         _stallTimes.RemoveAll(t => nowMs - t >= StallChurnWindow.TotalMilliseconds);
         _stallTimes.Add(nowMs);
+    }
+
+    /// <summary>慢帧流滚动窗（vc70 老板真机「画面不停地抖」台账定案）：窗内平稳疑点满此次数即坏线证据。
+    /// 台账三张定案：换源/重建/带宽/解码丢帧四路全排除（全程零换源行、零重建行、估速 6.7~14.6 Mbps 富余、
+    /// 零解码报错/丢帧/欠载行），实锤=出画帧间隔 P95 锁死 478~489ms（≈2 帧/秒）连续 2 分多钟不断——
+    /// 画面每半秒才更新一次，帧在上游被节流；探活通、库存足、带宽够，既有自救全不触发，须单独判据。</summary>
+    public static readonly TimeSpan SmoothnessSuspectWindow = TimeSpan.FromSeconds(90);
+
+    /// <summary>慢帧流判线阈值：平稳疑点（连续 3 窗超阈的怀疑游程，壳层每 10 秒上报一次）满 3 次
+    /// =持续约 1 分钟坏帧坐实，预防性换线。同样吃预防冷却窗与介入封顶，防坏线连切横跳。</summary>
+    public const int SmoothnessSuspectThreshold = 3;
+
+    private readonly List<long> _smoothnessTimes = new();
+
+    /// <summary>壳层平稳观测上报（vc70）：画面平稳疑点游程成立时每拍记账，滚动窗内攒满即交预防泵换线。
+    /// 只记账不决策（画面平稳优先令：计算归会话预防泵，壳层只埋点）。</summary>
+    public void NotifySmoothnessSuspect()
+    {
+        var nowMs = _clock.NowMs;
+        _smoothnessTimes.RemoveAll(t => nowMs - t >= SmoothnessSuspectWindow.TotalMilliseconds);
+        _smoothnessTimes.Add(nowMs);
     }
 
     /// <summary>
@@ -546,6 +570,11 @@ public sealed class PlaybackSession
         _stallTimes.RemoveAll(t => nowMs - t >= StallChurnWindow.TotalMilliseconds);
         bool churnTripped = _stallTimes.Count >= StallChurnThreshold;
 
+        // 判据③（vc70 慢帧流）：滚动窗内平稳疑点满 3 次——帧在上游被节流（画面每半秒一帧），
+        // 探活通/库存足/带宽够/解码无错，全不触发既有自救，只能靠平稳账单独定罪
+        _smoothnessTimes.RemoveAll(t => nowMs - t >= SmoothnessSuspectWindow.TotalMilliseconds);
+        bool smoothnessTripped = _smoothnessTimes.Count >= SmoothnessSuspectThreshold;
+
         long bufferedMs = _player.BufferedMs;
         bool lowInventory = bufferedMs > 0 && bufferedMs < ProactiveInventoryFloor.TotalMilliseconds;
         if (!lowInventory)
@@ -562,21 +591,26 @@ public sealed class PlaybackSession
             _lowInventoryLastAtMs = nowMs;
         }
         bool inventoryTripped = lowInventory && _inventoryEverFilled && _lowInventoryRounds >= 2;
-        if (!churnTripped && !inventoryTripped)
+        if (!churnTripped && !inventoryTripped && !smoothnessTripped)
         {
-            return false; // 两条判据都没坐实：单次抖动不切，等趋势
+            return false; // 三条判据都没坐实：单次抖动不切，等趋势
         }
         _lowInventoryRounds = 0;
         _proactiveCount++; // vc67：预防介入记账，到顶退场（慢网烧线病根）
         // 预防打点（老板令 #24/#26）：主动介入的账面依据——命中哪条判据、账面多少、切前是第几路线
         string basis = churnTripped
             ? $"滚动窗 {StallChurnWindow.TotalMinutes:0}min 内卡流 {_stallTimes.Count} 次（满 {StallChurnThreshold} 次）"
-            : $"库存 {bufferedMs}ms 连续 2 拍低于 {(int)ProactiveInventoryFloor.TotalMilliseconds}ms";
+            : smoothnessTripped
+                ? $"滚动窗 {SmoothnessSuspectWindow.TotalSeconds:0}s 内平稳疑点 {_smoothnessTimes.Count} 次（满 {SmoothnessSuspectThreshold} 次，慢帧流坏线）"
+                : $"库存 {bufferedMs}ms 连续 2 拍低于 {(int)ProactiveInventoryFloor.TotalMilliseconds}ms";
         SessionTrace.Emit($"[预防] {DescribeChannel()} {basis}，预防性换源（原线路 {CurrentLineIndex + 1}/{LineCount}，不等卡流超时）");
         _stallTimes.Clear(); // 介入一次清一次账：新线重新起账，老账不跟去新线
+        _smoothnessTimes.Clear();
         // 走既有自救口径：先归 Failed 再切线（状态机矩阵 Playing 不直跳 Buffering，与看门狗/报错同路）
         Transition(PlaybackState.Failed, "proactive switch");
-        TryFailover(churnTripped ? "stall churn proactive" : "low inventory proactive");
+        TryFailover(churnTripped ? "stall churn proactive"
+            : smoothnessTripped ? "slow-frame proactive"
+            : "low inventory proactive");
         return true;
     }
 

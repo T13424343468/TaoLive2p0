@@ -230,9 +230,13 @@ public partial class MainActivity : Activity
                     CrashNet.Record("[视频停滞] 出画中 10 秒无视频帧（白屏只出声排查锚点）");
                     return;
                 }
+                // vc70 慢帧流接线：平稳疑点交会话记账（画面平稳优先令：壳层只埋点，攒满判线归预防泵）——
+                // 台账三张定案「画面不停地抖」=慢帧流坏线，既有自救全不触发，靠平稳账单独定罪换源
+                if (pulse.StallSuspicion) c.NotifySmoothnessSuspect();
+                // 台账行带台名（vc70）：此前[画面平稳]行不带台名，真机账对不上是哪台的账
                 CrashNet.Record(pulse.StallSuspicion
-                    ? $"[画面平稳] 疑似卡顿：连续 3 窗帧间隔 P95 {ms}ms 超阈 {FramePulse.P95ThresholdMs}ms"
-                    : $"[画面平稳] 帧间隔 P95 {ms}ms（阈 {FramePulse.P95ThresholdMs}ms）");
+                    ? $"[画面平稳] {c.CurrentChannel?.Name ?? c.CurrentChannelKey ?? "?"} 疑似卡顿：连续 3 窗帧间隔 P95 {ms}ms 超阈 {FramePulse.P95ThresholdMs}ms"
+                    : $"[画面平稳] {c.CurrentChannel?.Name ?? c.CurrentChannelKey ?? "?"} 帧间隔 P95 {ms}ms（阈 {FramePulse.P95ThresholdMs}ms）");
             };
         }
 
