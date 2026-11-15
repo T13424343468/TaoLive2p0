@@ -69,3 +69,11 @@
 | 编号 | 级别 | 描述 | 状态 |
 |------|------|------|------|
 | BUG-1 | 必修（P1） | `PlaybackSession.ChangeChannel` 在 Reconnecting 态抛 `InvalidOperationException`（Transition 矩阵缺 Reconnecting→Idle）。壳层换台打在卡流窗口即崩。 | **已修（2026-11-15）**：Transition 矩阵补 (Reconnecting→Idle)（PlaybackSession.cs:117）；两用例改正向断言 `Change_channel_during_reconnecting_succeeds`/`Same_channel_switch_during_reconnecting_succeeds`（SessionFailoverTests.cs:119/195），141 测全绿 |
+
+## 上机前四眼（老板 2026-11-15 真机镜后立规，出包前必过）
+背景：144 测九轮全绿仍出四条低级错误（双图标/界面未搬/透明丢失/黑屏无因）——测试只看见写了测试的东西，门面和安装路径没有测试覆盖，靠人眼读码补位。
+1. 【入口眼】逐字读安装清单+壳层入口特性：启动入口唯一、包名版本正确、权限最小、主题/横幅与交付口径一致；
+2. 【门面眼】界面文件与 vc53 基线并排走查：主题、透明参数、台标口径、页签/面板/亮牌/空态，一项对不上即拦包；
+3. 【安装眼】推演覆盖安装路径：老包能否原地升级、桌面条目数、图标/名字不重复；
+4. 【留痕眼】内核报错必带真实码+根因链落诊断页，不让真机只剩裸词。
+四眼全过才许出包；每眼在交付说明留一行走查结论。
