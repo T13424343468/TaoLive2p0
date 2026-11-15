@@ -1,4 +1,4 @@
-namespace TaoLive.Model;
+﻿namespace TaoLive.Model;
 
 /// <summary>
 /// 播放参数：一次起播所需的全部输入。

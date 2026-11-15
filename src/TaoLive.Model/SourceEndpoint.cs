@@ -1,4 +1,4 @@
-namespace TaoLive.Model;
+﻿namespace TaoLive.Model;
 
 /// <summary>
 /// 源端点：一路可拉的流地址。Kind 区分协议族，权重供备援排序。

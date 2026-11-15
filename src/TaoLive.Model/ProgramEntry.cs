@@ -1,4 +1,4 @@
-namespace TaoLive.Model;
+﻿namespace TaoLive.Model;
 
 /// <summary>节目单条目：某频道在某时间段的节目。</summary>
 public sealed record ProgramEntry(

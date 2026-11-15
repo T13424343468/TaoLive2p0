@@ -1,4 +1,4 @@
-namespace TaoLive.Session;
+﻿namespace TaoLive.Session;
 
 /// <summary>
 /// 播放会话五态（老板 2026-11-15 拍板：禁止布尔标志位乱跳）。

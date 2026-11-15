@@ -1,4 +1,4 @@
-namespace TaoLive.Foundation;
+﻿namespace TaoLive.Foundation;
 
 /// <summary>
 /// 预取双曲线常量（老板 2026-11-15 02:39 确认原样继承）。

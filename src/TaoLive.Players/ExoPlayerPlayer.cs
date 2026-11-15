@@ -1,4 +1,4 @@
-using Android.Runtime;
+﻿using Android.Runtime;
 using Android.Views;
 using TaoLive.Foundation;
 using TaoLive.Model;

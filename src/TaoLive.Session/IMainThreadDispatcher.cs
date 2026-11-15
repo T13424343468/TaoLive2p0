@@ -1,4 +1,4 @@
-namespace TaoLive.Session;
+﻿namespace TaoLive.Session;
 
 /// <summary>
 /// 主线程调度抽象（研发路黄灯采纳）：壳层注册安卓实现（Handler.post），

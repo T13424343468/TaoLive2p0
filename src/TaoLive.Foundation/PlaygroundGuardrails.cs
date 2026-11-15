@@ -1,4 +1,4 @@
-namespace TaoLive.Foundation;
+﻿namespace TaoLive.Foundation;
 
 /// <summary>看门狗契约：断流判死与出帧超时探测。M2 班全量实现，M1 只立接口。</summary>
 public interface IWatchdog

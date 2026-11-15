@@ -1,4 +1,4 @@
-using System.Text;
+﻿using System.Text;
 using TaoLive.Catalog;
 using TaoLive.Model;
 using Xunit;

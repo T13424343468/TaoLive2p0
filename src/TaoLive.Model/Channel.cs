@@ -1,4 +1,4 @@
-namespace TaoLive.Model;
+﻿namespace TaoLive.Model;
 
 /// <summary>
 /// 频道：一个可播的电视台。Id 稳定不变，名称为展示文案。
