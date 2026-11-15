@@ -132,8 +132,9 @@ public partial class MainActivity : Activity
             }
             else if (e.State == PlaybackState.Buffering)
             {
-                // 换台过渡：铺底色遮罩（一期 SwitchRevealPolicy 口径，新流就绪才亮）
-                if (SwitchRevealPolicy.ShouldVeilOnSwitch(_surface.Holder?.Surface != null))
+                // 断流自救（FailoverCount>0）零提示（方案书「热切断流自救全程零提示」，四镜·黑屏镜 11-15 修）：
+                // 不铺遮罩不弹 OSD，画面保持最后一帧直到新流就绪；换台过渡（FailoverCount=0）才走 SwitchRevealPolicy。
+                if (e.Session.FailoverCount == 0 && SwitchRevealPolicy.ShouldVeilOnSwitch(_surface.Holder?.Surface != null))
                 {
                     _surface.Visibility = ViewStates.Invisible;
                     ShowToast(TaoLive.Session.SwitchHud.Connecting);
