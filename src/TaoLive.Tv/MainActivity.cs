@@ -201,6 +201,10 @@ public partial class MainActivity : Activity
             {
                 // 失败打点接真实事件：全线路不可达落运行日志
                 CrashNet.Record($"[ConnectFailure] {e.Session.CurrentChannel?.Name ?? "未知频道"} 全线路不可达");
+                // 播放实测回写（真机反馈批#4 修 2026-11-15）：真实断流写健康账——
+                // 此前 ReportSourceResult 生产零接线，播放正常的台健康账永远不涨（圆点全灰实锤之一）
+                if (e.Session.CurrentChannel is { } failCh)
+                    _precheck.ReportSourceResult(failCh, false, System.Environment.TickCount64, playback: true);
                 // 失败终态驻留空态（方案书 v77，白屏镜红②）：重连耗尽转空态文案，不再用瞬时 Toast；
                 // 键位引导按树内真实键位：OK 重试（退避账管节奏）· 菜单键选台（呼列表）
                 HideLoading();
@@ -234,6 +238,9 @@ public partial class MainActivity : Activity
                 if (e.Session.CurrentChannel is { } playingChannel)
                 {
                     _prefs.Edit()!.PutString("last_channel", playingChannel.Id)!.Apply();
+                    // 播放实测回写（真机反馈批#4 修 2026-11-15）：首帧真出画=强证据直接点亮圆点——
+                    // 此前播放正常的台健康账零回写，圆点只能等预检慢慢滚（真机「看过的台也不绿」实锤）
+                    _precheck.ReportSourceResult(playingChannel, true, System.Environment.TickCount64, playback: true);
                 }
                 // 首帧撤遮罩由 HideSwitchVeil 承担（真机反馈批#2 修），载体不再显隐切换
             }

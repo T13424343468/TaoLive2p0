@@ -178,15 +178,18 @@ public class ChannelPrecheck
     /// 来源级结果回写（v1.0.9 第⑬项）：播放实测与卡死自救换源的结论写进健康表，
     /// 播放实测覆盖预检结论；同频道任一来源通即整台转可用。
     /// v1.0.10：连续失败达阈值自动淘汰（交回重探）；每次变化节流落盘。
+    /// playback=播放实测强证据（真机反馈批#4 修 2026-11-15）：成功即圆点绿门槛直接达标。
     /// </summary>
-    public void ReportSourceResult(Channel ch, bool ok, long nowMs, long ms = 0, bool timeout = false)
+    public void ReportSourceResult(Channel ch, bool ok, long nowMs, long ms = 0, bool timeout = false, bool playback = false)
     {
-        WriteSourceResult(ch, ok, nowMs, ms, timeout);
+        WriteSourceResult(ch, ok, nowMs, ms, timeout, playback);
     }
 
     /// <summary>统一写入口径：探活结论、连续失败淘汰、落盘脏标记都在这一处（预检循环与播放实测共用）。
-    /// v28 主线③：同一入口向评分账喂入（成功记速度 0 时不计；预检轻探不计耗时，喂入 ok 无 ms）。</summary>
-    private void WriteSourceResult(Channel ch, bool ok, long nowMs, long ms = 0, bool timeout = false)
+    /// v28 主线③：同一入口向评分账喂入（成功记速度 0 时不计；预检轻探不计耗时，喂入 ok 无 ms）。
+    /// playback=播放实测（真机反馈批#4 修 2026-11-15）：首帧真出画/真实断流的结论是强证据——
+    /// 成功直接视为圆点绿门槛达标（此后仍随预检轮滚动更新），失败照常计连败淘汰。</summary>
+    private void WriteSourceResult(Channel ch, bool ok, long nowMs, long ms = 0, bool timeout = false, bool playback = false)
     {
         ScoreStore?.Report(ch.SourceId, ch.EpgKey, ok, ms, timeout);
         var key = SourceKey(ch);
@@ -198,7 +201,10 @@ public class ChannelPrecheck
         entry.State = ok ? ChannelHealth.Alive : ChannelHealth.Dead;
         entry.CheckedAtMs = nowMs > 0 ? nowMs : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         entry.ConsecutiveFails = ok ? 0 : entry.ConsecutiveFails + 1;
-        entry.ConsecutiveOks = ok ? entry.ConsecutiveOks + 1 : 0; // 回主源判据账：连续命中次数随每轮预检/实测回写累计
+        // 播放实测=强证据（#4 修）：真画面在手，绿点判据直接达标；预检轻探照旧逐轮累计
+        entry.ConsecutiveOks = ok
+            ? (playback ? MarkGreenMinConsecutiveOks : entry.ConsecutiveOks + 1)
+            : 0;
         if (!ok && entry.ConsecutiveFails >= RetireAfterConsecutiveFails)
         {
             _sourceHealth.TryRemove(key, out _); // 连挂自动淘汰：不再被选源取用，交回预检重探

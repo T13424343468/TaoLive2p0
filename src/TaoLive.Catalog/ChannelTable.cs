@@ -240,6 +240,10 @@ public static class ChannelTable
             .Select(cat => list.Where(c => c.CategoryName == cat).ToList())
             .Where(g => g.Count > 0)
             .SelectMany(g => g);
+        // 节目单键装配（真机反馈批#7 实锤 2026-11-15）：全表此前 EpgKey 恒空——CntvEpgClient.Fetch("")
+        // 查映射必败，底部节目单永久无数据（vc53 有节目单而 2.0 整个没有的根因）。
+        // 键=频道 Id（c_cctv1/c_jsws 形态），恰是 CntvIds 映射表键；映射外台（nmtv/gxtv/直连）官方无数据不硬造。
+        foreach (var c in grouped) c.EpgKey = c.Id;
         return grouped.ToList();
     }
 
