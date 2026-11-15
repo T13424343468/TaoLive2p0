@@ -66,11 +66,11 @@ public partial class MainActivity : Activity
 
         // 每会话独享内核（Current+Standby 双实例热切的资源前提）；
         // 取流解析器闭包持有本实例，频道上下文由内核 Play 自取（双实例不共用上下文）
-        Func<IPlayer> KernelFactory()
+        IPlayer KernelFactory()
         {
-            ExoPlayerPlayer? player = null;
-            player = new ExoPlayerPlayer(this).WithStreamResolver(endpoint =>
-                resolver.ResolveAsync(endpoint, player!.CurrentChannelKey ?? "", player!.CurrentChannelName ?? ""));
+            var player = new ExoPlayerPlayer(this);
+            player.WithStreamResolver(endpoint =>
+                resolver.ResolveAsync(endpoint, player.CurrentChannelKey ?? "", player.CurrentChannelName ?? ""));
             return player;
         }
 

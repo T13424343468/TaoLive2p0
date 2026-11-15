@@ -112,8 +112,8 @@ public class UncaughtCrashPeer : Java.Lang.Object, Java.Lang.Thread.IUncaughtExc
 
     public void UncaughtException(Java.Lang.Thread thread, Java.Lang.Throwable ex) // 契约按绑定非空签名；方法内仍安全处理
     {
-        if (thread is not null && ex is not null)
-            CrashNet.RecordNow($"未捕获异常 线程={thread.Name} {ex}"); // 进程即死：同步落盘，等不到批量拍
+        if (thread is null || ex is null) return; // 崩溃兜底路径参数缺失：只保证不转发，异常照常由系统处理
+        CrashNet.RecordNow($"未捕获异常 线程={thread.Name} {ex}"); // 进程即死：同步落盘，等不到批量拍
         _next?.UncaughtException(thread, ex);
     }
 }

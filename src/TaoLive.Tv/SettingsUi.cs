@@ -42,7 +42,7 @@ public partial class MainActivity
     // —— 崩溃/失败打点（接真实事件：逐次换源） ——
 
     private void OnSessionFailover(object? sender, FailoverEventArgs e) =>
-        CrashNet.Record($"[换源] {e.From.SourceId} → {e.To.SourceId}（{e.Reason}）· 第 {e.Attempt} 次");
+        CrashNet.Record($"[换源] {e.From.Url} → {e.To.Url}（{e.Reason}）· 第 {e.Attempt} 次");
 
     // —— ⑨「去系统设置」三级跳（v1.0.9 拍板口径）：对口设置页 → 系统设置总入口 → 文字指引 ——
 
@@ -385,13 +385,13 @@ public partial class MainActivity
 #pragma warning disable CA1422, CS0612, CS0619
             var pkg = PackageManager!.GetPackageInfo(PackageName!, 0)!;
 #pragma warning restore CA1422, CS0612, CS0619
-            var abi = Build.SupportedAbis is { Length: > 0 } abis ? abis[0] : "?";
+            var abi = Build.SupportedAbis is { Count: > 0 } abis ? abis[0] : "?";
             versionLine = $"版本：v{pkg.VersionName} · {abi}";
         }
         catch (Exception ex) { versionLine = "版本：读取失败 " + ex.Message; }
 
         // 时钟：当前墙钟 + 单调已运行时长 + 时区偏移
-        var up = TimeSpan.FromMilliseconds(Environment.TickCount64);
+        var up = TimeSpan.FromMilliseconds(System.Environment.TickCount64);
         var clockLine = $"时钟：{DateTime.Now:yyyy-MM-dd HH:mm:ss} · 已运行 {(int)up.TotalHours}h{up.Minutes:D2}m · " +
                         $"时区 UTC{TimeZoneInfo.Local.BaseUtcOffset:hh\\:mm}";
 
@@ -399,7 +399,7 @@ public partial class MainActivity
         string networkLine;
         try
         {
-            var cm = (ConnectivityManager?)GetSystemService(ConnectivityService);
+            var cm = GetSystemService(ConnectivityService) as Android.Net.ConnectivityManager;
             networkLine = $"网络：{(cm?.ActiveNetwork != null ? "就绪" : "不可用（无活动网络）")}";
         }
         catch (Exception ex) { networkLine = "网络：读取失败 " + ex.Message; }
@@ -420,8 +420,10 @@ public partial class MainActivity
         }
         catch (Exception ex) { kernelLine = "内核：读取失败 " + ex.Message; }
 
-        // 运行日志：从日志尾部统计现成打点
-        var tail = DiagLog.ReadTail(Path.Combine(FilesDir!.AbsolutePath!, "taolive_crash.log"), 256 * 1024);
+        // 运行日志：从日志尾部统计现成打点（无日志文件按空账计，不挡诊断页）
+        string tail = "";
+        try { tail = DiagLog.ReadTail(System.IO.Path.Combine(FilesDir!.AbsolutePath!, "taolive_crash.log"), 256 * 1024); }
+        catch { }
         int failCount = 0, crashCount = 0;
         foreach (var line in tail.Split('\n'))
         {
