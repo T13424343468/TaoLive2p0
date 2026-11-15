@@ -393,22 +393,17 @@ public partial class MainActivity : Activity
         }
     }
 
-    /// <summary>默认台来源（方案书收口批②）：设置项指定台（开机默认台设置行）→ 断点台（v24：最近成功台落盘）→ 列表首位。</summary>
+    /// <summary>默认台来源（老板令 2026-11-15 回归 vc53 口径：断点台回看，不再有设置项指定台）——
+    /// 断点台（v24：最近成功台落盘，每次换台成功即写档）→ 列表首位。</summary>
     private int DefaultChannelIndex()
     {
-        var saved = _prefs.GetString("default_channel", null);
-        if (!string.IsNullOrEmpty(saved))
-        {
-            var i = _channels.ToList().FindIndex(c => c.Id == saved);
-            if (i >= 0) return i;
-        }
         var last = _prefs.GetString("last_channel", null); // 断点台（v24）：恢复读最近成功台
         if (!string.IsNullOrEmpty(last))
         {
             var j = _channels.ToList().FindIndex(c => c.Id == last);
             if (j >= 0) return j;
         }
-        return 0; // 未设=列表首位
+        return 0; // 无断点=列表首位
     }
 
     // 生命周期打点（埋点补充 2026-11-15）：电视 ROM 杀后台/回前台黑屏排查锚点——
