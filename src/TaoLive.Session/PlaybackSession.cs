@@ -134,6 +134,15 @@ public sealed class PlaybackSession
         {
             _reconnectingSinceMs = null;
         }
+        // 后台车道门控接线（白屏镜红①自救链 11-15 修）：门控此前生产零置位——预检/健康点/断网恢复
+        // 整链在真机死锁（测试专门放行防无限等，生产漏接线）。接线口径按车道令原语义：
+        // 起播/换台/自救过渡期（Buffering/Reconnecting）静默零后台网络；首帧落地（Playing）恢复放行；
+        // 失败/空闲（Failed/Idle，无画面在播）回空闲档放行——断网期预检照跑，恢复沿才回得来。
+        if (next == PlaybackState.Buffering || next == PlaybackState.Reconnecting)
+            BackgroundLane.SetFirstFrameLanded(false);
+        else
+            BackgroundLane.SetFirstFrameLanded(true);
+        BackgroundLane.SetPlaying(next == PlaybackState.Playing);
         _state = next;
         StateChanged?.Invoke(this, next);
     }

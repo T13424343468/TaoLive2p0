@@ -29,8 +29,10 @@ public static class BackgroundLane
 
     private static readonly SemaphoreSlim Gate = new(1, 1);
 
-    /// <summary>首帧是否落地（UI 在首帧事件置 true；换台/断流起播时置 false）。volatile：读多写一。</summary>
-    private static int _firstFrameLanded;
+    /// <summary>首帧门控（空闲默认放行）：开机常驻预检在设计上要先于任何播放跑起来（开机预检握手令），
+    /// 故初值=放行（空闲档）；起播/换台/自救过渡期由会话状态机置 false（零后台网络），首帧落地置 true 恢复。
+    /// volatile：读多写一。</summary>
+    private static int _firstFrameLanded = 1;
     public static bool FirstFrameLanded => Volatile.Read(ref _firstFrameLanded) != 0;
     public static void SetFirstFrameLanded(bool v) => Volatile.Write(ref _firstFrameLanded, v ? 1 : 0);
 

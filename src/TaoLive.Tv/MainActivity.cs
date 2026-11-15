@@ -1158,17 +1158,31 @@ public partial class MainActivity : Activity
 
     // —— 收藏 ——
 
-    /// <summary>收藏当前台（vc53 确认键收藏口径）：播放页按确认即收藏/取消，信息条给结果。</summary>
+    /// <summary>收藏当前台（vc53 确认键收藏口径）：播放页按确认即收藏/取消，信息条给结果。
+    /// 收藏账与顺序账同步写（11-15 通读修）：取消收藏同撤顺序账，重收藏不因顺序账残留把台序弄丢。</summary>
     private void ToggleFavoriteOnCurrent()
     {
         var ch = _channels[_currentIndex];
-        if (!_favorites.Add(ch.Id)) _favorites.Remove(ch.Id);
-        else _favStore.Toggle(ch.Number);
+        SyncFavorite(ch);
         PersistFavorites();
         ShowToast(_favorites.Contains(ch.Id)
             ? $"{IndexOfChannel(ch, _channels)}  {ch.Name}  ★ 已收藏"
             : $"{IndexOfChannel(ch, _channels)}  {ch.Name}  已取消收藏");
         if (_listOpen && _list.Adapter is ChannelListAdapter adapter) adapter.Refresh(_favorites, _tab);
+    }
+
+    /// <summary>收藏账与顺序账一次写齐（11-15 通读修）：此前只有收藏动作写顺序账，取消收藏残留旧序号，
+    /// 再收藏时 Toggle 反把顺序账条目顶掉——排序入口（按顺序账认台）对该台失效。两账同源同步。</summary>
+    private void SyncFavorite(Channel ch)
+    {
+        bool nowFav;
+        if (!_favorites.Add(ch.Id))
+        {
+            _favorites.Remove(ch.Id);
+            nowFav = false;
+        }
+        else nowFav = true;
+        if (_favStore.IsFavorite(ch.Number) != nowFav) _favStore.Toggle(ch.Number);
     }
 
     private static int IndexOfChannel(Channel target, IReadOnlyList<Channel> list)
@@ -1185,8 +1199,7 @@ public partial class MainActivity : Activity
         if (_list.Adapter is not ChannelListAdapter adapter) return;
         var channel = adapter.ChannelAt(pos);
         if (channel is null) return;
-        if (!_favorites.Add(channel.Id)) _favorites.Remove(channel.Id);
-        else _favStore.Toggle(channel.Number);
+        SyncFavorite(channel); // 两账同步（11-15 通读修，同 ToggleFavoriteOnCurrent 口径）
         PersistFavorites();
         adapter.Refresh(_favorites, _tab, _favStore.Numbers);
     }
@@ -1209,7 +1222,7 @@ public partial class MainActivity : Activity
         var pos = _list.SelectedItemPosition;
         if (pos < 0 || pos >= adapter.Count) return;
         var row = adapter.ChannelAt(pos);
-        if (row is null || !_favStore.IsFavorite(row.Number))
+        if (row is null || !_favorites.Contains(row.Id)) // 排序入口认收藏账（11-15 通读修）：顺序账只管次序，收藏与否以收藏账为准
         {
             ShowToast("请在收藏组内长按确认键排序");
             return;
