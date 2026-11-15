@@ -250,6 +250,31 @@ public class HotSwitchTests
     }
 
     [Fact]
+    public void Shutdown_supersedes_every_session_including_orphan_kernels()
+    {
+        // vc68 退出令（老板真机报「退出软件了都还在持续出音」）：退场全表清场——
+        // 只让位 Current+Standby 时，表内 Failed 漏停的孤儿内核无人接管，退软件后音频照放。
+        var (manager, players) = MakeManager();
+        var ch1 = MakeChannel("cctv1", "https://s/a.m3u8");
+        var ch2 = MakeChannel("cctv2", "https://s/b.m3u8");
+        var ch3 = MakeChannel("cctv3", "https://s/c.m3u8");
+
+        manager.SwitchTo(ch1);
+        MakePlaying(manager.Current!);
+        manager.SwitchTo(ch2); // ch1 让位留表（vc67 下 Failed 态即孤儿漏音内核）
+        MakePlaying(manager.Current!);
+        manager.PrepareStandby(ch3);
+
+        manager.Shutdown();
+
+        // 全表会话归 Idle、内核全停（含非 Current/Standby 的表内会话）
+        Assert.DoesNotContain(manager.Sessions.Values, s => s.State != PlaybackState.Idle);
+        Assert.Null(manager.Current);
+        Assert.Null(manager.Standby);
+        Assert.All(players, p => Assert.Contains("Stop", p.Log));
+    }
+
+    [Fact]
     public void Standby_not_ready_within_window_is_superseded_on_tick()
     {
         var players = new List<LoggingPlayer>();

@@ -562,8 +562,9 @@ public partial class MainActivity : Activity
         if (IsFinishing)
         {
             // 真机退场才让位会话（停内核解码）；#15 换尺寸 Recreate（IsFinishing=false）会话跨壳存活，绝不打断播放
-            _manager.Current?.Supersede();
-            _manager.Standby?.Supersede();
+            // vc68 退出令：全表清场——只让位 Current+Standby 时，vc67 下 Failed 漏停的孤儿内核
+            // （会话表内其余会话）没人停，退软件后音频照放；渲染必须结束口径，退场一个内核不留。
+            _manager.Shutdown();
             Shell = null;
         }
         base.OnDestroy();

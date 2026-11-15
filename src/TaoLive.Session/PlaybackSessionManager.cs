@@ -135,6 +135,19 @@ public sealed class PlaybackSessionManager
     /// <summary>会话表快照：频道 Id 到会话的映射，只读。</summary>
     public IReadOnlyDictionary<string, PlaybackSession> Sessions => _sessions;
 
+    /// <summary>壳层退场全表清场（vc68 退出令）：让位并停掉会话表内全部会话（含当前台/热备/表内
+    /// 让位会话）——此前退出只让位 Current+Standby，vc67 下 Failed 漏停的孤儿内核无人接管，
+    /// 退软件后音频照放。渲染必须结束口径：退场即全停，一个内核不留。</summary>
+    public void Shutdown()
+    {
+        foreach (var session in _sessions.Values)
+        {
+            session.Supersede(); // vc68 起非 Idle 一律停，含 Failed 态漏音内核
+        }
+        Current = null;
+        Standby = null;
+    }
+
     /// <summary>当前会话切换完成事件：保证经主线程调度器触发。</summary>
     public event EventHandler<PlaybackSession>? CurrentChanged;
 
