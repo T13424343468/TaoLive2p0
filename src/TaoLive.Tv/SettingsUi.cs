@@ -34,6 +34,9 @@ public partial class MainActivity
     private ScrollView? _diagScroll;
     private TextView? _diagExportBtn, _diagCloseBtn;
     private FrameLayout? _advOverlay;
+    private FrameLayout? _licenseOverlay;
+    private ScrollView? _licenseScroll;
+    private TextView? _licenseCloseBtn;
 
     private ISharedPreferences _prefs = default!;
     private bool _warmupEnabled = true;
@@ -189,6 +192,7 @@ public partial class MainActivity
         AddRow("崩溃日志（点按查看）", ShowCrashLog, "#C9D6E2");
         AddRow("自诊断（点按查看）", ShowDiagPanel, "#C9D6E2");
         AddRow("进阶调优（点按进入）", ShowAdvancedTuningPanel, "#C9D6E2");
+        AddRow("关于：TaoLive · 开源许可 Apache-2.0（点按查看）", ShowLicensePanel, "#C9D6E2");
         AddLabel("返回键收起 · 长按设置键直达系统设置");
 
         // 重建完成，焦点回原行；滚动容器内光标行滚入可视区
@@ -430,6 +434,58 @@ public partial class MainActivity
         _diagScroll = null;
         _diagExportBtn = null;
         _diagCloseBtn = null;
+        OpenSettingsPanel();
+    }
+
+    // —— 关于面板（v47 开源合规）：Apache-2.0 许可文本只读一页，来源随包 Assets/NOTICE.txt ——
+
+    private void ShowLicensePanel()
+    {
+        try
+        {
+            string body;
+            try
+            {
+                // 许可文本随包走 Assets（NET Android 默认打包 Assets/ 目录），读不到按降级文案不挡面板
+                using var stream = Assets!.Open("NOTICE.txt");
+                using var reader = new StreamReader(stream);
+                body = reader.ReadToEnd();
+            }
+            catch
+            {
+                body = "TaoLive · Apache License 2.0\n\n许可文本缺失（NOTICE.txt 未随包），完整条款见项目仓库 LICENSE 文件。";
+            }
+            var (box, pad) = BuildOverlayPanel("关于：TaoLive", body, out var scroll);
+            var btns = new LinearLayout(this) { Orientation = Orientation.Horizontal };
+            var close = new TextView(this) { Text = "关闭", Gravity = GravityFlags.Center };
+            close.SetPadding(pad, Dp(14), pad, Dp(14));
+            close.Click += (_, _) => CloseLicensePanel();
+            close.Id = View.GenerateViewId();
+            StyleOverlayButton(close, InkTranslucency.FocusDrawable());
+            int btnH = Dp(52);
+            btns.AddView(close, new LinearLayout.LayoutParams(0, btnH, 1f));
+            box.AddView(btns, new LinearLayout.LayoutParams(-1, -2) { TopMargin = pad });
+            var overlay = new FrameLayout(this) { Clickable = true, LongClickable = true };
+            overlay.SetBackgroundColor(InkTranslucency.PanelColor(this));
+            overlay.AddView(box, new FrameLayout.LayoutParams(-1, -1));
+            _licenseOverlay = overlay;
+            _licenseScroll = scroll;
+            _licenseCloseBtn = close;
+            _root.AddView(overlay, new FrameLayout.LayoutParams(-1, -1));
+            CloseSettingsPanel();
+            close.RequestFocus();
+        }
+        catch (Exception ex) { CrashNet.Record($"[关于] 打开失败：{ex.Message}"); ShowToast("关于打开失败"); }
+    }
+
+    private void CloseLicensePanel()
+    {
+        if (_licenseOverlay is null) return;
+        _root.RemoveView(_licenseOverlay);
+        _licenseOverlay.Dispose();
+        _licenseOverlay = null;
+        _licenseScroll = null;
+        _licenseCloseBtn = null;
         OpenSettingsPanel();
     }
 

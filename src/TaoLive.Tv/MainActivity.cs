@@ -633,6 +633,31 @@ public partial class MainActivity : Activity
             }
         }
 
+        // 关于面板（v47 开源合规）：键位同自诊断——上下滚许可文本、确认点「关闭」、其余吞掉；单钮无左右移焦
+        if (_licenseOverlay != null)
+        {
+            switch (keyCode)
+            {
+                case Keycode.Back or Keycode.Menu:
+                    CloseLicensePanel();
+                    return true;
+                case Keycode.DpadUp or Keycode.DpadDown when _licenseScroll != null:
+                {
+                    int dir = keyCode == Keycode.DpadUp ? -1 : 1;
+                    if (e is { RepeatCount: 0 })
+                        _licenseScroll.SmoothScrollBy(0, dir * (int)(_licenseScroll.Height * 0.8f));
+                    else
+                        _licenseScroll.ScrollBy(0, dir * Dp(56));
+                    return true;
+                }
+                case Keycode.DpadCenter or Keycode.Enter:
+                    (CurrentFocus as TextView)?.PerformClick();
+                    return true;
+                default:
+                    return true; // 不穿透，防误触底层键位
+            }
+        }
+
         // 设置面板开着：返回/菜单收起，其余交给面板焦点导航；左右键不呼列表不换台
         if (_settingsPanelOpen)
         {
