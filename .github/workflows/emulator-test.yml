@@ -9,8 +9,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          # ref 由触发分支决定（默认当前分支）
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
