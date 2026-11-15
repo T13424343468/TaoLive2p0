@@ -783,7 +783,7 @@ public partial class MainActivity : Activity
         {
             var rows = new List<Row>();
             // ②五标签过滤（照 vc53 DrawerSupport 口径；收藏标签空态照 vc53 v22 第 6/15 项，不白屏）
-            var visible = ListTabs.Filter(tab, channels, favorites.Contains);
+            var visible = ListTabs.Filter(tab, channels, c => favorites.Contains(c.Id));
             if (visible.Count == 0)
             {
                 rows.Add(new Row(tab == ListTabs.Tab.Favorite
@@ -871,9 +871,9 @@ public partial class MainActivity : Activity
                 };
                 var span = new Android.Text.SpannableString($"{markChar}  {row.Title}");
                 span.SetSpan(new Android.Text.Style.ForegroundColorSpan(Color.ParseColor(markColor)),
-                    0, 1, Android.Text.SpanTypes.ExclusiveEx);
+                    0, 1, Android.Text.SpanTypes.ExclusiveExclusive);
                 span.SetSpan(new Android.Text.Style.ForegroundColorSpan(Color.White),
-                    1, span.Length(), Android.Text.SpanTypes.ExclusiveEx);
+                    1, span.Length(), Android.Text.SpanTypes.ExclusiveExclusive);
                 tv.TextFormatted = span;
             }
             else
