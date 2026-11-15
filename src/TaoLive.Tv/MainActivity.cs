@@ -27,8 +27,8 @@ namespace TaoLive.Tv;
 /// 即「vc53 的皮，2.0 的骨」。操作逻辑：菜单键呼/收抽屉、上下换台、左右切页签、确认收藏、频道号直达。
 /// </summary>
 [Activity(Label = "TaoLive", MainLauncher = true, Exported = true,
-    LaunchMode = LaunchMode.SingleTask,
-    ConfigurationChanges = ConfigChanges.Orientation | ConfigChanges.ScreenSize | ConfigChanges.KeyboardHidden)]
+    LaunchMode = ActivityInfo.LaunchMode.SingleTask,
+    ConfigurationChanges = ActivityInfo.Config.Orientation | ActivityInfo.Config.ScreenSize | ActivityInfo.Config.KeyboardHidden)]
 [IntentFilter(new[] { Intent.ActionMain },
     Categories = new[] { Intent.CategoryLauncher, Intent.CategoryLeanbackLauncher })]
 public partial class MainActivity : Activity
