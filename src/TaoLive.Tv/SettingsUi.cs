@@ -42,8 +42,15 @@ public partial class MainActivity
 
     // —— 崩溃/失败打点（接真实事件：逐次换源） ——
 
-    private void OnSessionFailover(object? sender, FailoverEventArgs e) =>
+    private void OnSessionFailover(object? sender, FailoverEventArgs e)
+    {
         CrashNet.Record($"[换源] {e.From.Url} → {e.To.Url}（{e.Reason}）· 第 {e.Attempt} 次");
+        // 换源黑屏埋点起点（黑屏镜黄④ 11-15）：仅当前台记账，热备攒流不掺
+        if (sender is PlaybackSession s && ReferenceEquals(s, _manager.Current))
+        {
+            _failoverAtMs = System.Environment.TickCount64;
+        }
+    }
 
     // —— ⑨「去系统设置」三级跳（v1.0.9 拍板口径）：对口设置页 → 系统设置总入口 → 文字指引 ——
 

@@ -33,11 +33,24 @@ public sealed class PlaybackSession
     {
         _player = player ?? throw new ArgumentNullException(nameof(player));
         _clock = clock ?? throw new ArgumentNullException(nameof(clock));
-        _player.OnError += (_, e) => OnPlayerError(e.Code);
-        _player.OnFirstFrame += (_, _) => NotifyFirstFrame();
+        // 内核回调守卫（闪退镜黄⑤ 11-15）：矩阵外跳转等异常不掀回调链崩进程，落 KernelCallbackFailed 交壳层记台账
+        _player.OnError += (_, e) => GuardKernel(() => OnPlayerError(e.Code));
+        _player.OnFirstFrame += (_, _) => GuardKernel(NotifyFirstFrame);
         // 卡流自救接线（方案书 v99 四镜·卡顿镜 11-15 修）：内核缓冲事件接会话，播放中卡流进 Reconnecting 走看门狗。
         // NotifyStalled 内部有 Playing 态守卫，起播期缓冲不误触发。
-        _player.OnBufferingStart += (_, _) => NotifyStalled();
+        _player.OnBufferingStart += (_, _) => GuardKernel(NotifyStalled);
+    }
+
+    /// <summary>内核回调链异常出口（闪退镜黄⑤）：壳层接 CrashNet 落运行台账。</summary>
+    public static event EventHandler<string>? KernelCallbackFailed;
+
+    private void GuardKernel(Action action)
+    {
+        try { action(); }
+        catch (Exception ex)
+        {
+            KernelCallbackFailed?.Invoke(this, $"{CurrentChannel?.Name ?? CurrentChannel?.Id ?? "未知频道"}: {ex.Message}");
+        }
     }
 
     /// <summary>起播超时（看门狗阈值）：缓冲超过此时长即视为断流，走备源切换。</summary>
@@ -138,6 +151,7 @@ public sealed class PlaybackSession
         _queue = p.Channel.Sources.Where(s => s.IsValid).ToList();
         AppendFallbacks();
         _endpointIndex = _queue.FindIndex(s => s.Url == p.Endpoint.Url);
+        if (_endpointIndex < 0) _endpointIndex = 0; // 未入队端点（闪退镜黄④ 11-15）：记账归 0，防 -1 越界 TryFailover
         _preferLowLatency = p.PreferLowLatency;
         Transition(PlaybackState.Buffering, "start requested");
         _player.Play(p);

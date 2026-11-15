@@ -47,6 +47,8 @@ public partial class MainActivity : Activity
     private string _digits = "";
     private Java.Lang.Runnable? _digitCommit;
     private bool _watchdogRunning;
+    private bool _watchdogStopped;
+    private long? _failoverAtMs; // 换源黑屏埋点账（黑屏镜黄④）：换源起点 → Playing 出画恢复时长落运行台账
     private Java.Lang.Runnable _toastHide = default!;
     private readonly CntvEpgClient _epg = new();
     private HashSet<string> _favorites = new();
@@ -108,6 +110,8 @@ public partial class MainActivity : Activity
             })
             .BuildServiceProvider();
         _manager = _services.GetRequiredService<PlaybackSessionManager>();
+        // 内核回调异常出口（闪退镜黄⑤）：矩阵外跳转不掀回调链，落运行台账
+        TaoLive.Session.PlaybackSession.KernelCallbackFailed += (_, msg) => CrashNet.Record($"[KernelCallback] {msg}");
         // 收口批①：备源队列吃内置表（换源触发时才遍历注册表，不进预检常驻轮）；
         // 回主源迟滞判据=主源预检轮次连续命中 OK ≥3 次（复用预检结果，不另起独立探测）+ 稳定 5 分钟（管理器内判）
         _manager.FallbackSourceProvider = TaoLive.Session.FallbackQueueSource.FromRegistry;
@@ -148,6 +152,17 @@ public partial class MainActivity : Activity
             else if (e.State == PlaybackState.Playing)
             {
                 HideEmptyState();
+                // 换源黑屏埋点（黑屏镜黄④ 11-15）：换源起点到出画恢复的时长落运行台账（含 ≤500ms 快切段）
+                if (_failoverAtMs is { } from)
+                {
+                    _failoverAtMs = null;
+                    CrashNet.Record($"[换源黑屏] 恢复出画 {System.Environment.TickCount64 - from}ms（{e.Session.CurrentChannel?.Name ?? ""}）");
+                }
+                // 断点台落盘（方案书 v24，黑屏镜黄⑤ 11-15）：每次换台成功即同步写档，恢复读最近成功台
+                if (e.Session.CurrentChannel is { } playingChannel)
+                {
+                    _prefs.Edit()!.PutString("last_channel", playingChannel.Id)!.Apply();
+                }
                 if (SwitchRevealPolicy.ShouldReveal(true)) _surface.Visibility = ViewStates.Visible;
             }
             else
@@ -223,7 +238,7 @@ public partial class MainActivity : Activity
         }
     }
 
-    /// <summary>默认台来源（方案书收口批②）：设置项指定台（开机默认台设置行），未设进频道列表首位。</summary>
+    /// <summary>默认台来源（方案书收口批②）：设置项指定台（开机默认台设置行）→ 断点台（v24：最近成功台落盘）→ 列表首位。</summary>
     private int DefaultChannelIndex()
     {
         var saved = _prefs.GetString("default_channel", null);
@@ -232,12 +247,25 @@ public partial class MainActivity : Activity
             var i = _channels.ToList().FindIndex(c => c.Id == saved);
             if (i >= 0) return i;
         }
+        var last = _prefs.GetString("last_channel", null); // 断点台（v24）：恢复读最近成功台
+        if (!string.IsNullOrEmpty(last))
+        {
+            var j = _channels.ToList().FindIndex(c => c.Id == last);
+            if (j >= 0) return j;
+        }
         return 0; // 未设=列表首位
     }
 
     protected override void OnDestroy()
     {
-        _manager.Current?.DetachSurface();
+        // 生命周期收尾（闪退镜黄⑦⑧⑨ 11-15）：停看门狗泵、清数字提交回调、停预检循环、
+        // 让位当前台与热备（停内核解码）；内核实例随进程回收，不持 Activity 泄漏
+        _watchdogStopped = true;
+        _main.RemoveCallbacks(_digitCommit!);
+        _digitCommit?.Dispose();
+        StopPrecheckLoop();
+        _manager.Current?.Supersede();
+        _manager.Standby?.Supersede();
         base.OnDestroy();
     }
 
@@ -504,11 +532,13 @@ public partial class MainActivity : Activity
     {
         if (_watchdogRunning) return;
         _watchdogRunning = true;
+        _watchdogStopped = false;
         Pump();
         void Pump()
         {
             _main.PostDelayed(() =>
             {
+                if (_watchdogStopped) return; // OnDestroy 后停泵（闪退镜黄⑦）：不泄漏 Activity
                 if (_onPlayerPage) _manager.Tick();
                 Pump();
             }, 3000);
@@ -780,6 +810,7 @@ public partial class MainActivity : Activity
         if (_digits.Length >= 3) return; // 位数封顶（闪退镜红① 11-15）：连按不溢出，编号三位内直达
         _digits = (_digits + d.ToString()).TrimStart('0');
         ShowToast(_digits);
+        _main.RemoveCallbacks(_digitCommit!); // 先摘旧回调再换新（闪退镜黄⑨）：已 Dispose 的 runnable 不再执行，窗口内连按不提前换台
         _digitCommit?.Dispose();
         _digitCommit = new Java.Lang.Runnable(() =>
         {

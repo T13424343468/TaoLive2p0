@@ -128,16 +128,24 @@ public sealed class ExoPlayerPlayer : IPlayer
 
     private void StartMedia(string url)
     {
-        var builder = new AndroidX.Media3.Common.MediaItem.Builder();
-        builder.SetUri(Android.Net.Uri.Parse(url));
-        if (IsHls(url))
+        try
         {
-            builder.SetMimeType(AndroidX.Media3.Common.MimeTypes.ApplicationM3u8);
+            var builder = new AndroidX.Media3.Common.MediaItem.Builder();
+            builder.SetUri(Android.Net.Uri.Parse(url));
+            if (IsHls(url))
+            {
+                builder.SetMimeType(AndroidX.Media3.Common.MimeTypes.ApplicationM3u8);
+            }
+            var mediaItem = builder.Build() ?? throw new InvalidOperationException("MediaItem build returned null");
+            _player.SetMediaItem(mediaItem);
+            _player.Prepare();
+            _player.PlayWhenReady = true;
         }
-        var mediaItem = builder.Build() ?? throw new InvalidOperationException("MediaItem build returned null");
-        _player.SetMediaItem(mediaItem);
-        _player.Prepare();
-        _player.PlayWhenReady = true;
+        catch (Exception ex)
+        {
+            // 同步路径与异步同口径（闪退镜黄⑩ 11-15）：起播异常接 HandleError 交会话备源自救，不裸奔冒泡主线程
+            HandleError("START_FAILED", $"起播失败：{ex.Message}");
+        }
     }
 
     public void Pause()
@@ -160,10 +168,20 @@ public sealed class ExoPlayerPlayer : IPlayer
         if (_hasSurface)
         {
             // 壳层传入的是 Android.Views.Surface 的 Java 对象指针，需还原包装（壳层仍持有所有权，不转移）
-            var surface = Java.Lang.Object.GetObject<Android.Views.Surface>(surfaceHandle, JniHandleOwnership.DoNotTransfer);
-            if (surface is not null)
+            try
             {
-                _player.SetVideoSurface(surface);
+                var surface = Java.Lang.Object.GetObject<Android.Views.Surface>(surfaceHandle, JniHandleOwnership.DoNotTransfer);
+                if (surface is not null)
+                {
+                    _player.SetVideoSurface(surface);
+                }
+            }
+            catch (Exception ex)
+            {
+                // 死面挂接（闪退镜黄⑥ 11-15）：SurfaceDestroyed 后热切重挂不砸主线程，摘面待壳层重挂
+                _hasSurface = false;
+                _surfaceHandle = IntPtr.Zero;
+                Console.Error.WriteLine($"[ExoPlayer] attach surface failed: {ex.Message}");
             }
         }
     }
