@@ -201,12 +201,11 @@ public partial class MainActivity
     private void RefreshSettingsRows()
     {
         if (_settingsPanel is null || _settingsFlow is null) return;
-        // 重建前记录焦点行索引（行数固定、索引稳定），重建后焦点回原行
-        int focusedIdx = -1;
-        var focused = CurrentFocus;
-        for (int i = 0; i < _settingsFlow.ChildCount; i++)
-            if (_settingsFlow.GetChildAt(i) == focused) { focusedIdx = i; break; }
+        // 重建前记录焦点行（只记可聚焦行；#61 焦点实修：显式导航只走 _settingsRows，不含标签行）
+        var focusedNow = CurrentFocus as TextView;
+        int focusedIdx = focusedNow is null ? -1 : _settingsRows.IndexOf(focusedNow);
         _settingsFlow.RemoveAllViews();
+        _settingsRows.Clear();
 
         void AddLabel(string text)
         {
@@ -232,6 +231,7 @@ public partial class MainActivity
             tv.Click += (_, _) => onClick();
             if (onLongClick is not null) tv.LongClick += (_, _) => onLongClick();
             _settingsFlow!.AddView(tv);
+            _settingsRows.Add(tv); // #61 显式焦点导航：真机实锤系统焦点搜索在自实现流式容器上不可靠
         }
 
         AddLabel("── 软件设置 ──");
@@ -250,16 +250,53 @@ public partial class MainActivity
         AddRow("进阶调优", ShowAdvancedTuningPanel, "#C9D6E2");
         AddRow("关于 · 开源许可", ShowLicensePanel, "#C9D6E2");
 
-        // 重建完成，焦点回原行；滚动容器内光标行滚入可视区
-        if (focusedIdx >= 0 && focusedIdx < _settingsFlow.ChildCount)
+        // 重建完成，焦点回原行（#61：走显式导航，含滚入可视）
+        if (focusedIdx >= 0) FocusSettingsRow(focusedIdx);
+    }
+
+    // —— 设置面板显式焦点导航（#61 真机实锤：设置面板改流式一行多项后，系统焦点搜索在自实现
+    //    FlowLayout 上切不动焦点，且左右键原被键位分支吞掉——照退出弹窗先例改显式接管） ——
+
+    /// <summary>当前面板可聚焦行（添加序=流式视觉序：从左到右、从上到下）。</summary>
+    private readonly List<TextView> _settingsRows = new();
+
+    /// <summary>焦点落到指定行并滚入可视区。</summary>
+    private void FocusSettingsRow(int idx)
+    {
+        if (idx < 0 || idx >= _settingsRows.Count) return;
+        var row = _settingsRows[idx];
+        row.RequestFocus();
+        _settingsScroll?.Post(() => _settingsScroll.SmoothScrollTo(0, Math.Max(0, row.Top - row.Height)));
+    }
+
+    /// <summary>方向键移焦点：左右=同序列前/后一项；上下=按视觉行分组找相邻行中水平最近的项。
+    /// 封顶/到底时停在原行不环绕（面板行少，环绕易晕）。总是消费按键返回 true。</summary>
+    private bool SettingsFocusMove(int dx, int dy)
+    {
+        if (_settingsRows.Count == 0) return true;
+        var focusedNow = CurrentFocus as TextView;
+        int idx = focusedNow is null ? -1 : _settingsRows.IndexOf(focusedNow);
+        if (idx < 0) { FocusSettingsRow(0); return true; }
+        if (dx != 0)
         {
-            var row = _settingsFlow.GetChildAt(focusedIdx);
-            if (row is not null && row.Focusable)
-            {
-                row.RequestFocus();
-                row.RequestRectangleOnScreen(new Rect(0, row.Top, row.Right, row.Bottom), true);
-            }
+            FocusSettingsRow(Math.Min(_settingsRows.Count - 1, Math.Max(0, idx + dx)));
+            return true;
         }
+        // 上下：按 Top 分组（组距超半行高即换行），在相邻行组里找 Left 最接近的项
+        var cur = _settingsRows[idx];
+        float curLeft = cur.Left;
+        var groups = new List<List<int>>();
+        foreach (var (i, r) in _settingsRows.Select((r, i) => (i, r)))
+        {
+            if (groups.Count == 0 || Math.Abs(r.Top - _settingsRows[groups[^1][0]].Top) > r.Height * 0.5f)
+                groups.Add(new List<int>());
+            groups[^1].Add(i);
+        }
+        int gi = groups.FindIndex(g => g.Contains(idx));
+        int gj = Math.Min(groups.Count - 1, Math.Max(0, gi + (dy > 0 ? 1 : -1)));
+        if (gj != gi)
+            FocusSettingsRow(groups[gj].OrderBy(t => Math.Abs(_settingsRows[t].Left - curLeft)).First());
+        return true;
     }
 
     /// <summary>⑤开机自启开关（方案书收口批②）：与 BootReceiver 同读一份偏好（默认开）。</summary>
