@@ -51,7 +51,7 @@ public sealed class SourceProfileStore
     private static readonly Lazy<SourceProfileStore> _shared = new(() => new SourceProfileStore());
     public static SourceProfileStore Shared => _shared.Value;
 
-    private const int FlushDebounceMs = 3000;
+    private const int FlushDebounceMs = TaoLive.Foundation.PersistencePolicy.FlushDebounceMs; // 归一（规范〇.7.3）：节拍唯一事实源在 Foundation.PersistencePolicy
 
     /// <summary>打点委托（BLL 不反引 UI，口径同 SelfHealProxyKernel.Reporter）：UI 启动注入，未注入时静默。</summary>
     public static Action<string>? Reporter { get; set; }

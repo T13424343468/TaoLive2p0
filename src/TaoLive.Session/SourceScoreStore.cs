@@ -39,7 +39,7 @@ public class SourceScoreStore
     /// <summary>速度分满分对应的耗时上限：2 秒内视为满分梯度基准（>2s 线性衰减到 10s 为 0）。</summary>
     public const double FastMs = 2000, SlowMs = 10000;
 
-    private const int FlushDebounceMs = 3000;
+    private const int FlushDebounceMs = TaoLive.Foundation.PersistencePolicy.FlushDebounceMs; // 归一（规范〇.7.3）：节拍唯一事实源在 Foundation.PersistencePolicy
 
     private readonly object _gate = new();
     private readonly string _path;

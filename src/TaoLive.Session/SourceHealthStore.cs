@@ -37,7 +37,7 @@ public class SourceHealthStore
     /// <summary>Dead 条目保质期：留半小时供列表延续「无信号」展示，过期交回预检重探。</summary>
     public const long DeadTtlMs = 30 * 60 * 1000L;
 
-    private const int FlushDebounceMs = 3000;
+    private const int FlushDebounceMs = TaoLive.Foundation.PersistencePolicy.FlushDebounceMs; // 归一（规范〇.7.3）：节拍唯一事实源在 Foundation.PersistencePolicy
 
     private readonly object _gate = new();
     private readonly string _path;
