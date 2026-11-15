@@ -68,7 +68,7 @@ public sealed class ExoPlayerPlayer : IPlayer
         return new AndroidX.Media3.ExoPlayer.DefaultLoadControl.Builder()
             // 绑定只挂 4 参重载（min,max,起播门槛,重缓门槛）；回退缓冲等走默认（0/不保留）
             .SetBufferDurationsMs(watermarkMs, watermarkMs, startupGateMs, startupGateMs)
-            .Build();
+            .Build()!;
     }
 
     /// <summary>频道上下文：缓存键与整表行匹配名（nmtv/gxtv 按 name 定位），Play 前由壳层设置。</summary>
