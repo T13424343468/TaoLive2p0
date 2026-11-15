@@ -61,6 +61,8 @@ public class HotSwitchTests
     [Fact]
     public void Switch_to_ready_standby_takes_over_surface_hot()
     {
+        // vc68 拍板（老板令「这版最重要的就是热切」）：接管路径保留，次序修正——
+        // 旧内核先摘面停机（退场），新内核再挂面恢复（接管）：解码器与屏一对一，不再两颗抢一面。
         var (manager, players) = MakeManager();
         var ch1 = MakeChannel("cctv1", "https://s/a.m3u8");
         var ch2 = MakeChannel("cctv2", "https://s/b.m3u8");
@@ -81,11 +83,13 @@ public class HotSwitchTests
         Assert.Equal(standby, manager.Current);
         Assert.Null(manager.Standby);
         Assert.Equal(new IntPtr(1), manager.Current!.SurfaceHandle); // 输出面原面移交
+        Assert.Equal(PlaybackState.Playing, manager.Current.State); // 接管即出画，不回缓冲
         Assert.Equal(PlaybackState.Idle, manager.TryGet("cctv1")!.State); // 旧会话已让位
         Assert.Single(currentChanged);
-        // 接管次序：热备先挂面（Attach）后恢复出声（Resume）——音画同拍出，旧内核随后让位（Stop）
-        Assert.Equal(new[] { "Attach", "Resume" }, players[1].Log[^2..]);
+        // vc68 接管次序：旧内核先退场（Detach+Stop），新内核后接管（Attach→Resume）——一对一连接
+        Assert.Contains("Detach", players[0].Log);
         Assert.Contains("Stop", players[0].Log);
+        Assert.Equal(new[] { "Attach", "Resume" }, players[1].Log[^2..]);
         // 热备内核未被重播（热切不重付起播成本）
         Assert.Single(players[1].PlayedUrls);
     }

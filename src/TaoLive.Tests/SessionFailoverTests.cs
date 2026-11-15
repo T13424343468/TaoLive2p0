@@ -147,8 +147,9 @@ public class SessionFailoverTests
     [Fact]
     public void Proactive_failover_capped_per_channel_round()
     {
-        // vc67 预防介入上限：慢网盒子库存常态低位，预防切换每冷却窗烧一条线，几分钟烧光全队列
+        // vc67 预防介入上限 + vc68 误烧闸：慢网盒子库存常态低位，预防切换每冷却窗烧一条线
         // →「出音一会又信号中断」。上限 3 次；到顶后预防退场，真卡流交看门狗与内核报错。
+        // 误烧闸口径：每轮线路先攒满过线（取得资格）再跌落坐实，才准预防介入。
         var clock = new FixedClock(T0);
         var player = new LoggingPlayer { BufferedMs = 5_000 }; // 库存常态低位（<7 秒线），慢网盒子实况
         var session = new PlaybackSession(player, clock);
@@ -158,7 +159,10 @@ public class SessionFailoverTests
 
         for (int i = 0; i < 3; i++)
         {
-            player.RaiseFirstFrame(); // 回 Playing（每次预防切线后）
+            player.RaiseFirstFrame(); // 回 Playing（每次预防切线后，攒满账重记）
+            player.BufferedMs = 20_000;
+            session.CheckProactiveFailover(); // 攒满过线：本线路取得预防介入资格
+            player.BufferedMs = 5_000; // 跌落
             clock.Advance(TimeSpan.FromSeconds(2));
             session.CheckProactiveFailover(); // 攒第 1 拍
             clock.Advance(TimeSpan.FromSeconds(2));
@@ -171,6 +175,9 @@ public class SessionFailoverTests
 
         // 第 4 次：预算用尽，预防退场——库存再低也不切
         player.RaiseFirstFrame();
+        player.BufferedMs = 20_000;
+        session.CheckProactiveFailover(); // 攒满过线（资格取得，但预算已尽）
+        player.BufferedMs = 5_000;
         clock.Advance(TimeSpan.FromSeconds(2));
         Assert.False(session.CheckProactiveFailover());
         clock.Advance(TimeSpan.FromSeconds(2));

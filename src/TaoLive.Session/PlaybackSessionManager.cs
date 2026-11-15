@@ -217,13 +217,17 @@ public sealed class PlaybackSessionManager
         return session;
     }
 
-    /// <summary>切到指定频道：热备就绪走热切（换面接管），否则旧会话让位冷切。</summary>
+    /// <summary>切到指定频道：热备就绪走热切（接管），否则冷切重播。
+    /// vc68 接管修（老板拍板「这版最重要的就是热切」+真机黑屏实锤）：接管次序倒过来——
+    /// 此前新内核先挂面、旧内核后让位，两颗解码器同时连一个屏（后连的被挤掉/输出落不了屏=黑屏实锤）；
+    /// 改为旧内核先摘面停机、新内核再挂面恢复，解码器与屏一对一连接。让位瞬间旧画面冻结一拍
+    /// 由切台遮罩（不透明水墨底）盖住，不露黑。</summary>
     public PlaybackSession SwitchTo(Channel channel)
     {
         ArgumentNullException.ThrowIfNull(channel);
         _onSwitchingChannel?.Invoke(channel); // 换台即触发邻台预取（ChannelPrefetcher，单车道让路口径）
 
-        // 热切：热备就是目标台且已达 Playing（起播门槛线已过）→ 换面接管
+        // 热切：热备就是目标台且已达 Playing（起播门槛线已过）→ 接管
         if (Current is { } cur
             && Standby is { } sb
             && string.Equals(sb.CurrentChannel?.Id, channel.Id, StringComparison.Ordinal)
@@ -231,11 +235,12 @@ public sealed class PlaybackSessionManager
         {
             // 热切打点（埋点补充 2026-11-15）：攒流到接管的真实时长落账，换台快慢归因热备链路可查
             SessionTrace.Emit($"[热备] 热切接管 {channel.Name}（攒流 {_monotonicMs() - _standbySinceMs}ms 后出画就绪）");
-            // 新画面先挂面覆盖旧画面（同面后画覆盖先画，旧画面撑到让位不露黑）
-            sb.AttachSurface(cur.SurfaceHandle);
-            sb.ResumePlayback(); // vc68 漏音根因①：备台静音攒流至此恢复出声出画（缓冲攒流不中断）
+            // vc68 接管修：旧内核先彻底退场（摘面+停机，屏连接先释放），新内核再干净接管——
+            // 解码器与屏一对一，不再两颗抢一面（黑屏根因）。让位瞬间的旧帧由遮罩盖住不露黑。
             cur.Supersede();
             MarkSuperseded(cur); // 超龄账起算（#21）
+            sb.AttachSurface(cur.SurfaceHandle);
+            sb.ResumePlayback(); // 备台静音攒流至此恢复出声出画（缓冲攒流不中断）
             Current = sb;
             Standby = null;
             _supersededAtMs.Remove(channel.Id); // 目标台接管前台，超龄账清零
@@ -245,11 +250,8 @@ public sealed class PlaybackSessionManager
         }
 
         // 冷切（W1 契约路径）：旧会话让位，目标会话从会话表复用或新建，然后起播。
-        // 冷切归因打点（埋点补充 2026-11-15）：目标台有热备但未达门槛（攒流中）即走冷切——
-        // 换台慢归因「热备没赶上」的关键账，攒流时长一并落账；无热备的普通冷切不记（正常路径控量）。
         if (Standby is { } notReady
-            && string.Equals(notReady.CurrentChannel?.Id, channel.Id, StringComparison.Ordinal)
-            && notReady.State != PlaybackState.Playing)
+            && string.Equals(notReady.CurrentChannel?.Id, channel.Id, StringComparison.Ordinal))
         {
             SessionTrace.Emit($"[热备] 热备未就绪（{notReady.State}，攒流 {_monotonicMs() - _standbySinceMs}ms），冷切 {channel.Name}");
         }

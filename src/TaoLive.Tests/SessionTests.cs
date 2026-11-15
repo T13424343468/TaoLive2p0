@@ -129,7 +129,7 @@ public class SessionTests
     [Fact]
     public void Proactive_failover_switches_line_on_sustained_low_inventory()
     {
-        // 老板令 #24：库存跌破线连续两拍即预防性换源，不等卡流 15 秒
+        // 老板令 #24 + vc68 误烧闸：库存先攒满过线（线是好的）再持续跌落，才准预防性换源
         var clock = new FixedClock(T0);
         var player = new LoggingPlayer { BufferedMs = 20_000 };
         var session = new PlaybackSession(player, clock);
@@ -138,6 +138,7 @@ public class SessionTests
         session.NotifyFirstFrame();
         Assert.Equal(PlaybackState.Playing, session.State);
 
+        session.CheckProactiveFailover(); // 攒满过线：本线路取得预防介入资格（vc68 误烧闸）
         player.BufferedMs = 5_000;
         Assert.False(session.CheckProactiveFailover()); // 第一拍：单次抖动不切
         Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url);
@@ -147,6 +148,29 @@ public class SessionTests
         Assert.Equal("https://s/b.m3u8", session.CurrentEndpoint?.Url);
         Assert.Equal(1, session.FailoverCount);
         Assert.Equal(PlaybackState.Buffering, session.State);
+    }
+
+    [Fact]
+    public void Proactive_never_trips_on_line_that_never_filled()
+    {
+        // vc68 误烧闸（老板真机报「出画一帧卡死→黑屏断连」实锤）：起播头几秒库存必然低于
+        // 7 秒线（3 秒出画内核几乎没存货）——从没攒满过线的线路不准按库存线预防介入，
+        // 宁稳勿烧；否则预防连烧 3 条线出「全线路不可达」。
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer { BufferedMs = 3_000 }; // 出画即播，库存常态低于 7 秒线
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8");
+        session.ChangeChannel(ch);
+        session.NotifyFirstFrame();
+
+        for (int i = 0; i < 30; i++)
+        {
+            session.CheckProactiveFailover(); // 攒账多拍
+            clock.Advance(TimeSpan.FromSeconds(2));
+            session.CheckProactiveFailover(); // 第 2 拍坐实也不切：线从没攒满过
+        }
+        Assert.Equal(0, session.FailoverCount);
+        Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url);
     }
 
     [Fact]
@@ -194,14 +218,36 @@ public class SessionTests
         clock.Advance(TimeSpan.FromSeconds(70));
         player.RaiseError("NET-1"); // 真实换线，冷却账起算
         session.NotifyFirstFrame(); // 新线回 Playing
-        player.BufferedMs = 5_000;
-        clock.Advance(TimeSpan.FromSeconds(2));
-        Assert.False(session.CheckProactiveFailover()); // 冷却窗内不切
+        player.BufferedMs = 20_000;
+        session.CheckProactiveFailover(); // 冷却窗内只攒账不切（资格未取，窗后第一拍再取）
         clock.Advance(PlaybackSession.ProactiveCooldown);
-        Assert.False(session.CheckProactiveFailover()); // 到期第一拍
+        Assert.False(session.CheckProactiveFailover()); // 到期第一拍：攒满过线取资格（vc68 误烧闸，不切）
+        player.BufferedMs = 5_000;
+        Assert.False(session.CheckProactiveFailover()); // 新账第一拍
         clock.Advance(TimeSpan.FromSeconds(2));
-        Assert.True(session.CheckProactiveFailover()); // 冷却窗外坐实趋势即切
+        Assert.True(session.CheckProactiveFailover()); // 第二拍坐实趋势即切
         Assert.Equal(2, session.FailoverCount);
+    }
+
+    [Fact]
+    public void All_sources_failed_stops_kernel()
+    {
+        // vc68 耗尽必停（老板真机报「黑屏只出音」实锤）：备源烧光出空态前必须停内核——
+        // 此前只进 Failed 不停机，最后一颗内核的音频照放，空态下「只出音」。
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer();
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8");
+        session.ChangeChannel(ch);
+        var failed = false;
+        session.AllSourcesFailed += (_, _) => failed = true;
+
+        player.RaiseError("E1");
+
+        Assert.True(failed);
+        Assert.Equal(PlaybackState.Failed, session.State);
+        Assert.Contains("Stop", player.Log); // 渲染必须结束：空态下无内核在放
+        Assert.Single(player.PlayedUrls); // 停机不重播：OK 重试从 Failed 再起
     }
 
     [Fact]

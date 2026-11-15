@@ -43,6 +43,12 @@ public sealed class PlaybackSession
     // 真卡流交看门狗（进度感知窗）与内核报错自救——画面持续低库存抖动也好过切到全线路不可达。
     private int _proactiveCount;
     public const int ProactiveCapPerChannel = 3;
+    // vc68 预防误烧闸（老板真机报「出画一帧马上卡死→黑屏断连」实锤）：首帧门槛降到 0.5s 后，
+    // 起播头几秒库存读数必然低于 7 秒预防线（0.5s 出画时内核几乎没存货）——预防换源若不看账
+    // 立即点火，冷却窗内连烧 3 条线出「全线路不可达」。改为：本线路库存先攒满过线一次才许
+    // 按库存线预防介入（说明线是好的、刚才是瞬时欠载）；从没攒满过=线本来就灌不动，宁稳勿烧，
+    // 真卡流交看门狗（进度感知窗）。卡流次数判据（#26）不受限。
+    private bool _inventoryEverFilled;
 
     public PlaybackSession(IPlayer player, IClock clock)
     {
@@ -160,6 +166,11 @@ public sealed class PlaybackSession
             // vc67：进起播/重灌期即清进度账——新源从头采样，死源快切口径不被上一源的陈账污染
             _watchdogLastBufferedMs = 0;
             _lastBufferProgressAtMs = null;
+        }
+        if (next == PlaybackState.Playing && _state != PlaybackState.Playing)
+        {
+            // vc68 预防误烧闸：进播放/恢复播放，本线路攒满账重记——新源从头攒，旧账不背锅
+            _inventoryEverFilled = false;
         }
         if (next != PlaybackState.Reconnecting)
         {
@@ -482,13 +493,17 @@ public sealed class PlaybackSession
         if (!lowInventory)
         {
             _lowInventoryRounds = 0; // 库存回线：趋势账清零
+            if (bufferedMs >= ProactiveInventoryFloor.TotalMilliseconds)
+            {
+                _inventoryEverFilled = true; // vc68 误烧闸：库存攒满过线，本线路取得「预防介入资格」
+            }
         }
         else if (_lowInventoryRounds == 0 || nowMs - _lowInventoryLastAtMs >= 1000)
         {
             _lowInventoryRounds++;
             _lowInventoryLastAtMs = nowMs;
         }
-        bool inventoryTripped = lowInventory && _lowInventoryRounds >= 2;
+        bool inventoryTripped = lowInventory && _inventoryEverFilled && _lowInventoryRounds >= 2;
         if (!churnTripped && !inventoryTripped)
         {
             return false; // 两条判据都没坐实：单次抖动不切，等趋势
@@ -555,6 +570,10 @@ public sealed class PlaybackSession
         var next = _endpointIndex + 1;
         if (_channel is null || next >= _queue.Count)
         {
+            // vc68 渲染必须结束（老板真机报「黑屏只出音」实锤）：备源耗尽即全线路不可达，
+            // 壳层出空态——但此前的守卫只进 Failed 不停内核，最后一颗内核的音频照放。
+            // 停机幂等，OK 重试从 Failed 再起播不受影响。
+            _player.Stop();
             AllSourcesFailed?.Invoke(this, new AllSourcesFailedEventArgs(_channel?.Id ?? string.Empty, reason));
             return;
         }

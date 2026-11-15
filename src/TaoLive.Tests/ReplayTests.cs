@@ -113,9 +113,10 @@ public class ReplayTests
             {"t":30200,"cmd":"switch","arg":"cctv2"}
             """);
 
-        // 热备接管：热备会话直接接管画面，旧会话让位
+        // vc68 二轮拍板（老板定死热切保住）：就绪热备走接管——旧内核先 Supersede 摘面停机，
+        // 新内核 AttachSurface 后 ResumePlayback，接管即出画不重播（热切契约）
         Assert.Equal("cctv2", manager.Current!.CurrentChannel!.Id);
-        Assert.Equal(PlaybackState.Playing, manager.Current.State);
+        Assert.Equal(PlaybackState.Playing, manager.Current.State); // 接管即出画（热切契约）
         Assert.Equal(PlaybackState.Idle, manager.TryGet("cctv1")!.State);
     }
 
