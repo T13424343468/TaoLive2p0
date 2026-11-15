@@ -279,12 +279,15 @@ internal sealed class LoggingPlayer : IPlayer
     public List<string> PlayedUrls { get; } = new();
 
     public event EventHandler<PlayerFirstFrameEventArgs>? OnFirstFrame;
+    public event EventHandler<PlayerFrameTickEventArgs>? OnFrameTick;
     public event EventHandler<PlayerBufferingEventArgs>? OnBufferingStart;
     public event EventHandler<PlayerBufferingEventArgs>? OnBufferingEnd;
     public event EventHandler<PlayerErrorEventArgs>? OnError;
 
     internal void RaiseFirstFrame() =>
         OnFirstFrame?.Invoke(this, new PlayerFirstFrameEventArgs { AtUtc = DateTimeOffset.UtcNow });
+    internal void RaiseFrameTick() =>
+        OnFrameTick?.Invoke(this, new PlayerFrameTickEventArgs { AtUtc = DateTimeOffset.UtcNow });
 
     internal void RaiseBufferingStart() =>
         OnBufferingStart?.Invoke(this, new PlayerBufferingEventArgs { IsSeeking = false });

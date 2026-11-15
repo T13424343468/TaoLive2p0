@@ -50,6 +50,13 @@ public interface IPlayer : IDisposable
     /// 会话层收到即走重连/降级策略。
     /// </summary>
     event EventHandler<PlayerErrorEventArgs> OnError;
+
+    /// <summary>
+    /// 帧回调（方案书 v74/v76/v20）：渲染线程帧将出时触发，内核按 10Hz 节流上报（约每 100ms 一拍），
+    /// 供壳层埋点做画面平稳无感量化断言（帧间隔 P95 ≤ 250ms，连续 3 窗判卡顿）。
+    /// 调用线程=内核渲染线程，订阅方自行并发安全；不起播零事件。
+    /// </summary>
+    event EventHandler<PlayerFrameTickEventArgs>? OnFrameTick;
 }
 
 public sealed class PlayerFirstFrameEventArgs : EventArgs
@@ -66,4 +73,9 @@ public sealed class PlayerErrorEventArgs : EventArgs
 {
     public required string Code { get; init; }
     public required string Message { get; init; }
+}
+
+public sealed class PlayerFrameTickEventArgs : EventArgs
+{
+    public required DateTimeOffset AtUtc { get; init; }
 }

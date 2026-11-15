@@ -17,6 +17,7 @@ namespace TaoLive.Players;
 public sealed class ExoPlayerPlayer : IPlayer
 {
     private readonly Forwarder _forwarder;
+    private readonly FrameTickForwarder _frameForwarder;
     private readonly AndroidX.Media3.ExoPlayer.IExoPlayer _player;
     private readonly Android.OS.Handler _main;
     private Func<TaoLive.Model.SourceEndpoint, Task<string?>>? _streamResolver;
@@ -39,6 +40,8 @@ public sealed class ExoPlayerPlayer : IPlayer
         playerBuilder.SetLoadControl(BuildLoadControl(context));
         _player = playerBuilder.Build()!;
         _player.AddListener(_forwarder);
+        _frameForwarder = new FrameTickForwarder(this); // 帧回调（v76：10Hz 节流）随内核装配一次，Play 全程复用
+        _player.SetVideoFrameMetadataListener(_frameForwarder);
         _main = new Android.OS.Handler(Android.OS.Looper.MainLooper!);
         _streamResolver = streamResolver;
     }
@@ -89,6 +92,7 @@ public sealed class ExoPlayerPlayer : IPlayer
     public event EventHandler<PlayerBufferingEventArgs>? OnBufferingStart;
     public event EventHandler<PlayerBufferingEventArgs>? OnBufferingEnd;
     public event EventHandler<PlayerErrorEventArgs>? OnError;
+    public event EventHandler<PlayerFrameTickEventArgs>? OnFrameTick;
 
     public void Play(PlaybackParams params_)
     {
@@ -201,6 +205,8 @@ public sealed class ExoPlayerPlayer : IPlayer
     {
         _playGeneration++; // 释放后作废一切在途回调（闪退镜红②）
         _player.RemoveListener(_forwarder);
+        _player.ClearVideoFrameMetadataListener(null);
+        _frameForwarder.Dispose();
         _player.Release();
     }
 
@@ -222,6 +228,30 @@ public sealed class ExoPlayerPlayer : IPlayer
     private void HandleError(string code, string message)
     {
         OnError?.Invoke(this, new PlayerErrorEventArgs { Code = code, Message = message });
+    }
+
+    /// <summary>
+    /// 帧回调上报（10Hz 节流，方案书 v76）：渲染线程高频回调按 100ms 拍合并，
+    /// 订阅方（壳层埋点）拿到的节拍即采样点；TimeSpan 判断免锁（单渲染线程顺序回调）。
+    /// </summary>
+    internal void HandleFrameAboutToBeRendered()
+    {
+        var now = DateTimeOffset.UtcNow;
+        if (_lastTickRaised != default && now - _lastTickRaised < TimeSpan.FromMilliseconds(100)) return;
+        _lastTickRaised = now;
+        OnFrameTick?.Invoke(this, new PlayerFrameTickEventArgs { AtUtc = now });
+    }
+    private DateTimeOffset _lastTickRaised;
+
+    /// <summary>帧元数据监听桥：Media3 渲染线程回调 → 契约 OnFrameTick。</summary>
+    private sealed class FrameTickForwarder : Java.Lang.Object, AndroidX.Media3.ExoPlayer.Video.IVideoFrameMetadataListener
+    {
+        private readonly ExoPlayerPlayer _owner;
+        public FrameTickForwarder(ExoPlayerPlayer owner) : base() => _owner = owner;
+
+        public void OnVideoFrameAboutToBeRendered(long presentationTimeUs, long eventTimeMs,
+            AndroidX.Media3.Common.Format? format, Android.Media.MediaFormat? mediaFormat)
+            => _owner.HandleFrameAboutToBeRendered();
     }
 
     private static bool IsHls(string url) =>

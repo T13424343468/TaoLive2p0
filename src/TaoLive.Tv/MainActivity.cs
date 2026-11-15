@@ -85,7 +85,28 @@ public partial class MainActivity : Activity
             var player = new ExoPlayerPlayer(this);
             player.WithStreamResolver(endpoint =>
                 resolver.ResolveAsync(endpoint, player.CurrentChannelKey ?? "", player.CurrentChannelName ?? ""));
+            WireFramePulse(player); // 画面平稳埋点（方案书 v76/v20：帧回调 10Hz → 滑窗 P95 断言）
             return player;
+        }
+
+        // 画面平稳无感量化埋点（v20）：帧回调进滑窗，每 10 秒取数落 [画面平稳] 日志行；
+        // P95≤250ms 且连续 3 窗超阈即写「疑似卡顿」——真机验收按此行核，不靠人工观感。
+        // 内核随会话换新即重挂，闭包生命周期随内核，无跨会话账。
+        void WireFramePulse(IPlayer player)
+        {
+            var pulse = new FramePulse();
+            DateTimeOffset lastReport = DateTimeOffset.UtcNow;
+            player.OnFrameTick += (_, e) =>
+            {
+                pulse.Record(e.AtUtc);
+                if (e.AtUtc - lastReport < TimeSpan.FromSeconds(10)) return;
+                lastReport = e.AtUtc;
+                var p95 = pulse.WindowP95Ms();
+                if (p95 is not { } ms) return;
+                CrashNet.Record(pulse.StallSuspicion
+                    ? $"[画面平稳] 疑似卡顿：连续 3 窗帧间隔 P95 {ms}ms 超阈 {FramePulse.P95ThresholdMs}ms"
+                    : $"[画面平稳] 帧间隔 P95 {ms}ms（阈 {FramePulse.P95ThresholdMs}ms）");
+            };
         }
 
         // 换台邻台预取（vc53 任务8）：取票落 ChannelWarmer 既有 5 分钟缓存（归一纪律，不建第二本账），

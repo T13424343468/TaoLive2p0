@@ -71,6 +71,7 @@ public class SmokeTests
 public sealed class StubPlayer : IPlayer
 {
     public event EventHandler<PlayerFirstFrameEventArgs>? OnFirstFrame;
+    public event EventHandler<PlayerFrameTickEventArgs>? OnFrameTick;
     public event EventHandler<PlayerBufferingEventArgs>? OnBufferingStart;
     public event EventHandler<PlayerBufferingEventArgs>? OnBufferingEnd;
     public event EventHandler<PlayerErrorEventArgs>? OnError;
@@ -80,6 +81,7 @@ public sealed class StubPlayer : IPlayer
     internal void RaiseBufferingStart() => OnBufferingStart?.Invoke(this, new PlayerBufferingEventArgs { IsSeeking = false });
     internal void RaiseBufferingEnd() => OnBufferingEnd?.Invoke(this, new PlayerBufferingEventArgs { IsSeeking = false });
     internal void RaiseError(string code) => OnError?.Invoke(this, new PlayerErrorEventArgs { Code = code, Message = code });
+    internal void RaiseFrameTick(DateTimeOffset at) => OnFrameTick?.Invoke(this, new PlayerFrameTickEventArgs { AtUtc = at });
 
     public void Play(PlaybackParams params_) { }
     public void Pause() { }
