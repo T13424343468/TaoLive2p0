@@ -6,39 +6,80 @@ using Android.Widget;
 namespace TaoLive.Tv;
 
 /// <summary>
-/// 水墨透明视觉基线（2.0 简化版，口径照 vc53）：
-/// 焦点/确认效果=低透明细边框+极淡底，绝不复用实色高亮；面板半透明水墨深底；
-/// 文字带可读性深色投影，亮暗画面上都与背景拉开对比。统一一套参数全局复用。
+/// 全局透明化视觉基线（vc53 完整版整套搬运；v1.0.8 第15项，用户 23:25 拍板）：
+/// - 所有焦点/确认选中效果按透明做——效果层=低透明度细边框+极淡底色，绝不复用旧实色高亮；
+/// - 面板/列表底色同样极淡（播放画面可见），越透明越好；
+/// - 底线：低配电视上肉眼可辨，不因过度透明看不见焦点；
+/// - 统一一套参数，覆盖频道列表、分类树、设置面板、收藏排序、FlashInfo，与水墨主题一致。
+/// vc53 增补（v1.0.9 第③项）：亮度自适应（暗房底色加深一档）、信息条/亮牌/当前台高亮独立档。
 /// </summary>
 public static class InkTranslucency
 {
-    // 水墨底色（与 2.0 主界面深底同系）
+    // 水墨底色（与主题一致，只调透明度）
     public const byte InkR = 0x2B, InkG = 0x33, InkB = 0x3B;
     public const byte PaperR = 0xF7, PaperG = 0xF5, PaperB = 0xEE; // 效果层浅色（细边框/极淡底）
-    // 强调色（水墨 Accent #8A5C3D）：危险项/改动项聚焦共用
+    // 强调色（水墨 Accent #8A5C3D）：当前台高亮底、可读性兜底共用
     public const byte AccentR = 0x8A, AccentG = 0x5C, AccentB = 0x3D;
 
-    /// <summary>面板/子页底色透明度：半透明水墨，播放画面隐约可见。</summary>
+    /// <summary>面板/列表底色透明度：v1.0.9 第③项调深（56→76），亮画面上文字仍清晰可读，保持半透明水墨质感。</summary>
     public const int PanelAlpha = 76;
 
     /// <summary>进阶调优页底色：加深一档，不跟画面亮度走（vc41 口径）。</summary>
     public const int PanelDeepAlpha = 130;
 
-    /// <summary>焦点效果层底色透明度。</summary>
+    /// <summary>焦点/确认效果层底色透明度：v1.0.9 第③项加深（40→64），高亮更醒目。</summary>
     public const int FocusFillAlpha = 64;
 
-    /// <summary>焦点细边框透明度：低配电视肉眼清晰可辨。</summary>
+    /// <summary>焦点细边框透明度：v1.0.9 第③项加深（104→160），低配电视肉眼清晰可辨。</summary>
     public const int FocusStrokeAlpha = 160;
 
-    /// <summary>次要文字色（vc53 第③项提亮口径）。</summary>
-    public const string TextSecondary = "#C9D6E2";
+    /// <summary>FlashInfo/信息条底色透明度：v1.0.9 第③项调深（150→200），亮画面上文字保持可读。</summary>
+    public const int InfoAlpha = 200;
 
-    public static Color PanelColor(Context ctx) => Color.Argb(PanelAlpha, InkR, InkG, InkB);
+    /// <summary>起播亮牌底色透明度。</summary>
+    public const int LoadingAlpha = 216;
 
+    /// <summary>当前台高亮底色透明度：v1.0.9 第③项新增，强调色半透明底，一眼认出正在看的台。</summary>
+    public const int CurrentFillAlpha = 76;
+
+    /// <summary>次要文字色：v1.0.9 第③项提亮（原 #7C8894 偏灰看不清）。</summary>
+    public const string TextSecondary = "#D8E2EC";
+
+    /// <summary>亮度自适应（v1.0.9 第③项）：系统亮度 ≤ 30% 视为夜间/暗房，底色再加深一档。</summary>
+    public static bool IsLowBrightness(Context ctx)
+    {
+        try
+        {
+            var v = global::Android.Provider.Settings.System.GetInt(ctx.ContentResolver,
+                global::Android.Provider.Settings.System.ScreenBrightness, 128);
+            return v >= 0 && v <= 77; // 系统亮度 0-255，≤30% 视为低光
+        }
+        catch { return false; }
+    }
+
+    private static int Boost(Context ctx, int alpha) =>
+        IsLowBrightness(ctx) ? System.Math.Min(255, alpha + 32) : alpha;
+
+    /// <summary>自适应面板/列表底色：暗屏时加深一档，文字更容易看清。</summary>
+    public static Color PanelColor(Context ctx) =>
+        Color.Argb(Boost(ctx, PanelAlpha), InkR, InkG, InkB);
+
+    /// <summary>进阶调优页底色：固定加深一档，不跟画面亮度走（vc41 口径）。</summary>
     public static Color PanelColorDeep(Context ctx) => Color.Argb(PanelDeepAlpha, InkR, InkG, InkB);
 
-    /// <summary>主文字色（纸白）。</summary>
-    public static Color TextPrimary(Context ctx) => Color.Argb(255, PaperR, PaperG, PaperB);
+    /// <summary>自适应信息条底色：暗屏时加深一档，文字保持可读。</summary>
+    public static Color InfoColor(Context ctx) => Color.Argb(Boost(ctx, InfoAlpha), InkR, InkG, InkB);
+
+    /// <summary>自适应亮牌底色：暗屏时加深一档。</summary>
+    public static Color LoadingColor(Context ctx) => Color.Argb(Boost(ctx, LoadingAlpha), InkR, InkG, InkB);
+
+    /// <summary>当前台高亮底色：强调色半透明底，一眼认出正在看的台，暗屏时略加深。</summary>
+    public static Color CurrentRowFill(Context ctx) =>
+        Color.Argb(Boost(ctx, CurrentFillAlpha), AccentR, AccentG, AccentB);
+
+    /// <summary>主文字色（v1.0.9 第③项「亮度自适应」）：暗屏（夜间/暗房）自动提到纯白。</summary>
+    public static Color TextPrimary(Context ctx) =>
+        IsLowBrightness(ctx) ? Color.White : Color.Argb(255, PaperR, PaperG, PaperB);
 
     /// <summary>可读性兜底：文字加深色投影，亮暗底上都清晰（标准 TextView API，全机型可用）。</summary>
     public static void ApplyReadabilityShadow(TextView tv) =>

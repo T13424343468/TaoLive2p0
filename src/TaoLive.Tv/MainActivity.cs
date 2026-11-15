@@ -1,7 +1,10 @@
-﻿using System.Text;
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
 using Android.App;
 using Android.Content;
 using Android.Graphics;
+using Android.Graphics.Drawables;
 using Android.OS;
 using Android.Runtime;
 using Android.Views;
@@ -16,12 +19,17 @@ using TaoLive.Session;
 namespace TaoLive.Tv;
 
 /// <summary>
-/// 电视端主入口（2.0 W5 接线）：频道列表（编号+分类，电视优先）+ 播放页 SurfaceView，
-/// 接会话层（AddTaoLiveSession）与 ExoPlayer 内核（老板 2026-11-15 03:37 换向令）。
-/// 操作逻辑沿一期：频道号直达（遥控器数字键）、上下键换台、返回键回列表；
-/// 界面样式一期保留（纯文字列表，无花哨横幅）。label=TaoLive 特征关见 AndroidManifest。
+/// 电视端主入口（2.0 W5 接线 + vc53 界面整套搬运 2026-11-15 老板真机令）：
+/// 界面视觉与交互照 vc53——全屏视频垫底、半透明水墨抽屉盖画面、亮度自适应、
+/// 真实台标列表（无台标=首字占位）、五分类页签、底部节目单、顶部信息条、起播亮牌、水墨退出弹窗。
+/// 底层保留 2.0 事件/会话架构（PlaybackSessionManager + ExoPlayer 内核 + SurfaceHook 挂面），
+/// 即「vc53 的皮，2.0 的骨」。操作逻辑：菜单键呼/收抽屉、上下换台、左右切页签、确认收藏、频道号直达。
 /// </summary>
-[Activity(Label = "TaoLive", MainLauncher = true)]
+[Activity(Label = "TaoLive", MainLauncher = true, Exported = true,
+    LaunchMode = LaunchMode.SingleTask,
+    ConfigurationChanges = ConfigChanges.Orientation | ConfigChanges.ScreenSize | ConfigChanges.KeyboardHidden)]
+[IntentFilter(new[] { Intent.ActionMain },
+    Categories = new[] { Intent.CategoryLauncher, Intent.CategoryLeanbackLauncher })]
 public partial class MainActivity : Activity
 {
     private IServiceProvider _services = default!;
@@ -32,7 +40,6 @@ public partial class MainActivity : Activity
     private LinearLayout _listPage = default!;
     private ListView _list = default!;
     private FrameLayout _playerPage = default!;
-    private TextView? _logoBadge;
     private readonly List<TextView> _tabViews = new();
     private ListTabs.Tab _tab = ListTabs.Tab.All;
     private long _healthLastAtMs;
@@ -43,6 +50,7 @@ public partial class MainActivity : Activity
     private readonly TaoLive.Session.NetGuard _netGuard = new();
     private readonly Handler _main = new(Looper.MainLooper!);
     private bool _onPlayerPage;
+    private bool _listOpen; // vc53 抽屉口径：抽屉开着=列表键位，画面在面板下继续
     private int _currentIndex;
     private string _digits = "";
     private Java.Lang.Runnable? _digitCommit;
@@ -57,6 +65,21 @@ public partial class MainActivity : Activity
     private TicketResolver _resolver = default!;
     private System.Threading.CancellationTokenSource? _precheckCts;
     private static readonly HttpClient PrecheckHttp = new() { Timeout = TimeSpan.FromSeconds(5) };
+
+    // ---- vc53 界面搬运：亮牌 / 底部节目单 / 水墨退出弹窗 ----
+    private FrameLayout _loadingPanel = default!;
+    private TextView _loadingText = default!;
+    private int _loadingSeq;                 // 亮牌代数：换台即换代，旧牌绝不再亮
+    private LinearLayout? _epgPanel;
+    private TextView? _epgNow;
+    private TextView? _epgNext;
+    private bool _epgHasData;                // 当前台拉到过节目单（抽屉收起后据此重新亮出）
+    private Action? _epgHidePending;         // 7 秒自动收起任务
+    private int _epgSeq;                     // 节目单代数：换台即作废旧拉取
+    private const int EpgAutoHideMs = 7000;
+    private AlertDialog? _exitDialog;        // 退出确认（v1.0.9 用户拍板，vc22 水墨浮层样式）
+    private TextView? _exitNo;
+    private TextView? _exitYes;
 
     protected override void OnCreate(Bundle? savedInstanceState)
     {
@@ -158,6 +181,7 @@ public partial class MainActivity : Activity
                 CrashNet.Record($"[ConnectFailure] {e.Session.CurrentChannel?.Name ?? "未知频道"} 全线路不可达");
                 // 失败终态驻留空态（方案书 v77，白屏镜红②）：重连耗尽转空态文案，不再用瞬时 Toast；
                 // 键位引导按树内真实键位：OK 重试（退避账管节奏）· 菜单键选台（呼列表）
+                HideLoading();
                 ShowEmptyState("信号中断，全线路不可达\n按 OK 重试 · 菜单键选台");
             }
             else if (e.State == PlaybackState.Buffering)
@@ -174,6 +198,7 @@ public partial class MainActivity : Activity
             else if (e.State == PlaybackState.Playing)
             {
                 HideEmptyState();
+                HideLoading(); // vc53：首帧落地即撤亮牌
                 // 换源黑屏埋点（黑屏镜黄④ 11-15）：换源起点到出画恢复的时长落运行台账（含 ≤500ms 快切段）
                 if (_failoverAtMs is { } from)
                 {
@@ -291,85 +316,51 @@ public partial class MainActivity : Activity
         base.OnDestroy();
     }
 
-    // —— 视图 ————————————————————————————————————————————
+    // —— 视图（vc53 BuildUi 皮：视频垫底 + 半透明水墨抽屉 + 信息条 + 节目单 + 亮牌） ———
 
     private void BuildRoot()
     {
+        // 水墨主题底（vc53：TaoPalette 水墨暖宣浅；视频首帧前露底即暖宣，不露黑）
         _root = new FrameLayout(this);
-        _root.SetBackgroundColor(Color.Rgb(8, 10, 14));
+        _root.SetBackgroundColor(Color.ParseColor("#F7F5EE"));
 
         _toastHide = new Java.Lang.Runnable(() =>
             _toast.Visibility = ViewStates.Invisible);
 
-        _listPage = new LinearLayout(this) { Orientation = Orientation.Vertical };
-
-        // ②五标签行（方案书收口批②，照 vc53 DrawerSupport 名册：全部/收藏/央视/卫视/地方台；枚举序即行序）
-        _tabViews.Clear();
-        var tabBar = new LinearLayout(this) { Orientation = Orientation.Horizontal };
-        tabBar.SetPadding(Dp(24), Dp(16), Dp(24), Dp(8));
-        foreach (ListTabs.Tab t in Enum.GetValues(typeof(ListTabs.Tab)))
-        {
-            var tv = new TextView(this) { Text = ListTabs.Label(t), Gravity = GravityFlags.Center };
-            tv.TextSize = 18f;
-            tv.SetPadding(Dp(20), Dp(8), Dp(20), Dp(8));
-            tv.Click += (_, _) => SelectTab(t);
-            tabBar.AddView(tv, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WrapContent, 1f));
-            _tabViews.Add(tv);
-        }
-        StyleTabs();
-        _listPage.AddView(tabBar);
-
-        _list = new ListView(this) { CacheColorHint = Color.Transparent };
-        _list.Adapter = new ChannelListAdapter(this, _channels, _favorites, ch => _precheck.MarkOf(ch));
-        _list.ItemClick += (_, e) =>
-        {
-            // 行→频道→列表索引（收藏组行也指向同一频道，编号直达语义不变）
-            var channel = ((ChannelListAdapter)_list.Adapter!).ChannelAt(e.Position);
-            if (channel is null) return;
-            PlayAt(_channels.ToList().FindIndex(c => c.Id == channel.Id));
-        };
-        _listPage.AddView(_list, new LinearLayout.LayoutParams(-1, 0, 1f));
-        _root.AddView(_listPage, new FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.MatchParent));
-
-        _playerPage = new FrameLayout(this) { Visibility = ViewStates.Gone };
+        // 1. 全屏视频层（vc53：垫底；抽屉/信息条/节目单全盖其上）
+        _playerPage = new FrameLayout(this);
         _surface = new SurfaceView(this);
         _playerPage.AddView(_surface, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.MatchParent));
+        // 黑屏根因修复（真机「黑屏不出画只有声音」实锤）：SurfaceHook 此前从未注册，
+        // Surface 异步创建后无人补挂输出面——注册后首帧创建/回前台重建均自动补挂
+        _surface.Holder!.AddCallback(new SurfaceHook(this));
 
-        // ②台标（方案书收口批②）：播放画面台标行，纯展示；2.0 无台标素材→台名文字代标
-        //（照 vc53 vc44① 水墨文字台标样式：水墨圆角底+纸色字），素材缺失不留空块
-        _logoBadge = new TextView(this)
+        // 1.5 起播亮牌（雷二·延迟亮）：换台后 0.8 秒内没出首帧才亮，亮了带台名，
+        // 明确反馈「没死机」，首帧落地才撤（vc53 LoadingPanel 同款：亮度自适应水墨深底）
+        _loadingPanel = new FrameLayout(this);
+        _loadingPanel.SetBackgroundColor(InkTranslucency.LoadingColor(this));
+        _loadingText = new TextView(this)
         {
             Gravity = GravityFlags.Center,
-            TextSize = 16f,
+            TextSize = 24,
         };
-        _logoBadge!.SetTextColor(Color.ParseColor("#E7E2D6"));
-        var inkBg = new Android.Graphics.Drawables.GradientDrawable();
-        inkBg.SetColor(Color.ParseColor("#3A4750"));
-        inkBg.SetCornerRadius(Dp(12));
-        inkBg.SetStroke(1, Color.ParseColor("#4E5D68"));
-        _logoBadge.Background = inkBg;
-        _logoBadge.SetPadding(Dp(24), Dp(8), Dp(24), Dp(8));
-        _logoBadge.Visibility = ViewStates.Gone;
-        _playerPage.AddView(_logoBadge, new FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.WrapContent, ViewGroup.LayoutParams.WrapContent)
-        { Gravity = GravityFlags.Top | GravityFlags.Start, LeftMargin = Dp(28), TopMargin = Dp(20) });
+        _loadingText.SetTextColor(InkTranslucency.TextPrimary(this));
+        InkTranslucency.ApplyReadabilityShadow(_loadingText);
+        _loadingPanel.AddView(_loadingText, new FrameLayout.LayoutParams(-2, -2)
+        {
+            Gravity = GravityFlags.Center,
+        });
+        _loadingPanel.Visibility = ViewStates.Gone;
+        _playerPage.AddView(_loadingPanel, new FrameLayout.LayoutParams(-1, -1));
 
-        _toast = new TextView(this) { Gravity = GravityFlags.Center };
-        _toast.SetTextColor(Color.White);
-        _toast.TextSize = 34;
-        _toast.SetBackgroundColor(Color.Argb(170, 0, 0, 0));
-        _toast.SetPadding(28, 14, 28, 14);
-        _playerPage.AddView(_toast, new FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.WrapContent, ViewGroup.LayoutParams.WrapContent)
-        { Gravity = GravityFlags.Center });
-
-        // 失败终态驻留空态（方案书 v77，白屏镜红②）：非瞬时，进失败态显示、离失败态即隐
+        // 失败终态驻留空态（方案书 v77，白屏镜红②）：非瞬时，进失败态显示、离失败态即隐；
+        // 样式照 vc53 水墨口径：固定加深水墨底（不跟亮度，失败文案必须醒目）+ 可读性投影
         _emptyState = new TextView(this) { Gravity = GravityFlags.Center };
-        _emptyState.SetTextColor(Color.White);
+        _emptyState.SetTextColor(InkTranslucency.TextPrimary(this));
         _emptyState.TextSize = 30;
-        _emptyState.SetBackgroundColor(Color.Argb(210, 0, 0, 0));
+        _emptyState.SetBackgroundColor(InkTranslucency.PanelColorDeep(this));
+        InkTranslucency.ApplyReadabilityShadow(_emptyState);
         _emptyState.SetPadding(40, 24, 40, 24);
         _emptyState.Visibility = ViewStates.Invisible;
         _playerPage.AddView(_emptyState, new FrameLayout.LayoutParams(
@@ -378,32 +369,135 @@ public partial class MainActivity : Activity
 
         _root.AddView(_playerPage, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MatchParent, ViewGroup.LayoutParams.MatchParent));
+
+        // 2. 切台信息条（vc53：顶部居中，自动隐藏；亮度自适应水墨底）
+        _toast = new TextView(this)
+        {
+            Gravity = GravityFlags.Center,
+            Visibility = ViewStates.Invisible,
+        };
+        _toast.SetTextColor(InkTranslucency.TextPrimary(this));
+        _toast.SetBackgroundColor(InkTranslucency.InfoColor(this));
+        InkTranslucency.ApplyReadabilityShadow(_toast);
+        _toast.SetPadding(36, 16, 36, 16);
+        _toast.TextSize = 22;
+        _root.AddView(_toast, new FrameLayout.LayoutParams(-2, -2)
+        {
+            Gravity = GravityFlags.Top | GravityFlags.CenterHorizontal,
+            TopMargin = 48,
+        });
+
+        // 3. 底部节目单（vc53：官方接口有数据才显示，没数据不硬造；
+        // v22 第 13 项·z 序修正：节目单条先入根布局，抽屉盖板永远压在其上，绝不叠字）
+        _epgPanel = new LinearLayout(this) { Orientation = Orientation.Vertical };
+        _epgPanel.SetBackgroundColor(InkTranslucency.PanelColor(this));
+        _epgPanel.SetPadding(36, 18, 36, 22);
+        _epgPanel.Visibility = ViewStates.Gone;
+        _epgNow = new TextView(this) { TextSize = 18 };
+        _epgNow.SetTextColor(InkTranslucency.TextPrimary(this));
+        InkTranslucency.ApplyReadabilityShadow(_epgNow);
+        _epgNext = new TextView(this) { TextSize = 15 };
+        _epgNext.SetTextColor(Color.ParseColor(InkTranslucency.TextSecondary));
+        InkTranslucency.ApplyReadabilityShadow(_epgNext);
+        _epgPanel.AddView(_epgNow);
+        _epgPanel.AddView(_epgNext);
+        _root.AddView(_epgPanel, new FrameLayout.LayoutParams(-2, -2)
+        {
+            Gravity = GravityFlags.Bottom | GravityFlags.Left,
+        });
+
+        // 4. 频道抽屉（vc53：半透明水墨面板盖画面，宽度随内容、左贴、上下全高）
+        _listPage = new LinearLayout(this) { Orientation = Orientation.Vertical };
+        _listPage.SetBackgroundColor(InkTranslucency.PanelColor(this));
+        _listPage.Visibility = ViewStates.Gone;
+        _root.AddView(_listPage, new FrameLayout.LayoutParams(-1, -1)); // 宽度在 ApplyListWidth 钳制
+
+        // 抽屉页头（vc53：标题 + 台数，同一水平基准）
+        var header = new LinearLayout(this) { Orientation = Orientation.Horizontal };
+        header.SetPadding(48, 40, 48, 8);
+        var title = new TextView(this) { Text = "TaoLive 频道", TextSize = 24 };
+        title.SetTextColor(InkTranslucency.TextPrimary(this));
+        InkTranslucency.ApplyReadabilityShadow(title);
+        header.AddView(title);
+        var count = new TextView(this) { Text = $"  共 {_channels.Count} 路", TextSize = 15 };
+        count.SetTextColor(Color.ParseColor(InkTranslucency.TextSecondary));
+        InkTranslucency.ApplyReadabilityShadow(count);
+        header.AddView(count);
+        _listPage.AddView(header);
+
+        // 五分类标签行（vc53：页签内容自适应宽度，首页签 LeftMargin=0 与页头文字严格对齐；
+        // 当前标签朱砂底高亮，点击/左右键切换）
+        _tabViews.Clear();
+        var tabRow = new LinearLayout(this) { Orientation = Orientation.Horizontal };
+        tabRow.SetPadding(48, 24, 48, 12);
+        int tabIndex = 0;
+        foreach (ListTabs.Tab t in Enum.GetValues(typeof(ListTabs.Tab)))
+        {
+            var tv = new TextView(this) { Text = ListTabs.Label(t), TextSize = 16 };
+            tv.SetPadding(12, 10, 12, 10);
+            InkTranslucency.ApplyReadabilityShadow(tv);
+            tv.Click += (_, _) => SelectTab(t);
+            tabRow.AddView(tv, new LinearLayout.LayoutParams(-2, -2) { LeftMargin = tabIndex == 0 ? 0 : 8 });
+            _tabViews.Add(tv);
+            tabIndex++;
+        }
+        StyleTabs();
+        _listPage.AddView(tabRow);
+
+        // v23 第 1 条：折叠总开关行整行退场——标签行下直接铺频道（vc53 口径）。
+        _list = new ListView(this) { Divider = null };
+        // 全局透明化（v1.0.8 第15项）：焦点效果=低透明度细边框+极淡底色，不复用实色高亮
+        _list.Selector = InkTranslucency.FocusDrawable();
+        _list.Adapter = new ChannelListAdapter(this, _channels, _favorites, ch => _precheck.MarkOf(ch), () => _channels[_currentIndex].Id);
+        _list.ItemClick += (_, e) =>
+        {
+            // 行→频道→列表索引（收藏组行也指向同一频道，编号直达语义不变）
+            var channel = ((ChannelListAdapter)_list.Adapter!).ChannelAt(e.Position);
+            if (channel is null) return;
+            // 连不上的台只能看不能切（v1.0.8，用户拍板）：确认键不发起播放
+            if (_precheck.MarkOf(channel) == ChannelHealth.Dead)
+            {
+                ShowToast($"{channel.Name}  暂无信号");
+                return;
+            }
+            PlayAt(_channels.ToList().FindIndex(c => c.Id == channel.Id));
+        };
+        _listPage.AddView(_list, new LinearLayout.LayoutParams(-1, 0, 1f));
     }
 
+    /// <summary>频道抽屉呼出（vc53 口径）：半透明面板盖画面，播放不中断（不摘输出面，画面在面板下继续）。</summary>
     private void ShowList()
     {
-        _manager.Current?.DetachSurface();
-        _playerPage.Visibility = ViewStates.Gone;
-        _logoBadge!.Visibility = ViewStates.Gone; // 台标行只在播放画面
+        _listOpen = true;
+        _playerPage.Visibility = ViewStates.Visible;
         _listPage.Visibility = ViewStates.Visible;
         _onPlayerPage = false;
+        SuppressEpgForDrawer(); // v22 第 13 项：抽屉打开先收节目单条，叠字从根上清掉
+        if (_list.Adapter is ChannelListAdapter adapter)
+        {
+            adapter.Refresh(_favorites, _tab);
+            ApplyListWidth(adapter.Rows); // 宽度随内容（vc53 v1.0.8：越小越好，上限半屏、下限 360dp）
+        }
         // 焦点默认落当前台行（方案书收口批②）：呼出即定位到正在看的台
         var current = _channels[_currentIndex];
         var pos = (_list.Adapter as ChannelListAdapter)?.PositionOf(current.Id) ?? -1;
         if (pos >= 0) _list.SetSelection(pos);
+        _list.RequestFocus();
     }
 
+    /// <summary>抽屉收起回播放（vc53 口径）：画面本就没停，撤面板+亮回节目单条即可。</summary>
     private void ShowPlayer()
     {
+        _listOpen = false;
         _listPage.Visibility = ViewStates.Gone;
         _playerPage.Visibility = ViewStates.Visible;
         _onPlayerPage = true;
-        _logoBadge!.Text = _channels[_currentIndex].Name; // ②台标：台名文字代标（素材缺失不留空块）
-        _logoBadge.Visibility = ViewStates.Visible;
         EnsureWatchdog();
         // 播放页已就绪而 Surface 早已创建（返回再进场景）：补挂输出面
         if (_surface.Holder?.Surface != null && _surface.Holder.Surface.IsValid)
             _manager.Current?.AttachSurface(_surface.Holder.Surface.Handle);
+        // v22 第 13 项：关抽屉后重新亮出节目单条（本台拉到过数据才亮），按 7 秒计时收起
+        if (_epgHasData) ShowEpgBar();
     }
 
     // —— 播放接线 ————————————————————————————————————————————
@@ -531,26 +625,101 @@ public partial class MainActivity : Activity
         {
             _manager.SwitchTo(ch);
         }
-        ShowToast(BuildChannelToast(ch));
+        ShowLoading(ch);    // 亮牌（雷二·延迟亮）：0.8 秒没出首帧才亮，首帧落地即撤
+        ShowToast(ch.Name); // 信息条：台名顶条闪现（vc53 口径；节目单走底部节目条）
+        RefreshEpg(ch);     // 底部节目单：换台先清场再拉，有数据才亮
     }
 
-    /// <summary>
-    /// 频道提示文案：频道名 + 官方节目单（现在播/接下来；官方无数据的台不出节目不硬造，一期口径）。
-    /// </summary>
-    private string BuildChannelToast(Channel ch)
+    /// <summary>亮牌（vc53 ShowLoading 口径）：换台后 0.8 秒内没出首帧才亮，明确反馈「没死机」；首帧/失败即撤。</summary>
+    private void ShowLoading(Channel ch)
     {
-        var text = new StringBuilder(ch.Name);
-        try
+        int seq = ++_loadingSeq;
+        _loadingText.Text = $"正在连接 {ch.Name}";
+        _main.PostDelayed(() =>
         {
-            if (_epg.Fetch(ch.Id) is { } epg)
-            {
-                text.Append('\n').Append("正在播: ").Append(epg.Now.Title);
-                if (epg.Next.Count > 0)
-                    text.Append('\n').Append("接下来: ").Append(epg.Next[0].Title);
-            }
+            if (seq != _loadingSeq) return; // 已换台/已出画：旧牌作废
+            if (_manager.Current is { } s && s.State is PlaybackState.Buffering or PlaybackState.Idle or PlaybackState.Reconnecting)
+                _loadingPanel.Visibility = ViewStates.Visible;
+        }, 800);
+    }
+
+    private void HideLoading()
+    {
+        _loadingSeq++;
+        _loadingPanel.Visibility = ViewStates.Gone;
+    }
+
+    // —— 底部节目单（vc53 B 包第 14 项：官方接口，没数据不硬造） ———
+
+    /// <summary>换台即刷新：先清空+隐藏旧节目单条，后台拉官方节目单，有数据才亮底部节目区并按 7 秒计时收起；
+    /// 失败/映射外/无数据静默隐藏（vc53 RefreshEpg 同口径）。</summary>
+    private void RefreshEpg(Channel ch)
+    {
+        int seq = ++_epgSeq;
+        _epgHasData = false;
+        CancelEpgAutoHide();
+        if (_epgPanel != null)
+        {
+            _epgNow!.Text = "";
+            _epgNext!.Text = "";
+            _epgPanel.Visibility = ViewStates.Gone;
         }
-        catch { /* EPG 缺失不影响播放 */ }
-        return text.ToString();
+        _ = Task.Run(() =>
+        {
+            (CntvEpgClient.Entry Now, List<CntvEpgClient.Entry> Next)? result = null;
+            try { result = _epg.Fetch(ch.EpgKey); }
+            catch { /* 官方接口失败按无数据，不硬造 */ }
+            _main.Post(() =>
+            {
+                if (seq != _epgSeq || _epgPanel is null) return; // 换台后旧节目单作废
+                if (result is null)
+                {
+                    _epgPanel.Visibility = ViewStates.Gone; // 官方无数据不出卡（不硬造）
+                    _epgHasData = false;
+                    return;
+                }
+                var (now, next) = result.Value;
+                string Clock(DateTime t) => t.ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture);
+                _epgNow!.Text = $"{ch.Name} · {Clock(now.Start)} – {Clock(now.End)}  {now.Title}"
+                    + $"  ·  还剩 {Math.Max(0, (int)Math.Round((now.End - DateTime.Now).TotalMinutes))} 分钟";
+                var upcoming = next.Take(2).ToList();
+                _epgNext!.Text = upcoming.Count > 0
+                    ? string.Join("   ", upcoming.Select(p => $"{Clock(p.Start)} {p.Title}"))
+                    : "";
+                _epgNext.Visibility = upcoming.Count > 0 ? ViewStates.Visible : ViewStates.Gone;
+                ShowEpgBar();
+            });
+        });
+    }
+
+    /// <summary>v22 第 12 项：节目单条亮出并按 7 秒无操作计时自动收起（换台刷新即重计）。</summary>
+    private void ShowEpgBar()
+    {
+        if (_epgPanel is null) return;
+        _epgHasData = true;
+        _epgPanel.Visibility = ViewStates.Visible;
+        CancelEpgAutoHide();
+        _epgHidePending = () =>
+        {
+            if (_epgPanel != null && !_listOpen) _epgPanel.Visibility = ViewStates.Gone;
+        };
+        _main.PostDelayed(_epgHidePending, EpgAutoHideMs);
+    }
+
+    private void CancelEpgAutoHide()
+    {
+        if (_epgHidePending != null)
+        {
+            _main.RemoveCallbacks(_epgHidePending);
+            _epgHidePending = null;
+        }
+    }
+
+    /// <summary>v22 第 13 项：抽屉打开先收节目单条（隐藏+停计时），节目单条压在抽屉下且不叠字。</summary>
+    private void SuppressEpgForDrawer()
+    {
+        CancelEpgAutoHide();
+        if (_epgPanel != null) _epgPanel.Visibility = ViewStates.Gone;
     }
 
     private void AttachSurfaceIfShown()
@@ -584,13 +753,14 @@ public partial class MainActivity : Activity
             _main.PostDelayed(() =>
             {
                 if (_watchdogStopped) return; // OnDestroy 后停泵（闪退镜黄⑦）：不泄漏 Activity
-                if (_onPlayerPage) _manager.Tick();
+                // 抽屉开着画面也在播：自救泵跟会话走，不跟面板键位走（vc53 画面常驻口径）
+                if (_manager.Current is not null) _manager.Tick();
                 Pump();
             }, 3000);
         }
     }
 
-    // —— 遥控器键位（一期操作逻辑：数字直达、上下换台、返回回列表） ——
+    // —— 遥控器键位（vc53 交互口径 + 2.0 频道号直达：菜单呼/收抽屉、上下换台、左右切页签、确认收藏） ——
 
     public override bool OnKeyDown([GeneratedEnum] Keycode keyCode, KeyEvent? e)
     {
@@ -600,6 +770,30 @@ public partial class MainActivity : Activity
         {
             _settingsLongFired = false;
             return true;
+        }
+
+        // 退出确认弹窗开着时按键全接管（vc53 v1.0.12）：左右键在「取消/退出」间显式切换
+        //（焦点切换不依赖系统焦点搜索，真机实测不可靠）；确认键=按当前焦点执行；返回键=第二次返回直接退出
+        if (_exitDialog != null)
+        {
+            switch (keyCode)
+            {
+                case Keycode.Back:
+                    Finish();
+                    return true;
+                case Keycode.DpadLeft:
+                    _exitNo?.RequestFocus();
+                    return true;
+                case Keycode.DpadRight:
+                    _exitYes?.RequestFocus();
+                    return true;
+                case Keycode.DpadCenter or Keycode.Enter:
+                    if (_exitDialog.Window?.CurrentFocus is TextView focused) focused.PerformClick();
+                    else _exitNo?.PerformClick(); // 焦点异常兜底：落「取消」绝不误退
+                    return true;
+                default:
+                    return true; // 其余按键弹窗期间不穿透，防止误触列表/换台
+            }
         }
 
         // 进阶调优面板：返回/菜单=关闭；确认=点当前行；
@@ -711,15 +905,42 @@ public partial class MainActivity : Activity
             return base.OnKeyDown(keyCode, e);
         }
 
+        // 频道抽屉开着（vc53 抽屉键位；画面在面板下继续）：返回=退出确认、菜单=收抽屉、左右切页签、
+        // 上下交列表焦点导航、数字键直达（2.0 保留）
+        if (_listOpen)
+        {
+            switch (keyCode)
+            {
+                case Keycode.Back or Keycode.Escape:
+                    ConfirmExit();
+                    return true;
+                case Keycode.Menu or Keycode.Settings or Keycode.Info:
+                    // 菜单键收抽屉回播放（vc53 ToggleChannelList 口径）；无台在播则起播当前台
+                    if (_manager.Current is { State: PlaybackState.Playing or PlaybackState.Buffering or PlaybackState.Reconnecting })
+                        ShowPlayer();
+                    else
+                        PlayAt(_currentIndex);
+                    return true;
+                case Keycode.DpadLeft or Keycode.DpadRight:
+                    SelectTab(ListTabs.NextTab(_tab, keyCode == Keycode.DpadRight)); // 左右键切标签（vc53 抽屉口径）
+                    return true;
+                case >= Keycode.Num0 and <= Keycode.Num9:
+                    FeedDigit((int)keyCode - (int)Keycode.Num0); // 频道号直达（2.0 保留：抽屉内也可直按）
+                    return true;
+            }
+            return base.OnKeyDown(keyCode, e); // 上下键/确认交 ListView 原生焦点导航与点击
+        }
+
+        // 播放页（抽屉收起）
         switch (keyCode)
         {
-            case Keycode.DpadUp when _onPlayerPage:
+            case Keycode.DpadUp:
                 DebouncedSwitch(Neighbor(-1));
                 return true;
-            case Keycode.DpadDown when _onPlayerPage:
+            case Keycode.DpadDown:
                 DebouncedSwitch(Neighbor(+1));
                 return true;
-            case Keycode.DpadCenter or Keycode.Enter when _onPlayerPage:
+            case Keycode.DpadCenter or Keycode.Enter:
                 // 备源耗尽（Failed）时 OK=原地重试，接退避账（收口批③）：指数退避管重试节奏
                 if (_manager.Current?.State == PlaybackState.Failed)
                 {
@@ -728,24 +949,19 @@ public partial class MainActivity : Activity
                     else
                         ShowToast(SwitchHud.RetryBackoff((int)Math.Ceiling(waitMs / 1000.0)));
                 }
-                return true;
-            case Keycode.Back or Keycode.Escape when _onPlayerPage:
-                ShowList();
-                return true;
-            case Keycode.Menu or Keycode.Settings or Keycode.Info when _onPlayerPage:
-                ShowList(); // ②键位表原样接（照 vc53）：菜单键呼列表，呼出同步无延迟（≤200ms）
-                return true;
-            case Keycode.Menu or Keycode.Settings or Keycode.Info:
-                PlayAt(_currentIndex); // 列表页菜单键=回播放（vc53 ToggleChannelList 口径）
-                return true;
-            case Keycode.DpadLeft or Keycode.DpadRight when !_onPlayerPage:
-                SelectTab(ListTabs.NextTab(_tab, keyCode == Keycode.DpadRight)); // ②左右键切标签（照 vc53 抽屉口径）
+                else
+                {
+                    ToggleFavoriteOnCurrent(); // vc53：确认键收藏当前台
+                }
                 return true;
             case Keycode.Back or Keycode.Escape:
-                ConfirmExit(); // 列表页返回：退出对话框（一期 ExitDialogFocus 口径）
+                ShowList(); // 返回键呼抽屉（vc53 回列表口径）
                 return true;
-            case >= Keycode.Num0 and <= Keycode.Num9 when _onPlayerPage:
-                FeedDigit((int)keyCode - (int)Keycode.Num0);
+            case Keycode.Menu or Keycode.Settings or Keycode.Info:
+                ShowList(); // 菜单键呼抽屉（vc53：呼出同步无延迟）
+                return true;
+            case >= Keycode.Num0 and <= Keycode.Num9:
+                FeedDigit((int)keyCode - (int)Keycode.Num0); // 频道号直达（W5 保留）
                 return true;
         }
         return base.OnKeyDown(keyCode, e);
@@ -775,7 +991,7 @@ public partial class MainActivity : Activity
         {
             if (!_onPlayerPage)
             {
-                // 列表页长按 OK = 收藏/取消收藏（一期口径）；短按交 ListView 原生点击
+                // 抽屉内长按 OK = 收藏/取消收藏（一期口径）；短按交 ListView 原生点击
                 ToggleFavoriteSelected();
                 return true;
             }
@@ -791,18 +1007,119 @@ public partial class MainActivity : Activity
         return base.OnKeyLongPress(keyCode, e);
     }
 
+    /// <summary>退出确认弹窗（v1.0.9 用户拍板；vc22 水墨浮层样式整套搬运）：窗底透明+半透明水墨面板，
+    /// 「退出」=朱砂细边框+朱砂极淡底，「取消」=纸白细边框+极淡底；焦点导航、默认焦点落「取消」、
+    /// 返回键=第二次返回直接退出（vc53 v1.0.12 口径）。</summary>
     private void ConfirmExit()
     {
+        if (_exitDialog != null) return; // 弹窗已开着：不重复弹
+        var box = new LinearLayout(this) { Orientation = Orientation.Vertical };
+        int pad = Dp(20);
+        box.SetPadding(pad * 2, pad * 2, pad * 2, pad);
+        box.SetBackgroundColor(InkTranslucency.PanelColor(this)); // 半透明水墨底，与抽屉面板同源同号
+        box.SetMinimumWidth(Dp(480)); // 居中浮层不因文案缩成窄条
+
+        var msg = new TextView(this) { Text = "确认退出 TaoLive？", TextSize = 20 };
+        msg.SetTextColor(InkTranslucency.TextPrimary(this)); // 统一 Token，暗屏自动提白
+        InkTranslucency.ApplyReadabilityShadow(msg);
+        box.AddView(msg);
+
+        var note = new TextView(this) { Text = "退出后开机自启仍可用，随时回来看", TextSize = 13 };
+        note.SetTextColor(Color.ParseColor(InkTranslucency.TextSecondary));
+        InkTranslucency.ApplyReadabilityShadow(note);
+        box.AddView(note, new LinearLayout.LayoutParams(-2, -2) { TopMargin = Dp(8) });
+
+        var buttons = new LinearLayout(this) { Orientation = Orientation.Horizontal };
+        var lp = new LinearLayout.LayoutParams(0, -2, 1f) { TopMargin = pad, LeftMargin = pad / 2, RightMargin = pad / 2 };
+        // vc22 第 11 项：按钮改 TextView 自绘——ROM Material 按钮的焦点高亮/系统着色从根上去掉
+        var no = new TextView(this) { Text = "取消（继续看）", Gravity = GravityFlags.Center };
+        no.SetPadding(pad / 2, Dp(14), pad / 2, Dp(14));
+        no.Click += (_, _) => { _exitDialog?.Dismiss(); _exitDialog = null; };
+        var yes = new TextView(this) { Text = "退出", Gravity = GravityFlags.Center };
+        yes.SetPadding(pad / 2, Dp(14), pad / 2, Dp(14));
+        yes.Click += (_, _) => { _exitDialog?.Dismiss(); _exitDialog = null; Finish(); };
+        // v1.0.10 修复④：左右键在「退出」与「取消（继续看）」间切换——显式指路，不靠焦点搜索碰运气
+        no.Id = View.GenerateViewId();
+        yes.Id = View.GenerateViewId();
+        no.NextFocusRightId = yes.Id;
+        yes.NextFocusLeftId = no.Id;
+        _exitNo = no;
+        _exitYes = yes;
+
+        // vc22 第 11 项统一按钮样式：聚焦=效果层（退出朱砂/取消纸白）+主色字；常驻=水墨深底+次色字
+        var idleBg = new ColorDrawable(Color.Argb(96, InkTranslucency.InkR, InkTranslucency.InkG, InkTranslucency.InkB));
+        void StyleDialogButton(TextView b, GradientDrawable focusDrawable)
+        {
+            b.Focusable = true;
+            b.Clickable = true;
+            b.Background = idleBg;
+            b.SetTextColor(Color.ParseColor(InkTranslucency.TextSecondary));
+            InkTranslucency.ApplyReadabilityShadow(b);
+            b.FocusChange += (_, ev) =>
+            {
+                if (ev.HasFocus) { b.Background = focusDrawable; b.SetTextColor(InkTranslucency.TextPrimary(this)); }
+                else if (b.Background == focusDrawable) { b.Background = idleBg; b.SetTextColor(Color.ParseColor(InkTranslucency.TextSecondary)); }
+            };
+        }
+        StyleDialogButton(no, InkTranslucency.FocusDrawable());
+        StyleDialogButton(yes, InkTranslucency.AccentFocusDrawable());
+        buttons.AddView(no, lp);
+        buttons.AddView(yes, lp);
+        box.AddView(buttons);
+
+        // 绑定契约 SetView/SetCancelable/Create 为可空返回：改语句式构造，窗口可空即放弃弹窗（实际不发生）
         var builder = new AlertDialog.Builder(this);
-        builder.SetTitle("TaoLive");
-        builder.SetMessage("确定退出吗？");
-        builder.SetPositiveButton("确定", (_, _) => Finish());
-        builder.SetNegativeButton("取消", (_, _) => { });
+        builder.SetView(box);
+        builder.SetCancelable(true);
         var dialog = builder.Create();
         if (dialog is null) return;
+        _exitDialog = dialog;
         dialog.Show();
-        var ok = dialog.GetButton((int)DialogButtonType.Positive);
-        ok?.RequestFocus();
+        // vc22 第 11 项：全屏自管——窗底透明+内容铺满，露出的是播放画面，与抽屉浮在画面上观感一致
+        var win = dialog.Window!;
+        win.SetBackgroundDrawable(new ColorDrawable(Color.Transparent));
+        win.SetLayout(-1, -1);
+        win.SetFlags(WindowManagerFlags.LayoutInScreen, WindowManagerFlags.LayoutInScreen);
+        no.RequestFocus(); // 默认焦点落「取消（继续看）」——防误退更稳
+        dialog.SetOnCancelListener(new DialogActionPeer(() => { _exitDialog = null; _exitNo = null; _exitYes = null; }));
+        dialog.SetOnDismissListener(new DismissActionPeer(() => { _exitDialog = null; _exitNo = null; _exitYes = null; }));
+    }
+
+    /// <summary>标准监听器适配（vc53 v1.0.9）：把 Android 弹窗回调接成普通 C# 动作，避免匿名监听类散落。</summary>
+    private sealed class DialogActionPeer : Java.Lang.Object, global::Android.Content.IDialogInterfaceOnCancelListener
+    {
+        private readonly Action _act;
+        public DialogActionPeer(Action act) { _act = act; }
+        public void OnCancel(global::Android.Content.IDialogInterface? dialog) => _act();
+    }
+
+    private sealed class DismissActionPeer : Java.Lang.Object, global::Android.Content.IDialogInterfaceOnDismissListener
+    {
+        private readonly Action _act;
+        public DismissActionPeer(Action act) { _act = act; }
+        public void OnDismiss(global::Android.Content.IDialogInterface? dialog) => _act();
+    }
+
+    // —— 收藏 ——
+
+    /// <summary>收藏当前台（vc53 确认键收藏口径）：播放页按确认即收藏/取消，信息条给结果。</summary>
+    private void ToggleFavoriteOnCurrent()
+    {
+        var ch = _channels[_currentIndex];
+        if (!_favorites.Add(ch.Id)) _favorites.Remove(ch.Id);
+        GetSharedPreferences("favorites", FileCreationMode.Private)!
+            .Edit()!.PutStringSet("ids", _favorites)!.Apply();
+        ShowToast(_favorites.Contains(ch.Id)
+            ? $"{IndexOfChannel(ch, _channels)}  {ch.Name}  ★ 已收藏"
+            : $"{IndexOfChannel(ch, _channels)}  {ch.Name}  已取消收藏");
+        if (_listOpen && _list.Adapter is ChannelListAdapter adapter) adapter.Refresh(_favorites, _tab);
+    }
+
+    private static int IndexOfChannel(Channel target, IReadOnlyList<Channel> list)
+    {
+        for (var i = 0; i < list.Count; i++)
+            if (list[i].Id == target.Id) return i;
+        return -1;
     }
 
     private void ToggleFavoriteSelected()
@@ -815,7 +1132,7 @@ public partial class MainActivity : Activity
         if (!_favorites.Add(channel.Id)) _favorites.Remove(channel.Id);
         GetSharedPreferences("favorites", FileCreationMode.Private)!
             .Edit()!.PutStringSet("ids", _favorites)!.Apply();
-        adapter.Refresh(_favorites);
+        adapter.Refresh(_favorites, _tab);
     }
 
     private int Neighbor(int delta)
@@ -824,36 +1141,75 @@ public partial class MainActivity : Activity
         return i < 0 ? i + _channels.Count : i;
     }
 
-    // —— ②五标签切换（方案书收口批②，照 vc53 抽屉口径：当前标签强调底高亮） ——
+    // —— 五标签切换（vc53 抽屉口径：当前标签朱砂底高亮） ——
 
     private void SelectTab(ListTabs.Tab tab)
     {
         if (_tab == tab) return;
         _tab = tab;
-        (_list.Adapter as ChannelListAdapter)?.Refresh(_favorites, tab);
+        if (_list.Adapter is ChannelListAdapter adapter) adapter.Refresh(_favorites, tab);
         StyleTabs();
     }
 
+    /// <summary>页签行着色（vc53 StyleTabs 同款）：当前标签朱砂底浅字，其余极淡底。</summary>
     private void StyleTabs()
     {
         for (int i = 0; i < _tabViews.Count; i++)
         {
             var active = (ListTabs.Tab)i == _tab;
             _tabViews[i].SetBackgroundColor(active
-                ? Color.Argb(255, InkTranslucency.AccentR, InkTranslucency.AccentG, InkTranslucency.AccentB) // 朱砂强调底（照 vc55 列表页强调色）
+                ? Color.ParseColor("#8A3B34") // vc53 StyleTabs：朱砂底
                 : Color.Transparent);
-            _tabViews[i].SetTextColor(Color.ParseColor(active ? "#FFFFFF" : InkTranslucency.TextSecondary));
+            _tabViews[i].SetTextColor(Color.ParseColor(active ? "#F7F5EE" : InkTranslucency.TextSecondary));
         }
+    }
+
+    /// <summary>列表宽度随内容（vc53 ApplyListWidth + ListMetrics v1.0.8 口径）：越小越好，下限 360dp、上限半屏。</summary>
+    private void ApplyListWidth(IReadOnlyList<Row> rows)
+    {
+        float density = Resources!.DisplayMetrics!.Density;
+        float Estimate(string s, float sizeDp)
+        {
+            float px = sizeDp * density;
+            float w = 0;
+            foreach (var c in s) w += c > 127 ? px : px * 0.55f;
+            return w;
+        }
+        float max = 0;
+        foreach (var r in rows)
+        {
+            if (r.Header != null)
+                max = Math.Max(max, Estimate(r.Header, 20));
+            else if (r.Channel != null)
+            {
+                // 行宽 = 左右 padding(48×2) + 号(3字符) + 间距(32) + 星(1字符) + 间距(24) + 台名 + 状态标识
+                var w = 96 + Estimate(new string('0', 3), 20) + 32
+                        + Estimate("★", 20) + 24 + Estimate(r.Channel.Name, 22)
+                        + Estimate("●", 20) + 24;
+                max = Math.Max(max, w);
+            }
+        }
+        // ListMetrics（vc53 v1.0.8）：行内容 + 48px 留白，下限 360dp，上限半屏
+        float total = max + 48 * density;
+        float lo = 360f * density;
+        float hi = Resources.DisplayMetrics.WidthPixels / 2f;
+        int width = (int)Math.Clamp(total, Math.Min(lo, hi), Math.Max(lo, hi));
+        _listPage.LayoutParameters = new FrameLayout.LayoutParams(width, FrameLayout.LayoutParams.MatchParent, GravityFlags.Left);
     }
 
     /// <summary>健康点刷新节流（方案书收口批②：更新节流 5 秒）。只读账刷新展示，不写账。</summary>
     private void OnPrecheckHealthChanged(string epgKey, ChannelHealth state)
     {
-        if (_onPlayerPage) return; // 播放页不见列表
+        if (_onPlayerPage) return; // 抽屉未开不见列表
         var now = System.Environment.TickCount64;
         if (now - _healthLastAtMs < 5000) return;
         _healthLastAtMs = now;
-        _main.Post(() => (_list.Adapter as ChannelListAdapter)?.Refresh(_favorites, _tab));
+        _main.Post(() =>
+        {
+            if (_list.Adapter is not ChannelListAdapter adapter) return;
+            adapter.Refresh(_favorites, _tab);
+            ApplyListWidth(adapter.Rows); // vc53 RefreshListStatuses：重建行即重算宽度
+        });
     }
 
     /// <summary>换台去抖入口（W8 SwitchDebouncer 口径）：窗口内连按取末次按键，停稳才真切。</summary>
@@ -894,8 +1250,7 @@ public partial class MainActivity : Activity
         _main.PostDelayed(_digitCommit, 1200);
     }
 
-    private static void HideToastCore() { }
-
+    /// <summary>信息条（vc53 InfoBar 口径）：顶部居中，自动隐藏；文案即给即显。</summary>
     private void ShowToast(string text)
     {
         _toast.Text = text;
@@ -904,7 +1259,7 @@ public partial class MainActivity : Activity
         _main.PostDelayed(_toastHide, 2200);
     }
 
-    /// <summary>失败终态驻留空态（v77）：显示至离开失败态；仅播放页可见（列表页整页覆盖，无残留问题）。</summary>
+    /// <summary>失败终态驻留空态（v77）：显示至离开失败态；样式照 vc53 水墨面板口径。</summary>
     private void ShowEmptyState(string text)
     {
         _emptyState.Text = text;
@@ -917,13 +1272,16 @@ public partial class MainActivity : Activity
         _emptyState.Visibility = ViewStates.Invisible;
     }
 
-    // —— 列表适配器：收藏置顶组 + 分类头 + 编号台名（一期样式：纯文字，编号在左） ——
+    // —— 列表适配器（vc53 ChannelAdapter 皮整套搬运）：
+    //      真实台标（无台标=首字占位）+ 编号 + 星标 + 台名 + 健康点；当前台整行强调底；
+    //      分组行/空态行 vc53 同款着色。 ——
 
-    private sealed class Row(string title, bool isHeader, Channel? channel)
+    private sealed class Row
     {
-        public readonly string Title = title;
-        public readonly bool IsHeader = isHeader;
-        public readonly Channel? Channel = channel;
+        public string? Header;      // 分组行显示文本（频道行 null）
+        public bool IsNote;         // 空态行（次色平铺，不作分组标题渲染）
+        public Channel? Channel;    // 频道行归属台
+        public bool DeadOnly;       // 连不上置底组内台（只能看不能切）
     }
 
     private sealed class ChannelListAdapter : BaseAdapter
@@ -931,60 +1289,81 @@ public partial class MainActivity : Activity
         private readonly Context _ctx;
         private readonly IReadOnlyList<Channel> _channels;
         private readonly Func<Channel, ChannelHealth> _markOf; // ④健康点：只读账（预检 MarkOf 三态）
+        private readonly Func<string?> _currentId;
         private HashSet<string> _favorites;
         private ListTabs.Tab _tab;
         private List<Row> _rows;
 
         public ChannelListAdapter(Context ctx, IReadOnlyList<Channel> channels, HashSet<string> favorites,
-            Func<Channel, ChannelHealth> markOf, ListTabs.Tab tab = ListTabs.Tab.All)
+            Func<Channel, ChannelHealth> markOf, Func<string?> currentId, ListTabs.Tab tab = ListTabs.Tab.All)
         {
             _ctx = ctx;
             _channels = channels;
             _favorites = favorites;
             _markOf = markOf;
+            _currentId = currentId;
             _tab = tab;
-            _rows = BuildRows(channels, favorites, tab);
+            _rows = BuildRows(channels, favorites, tab, markOf);
         }
 
-        private static List<Row> BuildRows(IReadOnlyList<Channel> channels, HashSet<string> favorites, ListTabs.Tab tab)
+        /// <summary>当前装配的行（宽度随内容重算用）。</summary>
+        public IReadOnlyList<Row> Rows => _rows;
+
+        /// <summary>行装配（vc53 DrawerSupport.BuildRows 口径一比一）：
+        /// 收藏标签=收藏顺次铺开+空态行；其余标签=收藏成组置顶（按收藏排序），无信号分组收口（全部标签），
+        /// 装配完无任何频道行补空态行（不白屏）。</summary>
+        private static List<Row> BuildRows(IReadOnlyList<Channel> channels, HashSet<string> favorites,
+            ListTabs.Tab tab, Func<Channel, ChannelHealth> markOf)
         {
             var rows = new List<Row>();
-            // ②五标签过滤（照 vc53 DrawerSupport 口径；收藏标签空态照 vc53 v22 第 6/15 项，不白屏）
-            var visible = ListTabs.Filter(tab, channels, c => favorites.Contains(c.Id));
-            if (visible.Count == 0)
+            var favOrdered = channels.Where(c => favorites.Contains(c.Id)).ToList();
+
+            IEnumerable<Channel> baseList = tab switch
             {
-                rows.Add(new Row(tab == ListTabs.Tab.Favorite
-                    ? "收藏夹是空的，长按 OK 收藏频道；按菜单键回播放" : "该分类暂无频道，按菜单键回播放", true, null));
+                // vc53 v22 第 7 项（老板拍板）：CGTN 并回「央视」；专项随拍板并入央视口径；
+                // 「地方台」只放真城市台（City/自有源），不再兜杂烩
+                ListTabs.Tab.Cctv => channels.Where(c => c.Category is ChannelCategory.Cctv or ChannelCategory.Cgtn or ChannelCategory.Special),
+                ListTabs.Tab.Satellite => channels.Where(c => c.Category == ChannelCategory.Provincial),
+                ListTabs.Tab.Local => channels.Where(c => c.Category is ChannelCategory.City or ChannelCategory.UserSource),
+                _ => channels,
+            };
+            var baseL = baseList.Where(c => !c.Unavailable).ToList();
+
+            if (tab == ListTabs.Tab.Favorite)
+            {
+                foreach (var c in favOrdered) rows.Add(new Row { Channel = c });
+                if (favOrdered.Count == 0)
+                    rows.Add(new Row { Header = "收藏夹是空的，对着频道按确认可收藏", IsNote = true }); // v22 第 6/15 项
                 return rows;
             }
-            // 收藏置顶组（一期 FavoriteStore 口径：收藏非空才出组，置顶直达；收藏标签下整列即收藏）
-            var favs = visible.Where(c => favorites.Contains(c.Id)).ToList();
-            if (favs.Count > 0)
+
+            // 收藏成组置顶（按收藏顺序结果）
+            if (baseL.Any(c => favorites.Contains(c.Id)))
             {
-                rows.Add(new Row("收藏", true, null));
-                rows.AddRange(favs.Select(ch => new Row($"★  {ch.Name}", false, ch)));
+                rows.Add(new Row { Header = "★ 收藏" });
+                foreach (var c in baseL.Where(c => favorites.Contains(c.Id))) rows.Add(new Row { Channel = c });
             }
-            foreach (var cat in ChannelTable.CategoryOrder)
+            foreach (var c in baseL.Where(c => !favorites.Contains(c.Id)))
+                rows.Add(new Row { Channel = c });
+
+            // 全部标签收口：无信号分组置底
+            if (tab == ListTabs.Tab.All)
             {
-                var group = visible.Where(c => c.CategoryName == cat).ToList();
-                if (group.Count == 0) continue;
-                rows.Add(new Row(cat, true, null));
-                // 编号=整表顺序（一期口径：编号永久直达）
-                rows.AddRange(group.Select(ch => new Row($"{IndexOfChannel(channels, ch) + 1}  {ch.Name}", false, ch)));
+                var off = baseL.Where(c => markOf(c) == ChannelHealth.Dead).ToList();
+                if (off.Count > 0)
+                {
+                    rows.Add(new Row { Header = "── 无信号分组 ──" });
+                    foreach (var c in off) rows.Add(new Row { Channel = c, DeadOnly = true });
+                }
             }
+
+            // v22 第 6/15 项：装配完没有任何频道行 → 空态提示
+            if (!rows.Any(r => r.Channel != null))
+                rows.Add(new Row { Header = "该分类暂无频道", IsNote = true });
             return rows;
         }
 
-        private static int IndexOfChannel(IReadOnlyList<Channel> list, Channel c)
-        {
-            for (var i = 0; i < list.Count; i++)
-            {
-                if (list[i].Id == c.Id) return i;
-            }
-            return -1;
-        }
-
-        /// <summary>行对应的频道；分类头行返回空。</summary>
+        /// <summary>行对应的频道；分组头行返回空。</summary>
         public Channel? ChannelAt(int position) =>
             position >= 0 && position < _rows.Count ? _rows[position].Channel : null;
 
@@ -996,60 +1375,129 @@ public partial class MainActivity : Activity
             return -1;
         }
 
-        /// <summary>收藏/标签变化后重建行（保持选中位置不跳）。</summary>
+        /// <summary>收藏/标签/健康账变化后重建行（保持选中位置不跳）。</summary>
         public void Refresh(HashSet<string> favorites, ListTabs.Tab? tab = null)
         {
             _favorites = favorites;
             _tab = tab ?? _tab;
-            _rows = BuildRows(_channels, favorites, _tab);
+            _rows = BuildRows(_channels, favorites, _tab, _markOf);
             NotifyDataSetChanged();
         }
 
         public override int Count => _rows.Count;
-        public override Java.Lang.Object GetItem(int position) => new Java.Lang.String(_rows[position].Title);
+        public override Java.Lang.Object GetItem(int position) => new Java.Lang.String(position.ToString());
         public override long GetItemId(int position) => position;
+
         public override View GetView(int position, View? convertView, ViewGroup? parent)
         {
             var row = _rows[position];
-            TextView tv;
-            if (convertView is TextView existing)
+            var ctx = _ctx;
+            var line = convertView as LinearLayout ?? new LinearLayout(ctx) { Orientation = Orientation.Horizontal };
+            line.RemoveAllViews();
+            line.SetPadding(48, 20, 48, 20);
+
+            void Style(TextView tv, string color, float size)
             {
-                tv = existing;
+                tv.SetTextColor(Color.ParseColor(color));
+                tv.TextSize = size;
+            }
+
+            if (row.Header != null)
+            {
+                var h = new TextView(ctx) { Text = row.Header };
+                bool isNote = row.IsNote; // vc53 v22 第 15 项：空态行次色平铺，不作分组标题渲染
+                Style(h, isNote ? InkTranslucency.TextSecondary : "#A9CFEC", isNote ? 15 : 18);
+                InkTranslucency.ApplyReadabilityShadow(h);
+                line.AddView(h);
+                line.SetBackgroundColor(Color.Transparent);
+                return line;
+            }
+
+            var ch = row.Channel!;
+            var res = ctx.Resources!;
+            var density = res.DisplayMetrics!.Density;
+            // B 包第 12 项：行首真实台标（vc53 同源内置资源）；无内置台标→首字占位；无信号行不放台标
+            var logoRes = ChannelLogoMap.ResourceName(ch.Name);
+            if (!row.DeadOnly && logoRes != null)
+            {
+                try
+                {
+                    var resId = res.GetIdentifier(logoRes, "drawable", ctx.PackageName);
+                    if (resId != 0)
+                    {
+                        var img = new ImageView(ctx);
+                        img.SetAdjustViewBounds(true);
+                        img.SetMaxHeight((int)(28 * density));
+                        img.SetImageResource(resId);
+                        line.AddView(img, new LinearLayout.LayoutParams(-2, (int)(28 * density))
+                        { RightMargin = 16, Gravity = GravityFlags.CenterVertical });
+                    }
+                }
+                catch { /* 台标渲染失败不碍选台 */ }
+            }
+            if (!row.DeadOnly && logoRes == null)
+            {
+                var ph = new TextView(ctx) { Text = ch.Name.Substring(0, 1) };
+                Style(ph, InkTranslucency.TextSecondary, 14);
+                ph.Gravity = GravityFlags.Center;
+                ph.SetBackgroundColor(Color.ParseColor("#3A4750"));
+                line.AddView(ph, new LinearLayout.LayoutParams((int)(40 * density), (int)(28 * density))
+                { RightMargin = 16, Gravity = GravityFlags.CenterVertical });
+            }
+            if (row.DeadOnly)
+            {
+                line.AddView(new View(ctx), new LinearLayout.LayoutParams(0, 1) { RightMargin = 16 }); // 无信号行行首不放台标（v4 定稿状态2）
+            }
+
+            var num = new TextView(ctx) { Text = $"{IndexInTable(ch),3}", Gravity = GravityFlags.Right };
+            Style(num, InkTranslucency.TextSecondary, 20);
+            InkTranslucency.ApplyReadabilityShadow(num);
+            num.SetPadding(0, 0, 32, 0);
+            line.AddView(num);
+
+            var star = new TextView(ctx) { Text = _favorites.Contains(ch.Id) ? "★" : " " };
+            Style(star, "#F0C563", 20);
+            InkTranslucency.ApplyReadabilityShadow(star);
+            star.SetPadding(0, 0, 24, 0);
+            line.AddView(star);
+
+            var name = new TextView(ctx) { Text = ch.Name };
+            var isCur = _currentId() == ch.Id;
+            Style(name, isCur ? "#FFFFFF" : InkTranslucency.TextSecondary, 22);
+            InkTranslucency.ApplyReadabilityShadow(name);
+            if (isCur)
+            {
+                line.SetBackgroundColor(InkTranslucency.CurrentRowFill(ctx)); // v1.0.9 第③项：当前台整行强调底
+                name.Typeface = Typeface.DefaultBold!;
             }
             else
             {
-                tv = new TextView(_ctx)
-                {
-                    TextSize = row.IsHeader ? 18f : 26f,
-                };
-                tv.SetPadding(40, 22, 40, 22);
+                line.SetBackgroundColor(Color.Transparent);
             }
-            tv.Text = row.Title;
-            if (row.Channel is { } rowChannel)
+            line.AddView(name);
+
+            // 可连状态标识（v1.0.8 预检握手）：绿点可用 · 灰点检测中/未探 · 红叉连不上
+            var (mark, color) = _markOf(ch) switch
             {
-                // ④列表健康点（方案书收口批②）：绿●可用/灰●检测中或未探/红✕连不上（色值照 vc53 v1.0.8 口径）。
-                // 点染在行首字符上（Spannable），行结构不变，纯读账展示。
-                var (markChar, markColor) = _markOf(rowChannel) switch
-                {
-                    ChannelHealth.Alive => ("●", "#7ED182"),
-                    ChannelHealth.Dead => ("✕", "#E97F7F"),
-                    ChannelHealth.Checking => ("●", "#B5C4D0"),
-                    _ => ("●", "#8894A0"),
-                };
-                var span = new Android.Text.SpannableString($"{markChar}  {row.Title}");
-                span.SetSpan(new Android.Text.Style.ForegroundColorSpan(Color.ParseColor(markColor)),
-                    0, 1, Android.Text.SpanTypes.ExclusiveExclusive);
-                span.SetSpan(new Android.Text.Style.ForegroundColorSpan(Color.White),
-                    1, span.Length(), Android.Text.SpanTypes.ExclusiveExclusive);
-                tv.TextFormatted = span;
-            }
-            else
-            {
-                tv.Text = row.Title;
-            }
-            tv.SetTextColor(Color.White);
-            tv.SetBackgroundColor(row.IsHeader ? Color.Argb(255, 20, 24, 32) : Color.Transparent);
-            return tv;
+                ChannelHealth.Alive => ("●", "#7ED182"),
+                ChannelHealth.Dead => ("✕", "#E97F7F"),
+                ChannelHealth.Checking => ("●", "#B5C4D0"),
+                _ => ("●", "#8894A0"),
+            };
+            var dot = new TextView(ctx) { Text = mark };
+            Style(dot, color, 18);
+            InkTranslucency.ApplyReadabilityShadow(dot);
+            dot.SetPadding(24, 0, 0, 0);
+            line.AddView(dot);
+            return line;
+        }
+
+        /// <summary>编号=整表顺序（一期口径：编号永久直达，FeedDigit 同款语义）。</summary>
+        private int IndexInTable(Channel c)
+        {
+            for (var i = 0; i < _channels.Count; i++)
+                if (_channels[i].Id == c.Id) return i + 1;
+            return 0;
         }
     }
 }

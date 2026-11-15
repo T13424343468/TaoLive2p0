@@ -13,13 +13,9 @@
   <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
   <application android:label="TaoLive" android:icon="@mipmap/ic_launcher"
                android:banner="@drawable/tv_banner"
-               android:theme="@android:style/Theme.Black.NoTitleBar.Fullscreen"
+               android:theme="@style/TaoLiveTheme"
                android:usesCleartextTraffic="true">
-    <activity android:name="TaoLive.Tv.MainActivity" android:exported="true">
-      <intent-filter>
-        <action android:name="android.intent.action.MAIN" />
-        <category android:name="android.intent.category.LAUNCHER" />
-      </intent-filter>
-    </activity>
+    <!-- 主入口 Activity 不在清单声明（vc53 口径）：MainLauncher 特性已在壳层注册，
+         清单再声明一次=两个启动器入口=桌面出两个图标（真机 11-15 老板镜实锤） -->
   </application>
 </manifest>

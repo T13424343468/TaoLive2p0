@@ -107,7 +107,7 @@ public sealed class ExoPlayerPlayer : IPlayer
         if (!string.IsNullOrEmpty(params_.Channel.Name)) CurrentChannelName = params_.Channel.Name;
         if (_streamResolver is null)
         {
-            StartMedia(params_.Endpoint.Url);
+            StartMedia(params_.Endpoint.Url, params_.Channel);
             return;
         }
         // 取票口：异步换真实流，回到主线程再挂 MediaItem（ExoPlayer 要求在其创建线程调用）
@@ -128,15 +128,29 @@ public sealed class ExoPlayerPlayer : IPlayer
                 if (string.IsNullOrEmpty(url))
                     HandleError("RESOLVE_FAILED", $"取流失败（{channelName ?? channelKey ?? "channel"}）");
                 else
-                    StartMedia(url);
+                    StartMedia(url, pending.Channel);
             });
         });
     }
 
-    private void StartMedia(string url)
+    private void StartMedia(string url, TaoLive.Model.Channel? channel = null)
     {
         try
         {
+            // 请求头纪律（vc53 同口径搬回）：频道表/源登记的 UA/Referer 必须带到取流请求上，
+            // 否则带校验的源在 ExoPlayer 默认 UA 下直接拒连（真机 11-15 全线路 player error 嫌疑主线）。
+            AndroidX.Media3.ExoPlayer.Source.DefaultMediaSourceFactory? sourceFactory = null;
+            var ua = string.IsNullOrEmpty(channel?.UserAgent) ? null : channel.UserAgent;
+            var referer = string.IsNullOrEmpty(channel?.Referer) ? null : channel.Referer;
+            if (ua is not null || referer is not null)
+            {
+                var httpFactory = new AndroidX.Media3.DataSource.DefaultHttpDataSource.Factory();
+                if (ua is not null) httpFactory.SetUserAgent(ua);
+                if (referer is not null)
+                    httpFactory.SetDefaultRequestProperties(new Dictionary<string, string> { ["Referer"] = referer });
+                sourceFactory = new AndroidX.Media3.ExoPlayer.Source.DefaultMediaSourceFactory(httpFactory);
+                _player.SetMediaSourceFactory(sourceFactory);
+            }
             var builder = new AndroidX.Media3.Common.MediaItem.Builder();
             builder.SetUri(Android.Net.Uri.Parse(url));
             if (IsHls(url))
@@ -294,7 +308,12 @@ public sealed class ExoPlayerPlayer : IPlayer
         public void OnPlayerError(AndroidX.Media3.Common.PlaybackException? error)
         {
             var code = error?.ErrorCodeName ?? "UNKNOWN";
-            var message = error?.Message ?? "unknown playback error";
+            // 真机诊断口径（11-15 老板镜）：诊断页只看到「player error」查不到因，
+            // 补内核原始码+根因链，一键清理页可见（ErrorCodeName/Cause 链全落）。
+            var cause = error?.Cause?.Message;
+            var message = error?.Message is { } m
+                ? (cause is { } c && c != m ? $"{m} | cause={c}" : m)
+                : "unknown playback error";
             _owner.HandleError(code, message);
         }
     }

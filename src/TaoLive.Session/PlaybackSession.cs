@@ -322,7 +322,8 @@ public sealed class PlaybackSession
             return;
         }
         Transition(PlaybackState.Failed, $"player error {code}");
-        TryFailover("player error");
+        // 换源账随真实码（真机诊断 11-15）：诊断页换源行能看到具体错误码，不再只剩裸词
+        TryFailover($"player error {code}");
     }
 
     private void TryFailover(string reason)
