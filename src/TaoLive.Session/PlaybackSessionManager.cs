@@ -160,6 +160,7 @@ public sealed class PlaybackSessionManager
         var session = _sessionFactory();
         WireSession(session);
         Current = session;
+        session.IsForeground = true; // vc69 让道修：车道门控只认前台会话（管理器统一维护）
         RaiseCurrentChanged(session);
         return session;
     }
@@ -242,6 +243,7 @@ public sealed class PlaybackSessionManager
             sb.AttachSurface(cur.SurfaceHandle);
             sb.ResumePlayback(); // 备台静音攒流至此恢复出声出画（缓冲攒流不中断）
             Current = sb;
+            sb.IsForeground = true; // vc69 让道修：接管前台，门控归当前会话（让位会话已在 Supersede 清旗）
             Standby = null;
             _supersededAtMs.Remove(channel.Id); // 目标台接管前台，超龄账清零
             Touch(channel.Id);
@@ -276,6 +278,7 @@ public sealed class PlaybackSessionManager
         _supersededAtMs.Remove(channel.Id); // 目标台接管前台，超龄账清零
         session.ChangeChannel(channel);
         Current = session;
+        session.IsForeground = true; // vc69 让道修：接管前台，门控归当前会话（旧台已在 Supersede 清旗）
         EvictIfOverCapacity();
         RaiseCurrentChanged(session);
         return session;

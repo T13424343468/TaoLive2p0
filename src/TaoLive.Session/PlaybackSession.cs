@@ -49,6 +49,27 @@ public sealed class PlaybackSession
     // 按库存线预防介入（说明线是好的、刚才是瞬时欠载）；从没攒满过=线本来就灌不动，宁稳勿烧，
     // 真卡流交看门狗（进度感知窗）。卡流次数判据（#26）不受限。
     private bool _inventoryEverFilled;
+    // vc69 坏票不自焚账（真机 2026-11-16 00:08 实锤：缓存过期票 URL 4xx → 4 条线数秒烧光 → 全线路不可达）：
+    // 本线路已否用过「作废坏票原地换新票」的一次机会（每线路一次，防死循环）；_ticketRetrySinceMs=重试宽限窗起点。
+    private bool _freshTicketRetried;
+    private long? _ticketRetrySinceMs;
+
+    /// <summary>坏票重试宽限窗（vc69）：零增长判死账在此窗内让路——换新票全程=取票 HttpClient 超时
+    /// 最长 5 秒 + 内核连接超时 8 秒 + 余量 3 秒=16 秒（期满了还在零增长才是真死，照常判死切线）。</summary>
+    public static readonly TimeSpan TicketRetryGrace = TimeSpan.FromSeconds(16);
+
+    /// <summary>
+    /// vc69 坏票不自焚：会话层在报 HTTP 状态错/取流失败前可先作废该端点换票缓存
+    /// （参数：频道 Id（缓存键）、坏票端点）。壳层接 TicketResolver.Invalidate；未接线为空操作（不启用重试）。
+    /// </summary>
+    public static Action<string, SourceEndpoint>? TicketCacheInvalidator { get; set; }
+
+    /// <summary>
+    /// vc69 让道修·前台标记：后台车道门控（BackgroundLane 首帧门控/播放降速档）只认前台会话——
+    /// 由管理器在切台/让位时维护。热备攒流与让位会话的状态迁移不得再翻动全局门（真机 00:07-00:09 实锤：
+    /// 7 个后台会话翻状态把前台起播期的零后台网络门重新打开，预检探针每秒滚进首帧窗口抢道）。
+    /// </summary>
+    public bool IsForeground { get; set; }
 
     public PlaybackSession(IPlayer player, IClock clock)
     {
@@ -79,8 +100,15 @@ public sealed class PlaybackSession
     }
 
     /// <summary>起播超时（看门狗阈值）：缓冲超过此时长即视为断流，走备源切换。
-    /// #74 切台提速（2026-11-15 老板定值）：15 秒→3 秒——死源撞满钟是切台黑屏 8-10 秒主账，快切快走。</summary>
-    public static TimeSpan DefaultOpenTimeout { get; } = TimeSpan.FromSeconds(3);
+    /// #74 切台提速（2026-11-15 老板定值）：15 秒→3 秒——死源撞满钟是切台黑屏 8-10 秒主账，快切快走。
+    /// vc68 三轮（2026-11-16 真机实锤 3004ms≥3000ms·0ms 存货·四线全灭）：判死窗改由重入门槛推导
+    /// （StartupThreshold=12 秒）——本窗必须同时盖过两个账：
+    /// ①内核连接超时：Media3 默认连接超时 8 秒，窗≤8 秒时内核的报错快刀永远没机会先出手，全被 3 秒误杀
+    /// （vc66/vc67/vc68 三次真机同款死局，台账在案：判死窗必须>门槛，慢热源要有证明时间）；
+    /// ②冷连接全程：解析+连服+握手+取清单+取首段，老盒子实测可到 13-16 秒出画基线（vc66 实锤）。
+    /// 取 12 秒：内核报错快刀（8 秒）能先出手、冷连接有证明时间、仍&lt;慢灌窗（21 秒）不与 #74 提速意图对着干；
+    /// 真死快刀不走此账——内核报错信号直判不变。</summary>
+    public static TimeSpan DefaultOpenTimeout { get; } = PrefetchCurve.StartupThreshold;
 
     /// <summary>本会话的起播超时阈值，测试可调。</summary>
     public TimeSpan OpenTimeout { get; set; } = DefaultOpenTimeout;
@@ -176,15 +204,26 @@ public sealed class PlaybackSession
         {
             _reconnectingSinceMs = null;
         }
-        // 后台车道门控接线（白屏镜红①自救链 11-15 修）：门控此前生产零置位——预检/健康点/断网恢复
-        // 整链在真机死锁（测试专门放行防无限等，生产漏接线）。接线口径按车道令原语义：
+        // vc69 让道修（真机 00:07-00:09 实锤，老板镜「是不是没给当前播放让道」=对）：
+        // 车道门控此前被每个会话的迁移写同一面全局旗——热备/让位会话一翻状态就把前台起播期的
+        // 「零后台网络」门重新打开，预检探针每秒滚进首帧窗口抢道。改口径：门控只认前台会话，
+        // 非前台会话（热备攒流/让位）一律不碰门。前台语义照车道令原设计：
         // 起播/换台/自救过渡期（Buffering/Reconnecting）静默零后台网络；首帧落地（Playing）恢复放行；
         // 失败/空闲（Failed/Idle，无画面在播）回空闲档放行——断网期预检照跑，恢复沿才回得来。
-        if (next == PlaybackState.Buffering || next == PlaybackState.Reconnecting)
-            BackgroundLane.SetFirstFrameLanded(false);
-        else
-            BackgroundLane.SetFirstFrameLanded(true);
-        BackgroundLane.SetPlaying(next == PlaybackState.Playing);
+        if (IsForeground)
+        {
+            if (next == PlaybackState.Buffering || next == PlaybackState.Reconnecting)
+                BackgroundLane.SetFirstFrameLanded(false);
+            else
+                BackgroundLane.SetFirstFrameLanded(true);
+            BackgroundLane.SetPlaying(next == PlaybackState.Playing);
+        }
+        if (next == PlaybackState.Playing)
+        {
+            // vc69 坏票重试收账：换新票成功出画，宽限窗与每线路重试机会一并复位（后续卡流另有预算）
+            _ticketRetrySinceMs = null;
+            _freshTicketRetried = false;
+        }
         var fromState = _state;
         _state = next;
         // 起播打点（真机反馈批·埋点补充 2026-11-15）：起播/换台/换源指令到首帧的耗时账——
@@ -217,6 +256,8 @@ public sealed class PlaybackSession
         if (_endpointIndex < 0) _endpointIndex = 0; // 未入队端点（闪退镜黄④ 11-15）：记账归 0，防 -1 越界 TryFailover
         _preferLowLatency = p.PreferLowLatency;
         _proactiveCount = 0; // vc67：新一轮起播（含 OK 重试）重给预防介入预算
+        _freshTicketRetried = false; // vc69：新一轮起播重记坏票重试机会
+        _ticketRetrySinceMs = null;
         Transition(PlaybackState.Buffering, "start requested");
         _player.Play(p);
         ReattachSurface();
@@ -253,6 +294,8 @@ public sealed class PlaybackSession
         if (QueueOrderer is { } orderer) _queue = orderer(channel, _queue).ToList(); // #74 健康排序：备源入队后整体重排，死源沉底
         _endpointIndex = 0;
         FailoverCount = 0;
+        _freshTicketRetried = false; // vc69：换台重记坏票重试机会
+        _ticketRetrySinceMs = null;
         _proactiveCount = 0; // vc67：换台重给预防介入预算
         _stallTimes.Clear(); // 欠载趋势账随换台清零（老板令 #26）：账只记本台画质，不跟人走
         Transition(PlaybackState.Buffering, "change channel");
@@ -286,6 +329,8 @@ public sealed class PlaybackSession
         }
         _endpointIndex = endpointIndex;
         FailoverCount = 0;
+        _freshTicketRetried = false; // vc69：手动换线重记坏票重试机会
+        _ticketRetrySinceMs = null;
         _proactiveCount = 0; // vc67：手动换线=老板意图，重给预防介入预算
         Transition(PlaybackState.Buffering, "manual line switch");
         _player.Play(new PlaybackParams(_channel, _queue[endpointIndex], _preferLowLatency));
@@ -392,7 +437,7 @@ public sealed class PlaybackSession
         if (_state == PlaybackState.Buffering
             && _bufferingSinceMs is { } started)
         {
-            var windowMs = WatchdogWindowMs(nowMs, SlowStartWindow);
+            var windowMs = WatchdogWindowMs(nowMs, SlowStartWindow, started);
             if (nowMs - started >= windowMs)
             {
                 // 看门狗打点（埋点补充 2026-11-15）：此前看门狗触发完全静默，真机只能看到「换源」结果看不到因——
@@ -406,7 +451,7 @@ public sealed class PlaybackSession
         if (_state == PlaybackState.Reconnecting
             && _reconnectingSinceMs is { } stalled)
         {
-            var windowMs = WatchdogWindowMs(nowMs, SlowRecoveryWindow);
+            var windowMs = WatchdogWindowMs(nowMs, SlowRecoveryWindow, stalled);
             if (nowMs - stalled >= windowMs)
             {
                 SessionTrace.Emit($"[看门狗] {DescribeChannel()} 卡流超时 {nowMs - stalled}ms≥{windowMs}ms，转备源自救（原线路 {CurrentLineIndex + 1}/{LineCount}，{_watchdogLastBufferedMs}ms 存货）");
@@ -418,9 +463,12 @@ public sealed class PlaybackSession
         return false;
     }
 
-    /// <summary>vc67 慢灌放宽窗（起播）：固定 15 秒（vc68 与首帧门槛解耦：vc68 首帧门槛降至 0.5 秒先出画，
-    /// 若仍按门槛×3 会缩成 1.5 秒——慢灌源带宽 ≥1/3 流码率即灌得到，放宽窗口径不变）。</summary>
-    public static readonly TimeSpan SlowStartWindow = TimeSpan.FromSeconds(15);
+    /// <summary>vc67 慢灌放宽窗（起播）：首帧门槛×7（3×7=21 秒；vc68 三轮改推导式——门槛再定标自动跟随）。
+    /// ×7 定标依据：vc66 真机出画基线 13-16 秒，×5=15 秒盖不住 16 秒尾巴（差 1 秒误杀最慢盒子），
+    /// ×7=21 秒盖住基线留 5 秒余量，仍&lt;慢恢复窗 24 秒，三窗次序不打架。
+    /// 口径：慢灌源带宽 ≥1/3 流码率即灌得到。</summary>
+    public static readonly TimeSpan SlowStartWindow =
+        TimeSpan.FromMilliseconds(PrefetchCurve.FirstFrameGate.TotalMilliseconds * 7);
 
     /// <summary>vc67 慢灌放宽窗（重灌）：卡后重入门槛 12s×2=24 秒——重灌要满 12 秒媒体，带宽 ≥1/2 流码率即灌得到。</summary>
     public static readonly TimeSpan SlowRecoveryWindow =
@@ -437,11 +485,21 @@ public sealed class PlaybackSession
         }
     }
 
-    /// <summary>vc67 看门狗窗：3 秒内有缓冲增长→放宽窗（慢灌让路）；零增长→#74 的 3 秒快切。</summary>
-    private long WatchdogWindowMs(long nowMs, TimeSpan slowWindow)
+    /// <summary>vc67 看门狗窗：3 秒内有缓冲增长→放宽窗（慢灌让路）；零增长→判死窗（vc68 三轮改 12 秒推导值）。
+    /// vc69 坏票宽限：换新票期间（取票网络耗时最长 5 秒+余量）宽限窗内不判死，期满恢复原窗。</summary>
+    private long WatchdogWindowMs(long nowMs, TimeSpan slowWindow, long startedMs)
     {
         bool flowing = _lastBufferProgressAtMs is { } t && nowMs - t < 3_000;
-        return (long)Math.Max(OpenTimeout.TotalMilliseconds, flowing ? slowWindow.TotalMilliseconds : 0);
+        long windowMs = (long)Math.Max(OpenTimeout.TotalMilliseconds, flowing ? slowWindow.TotalMilliseconds : 0);
+        if (_ticketRetrySinceMs is { } t0)
+        {
+            long graceEnd = t0 + (long)TicketRetryGrace.TotalMilliseconds;
+            if (nowMs < graceEnd)
+            {
+                windowMs = Math.Max(windowMs, graceEnd - startedMs); // 宽限终点前看门狗让路
+            }
+        }
+        return windowMs;
     }
 
     /// <summary>预防性换源库存线（老板令 #24）：Playing 期库存跌破起播下限（BufferInventory.TargetMs=7 秒）
@@ -529,6 +587,7 @@ public sealed class PlaybackSession
     public void Supersede()
     {
         _active = false;
+        IsForeground = false; // vc69 让道修：让位即失前台，门控从此不碰（热备/让位会话不翻全局车道门）
         DetachSurface();
         if (_state is not PlaybackState.Idle)
         {
@@ -560,6 +619,24 @@ public sealed class PlaybackSession
         {
             return;
         }
+        // vc69 坏票不自焚（真机 2026-11-16 00:08 实锤：缓存过期票 URL 4xx → 4 条线数秒烧光 → 全线路不可达）：
+        // HTTP 状态错（坏票/签名失效）先原地作废票据换新票重试一次，不烧线不切台。
+        // 每线路一次（TryFailover 切线时重记），防坏票死循环；未接作废器（测试/壳层未接）不启用重试。
+        if (code.Contains("HTTP", StringComparison.OrdinalIgnoreCase)
+            && !_freshTicketRetried
+            && TicketCacheInvalidator is { } invalidate
+            && _channel is { } retryChannel
+            && CurrentEndpoint is { } badEndpoint)
+        {
+            _freshTicketRetried = true;
+            _ticketRetrySinceMs = _clock.NowMs;
+            invalidate(retryChannel.Id, badEndpoint);
+            SessionTrace.Emit($"[坏票] {DescribeChannel()} 线路{CurrentLineIndex + 1} HTTP 状态错（{code}），作废票据原地换新票重试（宽限窗 {TicketRetryGrace.TotalSeconds:0}s）");
+            Transition(PlaybackState.Failed, $"bad ticket {code}");
+            _player.Play(new PlaybackParams(retryChannel, badEndpoint, _preferLowLatency));
+            ReattachSurface();
+            return;
+        }
         Transition(PlaybackState.Failed, $"player error {code}");
         // 换源账随真实码（真机诊断 11-15）：诊断页换源行能看到具体错误码，不再只剩裸词
         TryFailover($"player error {code}");
@@ -580,6 +657,8 @@ public sealed class PlaybackSession
         var from = _queue[_endpointIndex];
         _endpointIndex = next;
         FailoverCount++;
+        _freshTicketRetried = false; // vc69：坏票重试机会每线路一次，切线重记
+        _ticketRetrySinceMs = null;
         _lastFailoverAtMs = _clock.NowMs; // 预防性介入冷却账起算（老板令 #24）
         Transition(PlaybackState.Buffering, $"failover after {reason}");
         _player.Play(new PlaybackParams(_channel, _queue[next], _preferLowLatency));

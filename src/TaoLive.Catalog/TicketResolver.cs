@@ -103,6 +103,15 @@ public sealed class TicketResolver
         lock (_cacheGate) { _cache[key] = (url, nowEpoch); }
     }
 
+    /// <summary>
+    /// vc69 坏票不自焚：单频道单端点票据作废（会话层报 HTTP 状态错时经壳层接线调用，
+    /// 原地换新票重试）。只清票据缓存，退避账不动（防取票风暴，fix23 同口径）。
+    /// </summary>
+    public void Invalidate(string channelKey, string endpointUrl)
+    {
+        lock (_cacheGate) { _cache.Remove($"{channelKey}|{endpointUrl}"); }
+    }
+
     // ---- 央视频：cKey 取票（iretcode=0 → playurl；缓存+403 冷却走 YspTicketService） ----
 
     private async Task<string?> ResolveYspAsync(string entryUrl)

@@ -135,6 +135,9 @@ public partial class MainActivity : Activity
         Shell = this;
         _resolver = _processResolver ??= new TicketResolver(); // 取票缓存进程级共享，Recreate 不丢
         var resolver = _resolver;
+        // vc69 坏票不自焚：会话层报 HTTP 状态错（坏票）时作废该端点票据缓存，原地换新票重试一次
+        TaoLive.Session.PlaybackSession.TicketCacheInvalidator = (channelId, endpoint) =>
+            resolver.Invalidate(channelId, endpoint.Url);
 
         // 服务图进程级只建一次：会话管理器/内核跨 Recreate 存活（#15 原地换皮的核心——
         // 换档旧路径 Recreate 把播放会话连带销毁，重新取流=真机「切尺寸重连」）
