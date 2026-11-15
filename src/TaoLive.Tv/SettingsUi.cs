@@ -133,7 +133,7 @@ public partial class MainActivity
     /// <summary>
     /// 设置面板（真机反馈批#19，老板令「底部全宽流式、一行摆多项、说明收进帮助行、不留大面积留白」）：
     /// 面板全宽贴底；行区用 FlowLayout 按内容从左往右摆，一行放得下几项摆几项、放不下才换行；
-    /// 键位说明收成底部常驻帮助行；内容多时行区封顶滚动。字号间距全走随档缩放的 Dp/UiScale.T。
+    /// 键位说明收成底部常驻帮助行；内容多时行区封顶滚动。字号走 #68 语义字号令（Title/Item/Caption），间距走随档缩放的 Dp。
     /// </summary>
     private LinearLayout BuildSettingsPanel()
     {
@@ -149,7 +149,7 @@ public partial class MainActivity
         _settingsScroll.AddView(_settingsFlow, new FrameLayout.LayoutParams(-1, -2));
 
         // #19：说明收进底部帮助行（原每行下挂的操作提示统一收到这一行，全宽常驻不抢眼）
-        var help = new TextView(this) { Text = "OK 确认 · 上下左右换项 · 返回收起", TextSize = UiScale.T(0.9375f) };
+        var help = new TextView(this) { Text = "OK 确认 · 上下左右换项 · 返回收起", TextSize = UiScale.Caption };
         help.SetTextColor(Color.ParseColor(InkTranslucency.TextSecondary));
         InkTranslucency.ApplyReadabilityShadow(help);
         help.SetPadding(Dp(14), Dp(8), Dp(14), Dp(4));
@@ -232,7 +232,7 @@ public partial class MainActivity
 
         void AddLabel(string text)
         {
-            var tv = new TextView(this) { Text = text, TextSize = UiScale.T(0.9375f) };
+            var tv = new TextView(this) { Text = text, TextSize = UiScale.Caption };
             tv.SetTextColor(Color.ParseColor(InkTranslucency.TextSecondary));
             InkTranslucency.ApplyReadabilityShadow(tv);
             tv.SetPadding(Dp(14), Dp(8), Dp(14), Dp(4));
@@ -241,7 +241,7 @@ public partial class MainActivity
         // #19 流式行：紧凑内边距（项间距自带），操作提示收进底部帮助行不再每行下挂
         void AddRow(string text, Action onClick, string color, Action? onLongClick = null)
         {
-            var tv = new TextView(this) { Text = text, TextSize = UiScale.T(1.1875f) };
+            var tv = new TextView(this) { Text = text, TextSize = UiScale.Item };
             tv.SetTextColor(Color.ParseColor(color));
             tv.SetPadding(Dp(14), Dp(10), Dp(14), Dp(10));
             tv.Focusable = true;
@@ -521,12 +521,12 @@ public partial class MainActivity
         var box = new LinearLayout(this) { Orientation = Orientation.Vertical };
         box.SetPadding(pad, pad, pad, pad);
         box.SetBackgroundColor(InkTranslucency.PanelColor(this));
-        var titleView = new TextView(this) { Text = title, TextSize = UiScale.T(1.375f) };
+        var titleView = new TextView(this) { Text = title, TextSize = UiScale.Title };
         titleView.SetTextColor(InkTranslucency.TextPrimary(this));
         InkTranslucency.ApplyReadabilityShadow(titleView);
         box.AddView(titleView, new LinearLayout.LayoutParams(-2, -2) { BottomMargin = pad });
         scroll = new ScrollView(this);
-        var bodyView = new TextView(this) { Text = body, TextSize = UiScale.T(0.9375f) };
+        var bodyView = new TextView(this) { Text = body, TextSize = UiScale.Caption };
         bodyView.SetTextIsSelectable(false);
         bodyView.Focusable = false; // 正文不抢焦点，焦点只在按钮间转
         bodyView.SetTextColor(Color.ParseColor(InkTranslucency.TextSecondary));
@@ -806,7 +806,7 @@ public partial class MainActivity
             int padAdv = Dp(24);
             box.SetPadding(padAdv, padAdv, padAdv, padAdv);
             box.SetBackgroundColor(InkTranslucency.PanelColorDeep(this)); // 底色加深一档，不跟画面亮度走
-            var title = new TextView(this) { Text = "进阶调优", TextSize = UiScale.T(1.5f) };
+            var title = new TextView(this) { Text = "进阶调优", TextSize = UiScale.Title };
             title.SetTextColor(InkTranslucency.TextPrimary(this));
             InkTranslucency.ApplyReadabilityShadow(title);
             box.AddView(title, new LinearLayout.LayoutParams(-2, -2) { BottomMargin = Dp(10) });
@@ -833,12 +833,12 @@ public partial class MainActivity
                 void StyleKnob(TextView b)
                 {
                     StyleOverlayButton(b, InkTranslucency.AccentFocusDrawable()); // 选中态加重：朱砂底
-                    b.TextSize = UiScale.T(1.25f);
+                    b.TextSize = UiScale.Item;
                 }
                 StyleKnob(minus);
                 StyleKnob(plus);
                 value.Focusable = false;
-                value.TextSize = UiScale.T(1.25f);
+                value.TextSize = UiScale.Item;
                 value.SetTextColor(Color.ParseColor("#F7F5EE"));
                 value.SetPadding(Dp(12), 0, Dp(12), 0);
                 InkTranslucency.ApplyReadabilityShadow(value);
@@ -850,7 +850,7 @@ public partial class MainActivity
                 row.AddView(plus, new LinearLayout.LayoutParams(btn, btn));
                 body.AddView(row);
 
-                var sub = new TextView(this) { Text = desc, TextSize = UiScale.T(0.9375f) };
+                var sub = new TextView(this) { Text = desc, TextSize = UiScale.Caption };
                 sub.SetTextColor(Color.ParseColor(InkTranslucency.TextSecondary));
                 InkTranslucency.ApplyReadabilityShadow(sub);
                 sub.SetPadding(Dp(24), 0, Dp(24), Dp(8));
@@ -896,7 +896,7 @@ public partial class MainActivity
             var tip = new TextView(this)
             {
                 Text = "左右键切 − / +，确认键调档；到头即停。\n改坏了随时点「一键还原默认」回出厂值，全部即时生效。",
-                TextSize = UiScale.T(0.9375f),
+                TextSize = UiScale.Caption,
             };
             tip.SetTextColor(Color.ParseColor(InkTranslucency.TextSecondary));
             InkTranslucency.ApplyReadabilityShadow(tip);

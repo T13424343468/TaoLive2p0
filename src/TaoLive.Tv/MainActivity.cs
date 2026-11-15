@@ -546,7 +546,7 @@ public partial class MainActivity : Activity
         _loadingText = new TextView(this)
         {
             Gravity = GravityFlags.Center,
-            TextSize = UiScale.Sp(24),
+            TextSize = UiScale.Title,
         };
         _loadingText.SetTextColor(InkTranslucency.TextPrimary(this));
         InkTranslucency.ApplyReadabilityShadow(_loadingText);
@@ -561,7 +561,7 @@ public partial class MainActivity : Activity
         // 样式照 vc53 水墨口径：固定加深水墨底（不跟亮度，失败文案必须醒目）+ 可读性投影
         _emptyState = new TextView(this) { Gravity = GravityFlags.Center };
         _emptyState.SetTextColor(InkTranslucency.TextPrimary(this));
-        _emptyState.TextSize = UiScale.Sp(30);
+        _emptyState.TextSize = UiScale.Title;
         _emptyState.SetBackgroundColor(InkTranslucency.PanelColorDeep(this));
         InkTranslucency.ApplyReadabilityShadow(_emptyState);
         _emptyState.SetPadding(UiScale.Px(40), UiScale.Px(24), UiScale.Px(40), UiScale.Px(24)); // #15 尺寸令：随档缩放
@@ -583,7 +583,7 @@ public partial class MainActivity : Activity
         _toast.Background = InkTranslucency.HintBackground(this); // #66 高透自适应水墨皮（亮屏深托字、暗房高透）
         InkTranslucency.ApplyReadabilityShadow(_toast);
         _toast.SetPadding(UiScale.Px(36), UiScale.Px(16), UiScale.Px(36), UiScale.Px(16)); // #15 尺寸令
-        _toast.TextSize = UiScale.Sp(22);
+        _toast.TextSize = UiScale.Item;
         _root.AddView(_toast, new FrameLayout.LayoutParams(-2, -2)
         {
             Gravity = GravityFlags.Top | GravityFlags.CenterHorizontal,
@@ -596,10 +596,10 @@ public partial class MainActivity : Activity
         _epgPanel.SetBackgroundColor(InkTranslucency.PanelColor(this));
         _epgPanel.SetPadding(UiScale.Px(36), UiScale.Px(18), UiScale.Px(36), UiScale.Px(22)); // #15 尺寸令
         _epgPanel.Visibility = ViewStates.Gone;
-        _epgNow = new TextView(this) { TextSize = UiScale.Sp(18) };
+        _epgNow = new TextView(this) { TextSize = UiScale.Item };
         _epgNow.SetTextColor(InkTranslucency.TextPrimary(this));
         InkTranslucency.ApplyReadabilityShadow(_epgNow);
-        _epgNext = new TextView(this) { TextSize = UiScale.Sp(15) };
+        _epgNext = new TextView(this) { TextSize = UiScale.Caption };
         _epgNext.SetTextColor(Color.ParseColor(InkTranslucency.TextSecondary));
         InkTranslucency.ApplyReadabilityShadow(_epgNext);
         _epgPanel.AddView(_epgNow);
@@ -618,11 +618,11 @@ public partial class MainActivity : Activity
         // 抽屉页头（vc53：标题 + 台数，同一水平基准）
         var header = new LinearLayout(this) { Orientation = Orientation.Horizontal };
         header.SetPadding(UiScale.Px(48), UiScale.Px(40), UiScale.Px(48), UiScale.Px(8)); // #15 尺寸令
-        var title = new TextView(this) { Text = "TaoLive 频道", TextSize = UiScale.Sp(24) };
+        var title = new TextView(this) { Text = "TaoLive 频道", TextSize = UiScale.Title };
         title.SetTextColor(InkTranslucency.TextPrimary(this));
         InkTranslucency.ApplyReadabilityShadow(title);
         header.AddView(title);
-        var count = new TextView(this) { Text = $"  共 {_channels.Count} 路", TextSize = UiScale.Sp(15) };
+        var count = new TextView(this) { Text = $"  共 {_channels.Count} 路", TextSize = UiScale.Caption };
         count.SetTextColor(Color.ParseColor(InkTranslucency.TextSecondary));
         InkTranslucency.ApplyReadabilityShadow(count);
         header.AddView(count);
@@ -636,7 +636,7 @@ public partial class MainActivity : Activity
         int tabIndex = 0;
         foreach (ListTabs.Tab t in Enum.GetValues(typeof(ListTabs.Tab)))
         {
-            var tv = new TextView(this) { Text = ListTabs.Label(t), TextSize = UiScale.Sp(16) };
+            var tv = new TextView(this) { Text = ListTabs.Label(t), TextSize = UiScale.Item };
             tv.SetPadding(UiScale.Px(12), UiScale.Px(10), UiScale.Px(12), UiScale.Px(10));
             InkTranslucency.ApplyReadabilityShadow(tv);
             tv.Click += (_, _) => SelectTab(t);
@@ -1349,29 +1349,30 @@ public partial class MainActivity : Activity
         if (_exitDialog != null) return; // 弹窗已开着：不重复弹
         EnforceSingleWindow(); // #64 窗口唯一令：开新先关旧（退出弹窗也是窗口）
         var box = new LinearLayout(this) { Orientation = Orientation.Vertical };
-        int pad = Dp(20);
+        float density = Resources!.DisplayMetrics!.Density; // #68 语义字号令：浮层间距与文字同口径重定标
+        int pad = UiScale.Px(20 * density);
         box.SetPadding(pad * 2, pad * 2, pad * 2, pad);
         box.SetBackgroundColor(InkTranslucency.PanelColor(this)); // 半透明水墨底，与抽屉面板同源同号
-        box.SetMinimumWidth(Dp(480)); // 居中浮层不因文案缩成窄条
+        box.SetMinimumWidth(UiScale.Px(480 * density)); // 居中浮层不因文案缩成窄条
 
-        var msg = new TextView(this) { Text = "确认退出 TaoLive？", TextSize = UiScale.Sp(20) };
+        var msg = new TextView(this) { Text = "确认退出 TaoLive？", TextSize = UiScale.Title };
         msg.SetTextColor(InkTranslucency.TextPrimary(this)); // 统一 Token，暗屏自动提白
         InkTranslucency.ApplyReadabilityShadow(msg);
         box.AddView(msg);
 
-        var note = new TextView(this) { Text = "退出后开机自启仍可用，随时回来看", TextSize = UiScale.Sp(13) };
+        var note = new TextView(this) { Text = "退出后开机自启仍可用，随时回来看", TextSize = UiScale.Caption };
         note.SetTextColor(Color.ParseColor(InkTranslucency.TextSecondary));
         InkTranslucency.ApplyReadabilityShadow(note);
-        box.AddView(note, new LinearLayout.LayoutParams(-2, -2) { TopMargin = Dp(8) });
+        box.AddView(note, new LinearLayout.LayoutParams(-2, -2) { TopMargin = UiScale.Px(8 * density) });
 
         var buttons = new LinearLayout(this) { Orientation = Orientation.Horizontal };
         var lp = new LinearLayout.LayoutParams(0, -2, 1f) { TopMargin = pad, LeftMargin = pad / 2, RightMargin = pad / 2 };
         // vc22 第 11 项：按钮改 TextView 自绘——ROM Material 按钮的焦点高亮/系统着色从根上去掉
-        var no = new TextView(this) { Text = "取消（继续看）", Gravity = GravityFlags.Center };
-        no.SetPadding(pad / 2, Dp(14), pad / 2, Dp(14));
+        var no = new TextView(this) { Text = "取消（继续看）", Gravity = GravityFlags.Center, TextSize = UiScale.Item }; // #68 语义字号令：弹窗按钮此前漏设字号吃系统默认
+        no.SetPadding(pad / 2, UiScale.Px(14 * density), pad / 2, UiScale.Px(14 * density));
         no.Click += (_, _) => { _exitDialog?.Dismiss(); _exitDialog = null; };
-        var yes = new TextView(this) { Text = "退出", Gravity = GravityFlags.Center };
-        yes.SetPadding(pad / 2, Dp(14), pad / 2, Dp(14));
+        var yes = new TextView(this) { Text = "退出", Gravity = GravityFlags.Center, TextSize = UiScale.Item };
+        yes.SetPadding(pad / 2, UiScale.Px(14 * density), pad / 2, UiScale.Px(14 * density));
         yes.Click += (_, _) => { _exitDialog?.Dismiss(); _exitDialog = null; Finish(); };
         // v1.0.10 修复④：左右键在「退出」与「取消（继续看）」间切换——显式指路，不靠焦点搜索碰运气
         no.Id = View.GenerateViewId();
@@ -1606,7 +1607,7 @@ public partial class MainActivity : Activity
     private void ApplyListWidth(IReadOnlyList<Row> rows)
     {
         float density = Resources!.DisplayMetrics!.Density;
-        float scale = UiScale.Factor;
+        float scale = UiScale.Scale;
         float Estimate(string s, float sizeDp)
         {
             float px = sizeDp * density * scale; // #15 尺寸令：字号随档，估宽同步
@@ -1861,7 +1862,7 @@ public partial class MainActivity : Activity
             {
                 var h = new TextView(ctx) { Text = row.Header };
                 bool isNote = row.IsNote; // vc53 v22 第 15 项：空态行次色平铺，不作分组标题渲染
-                Style(h, isNote ? InkTranslucency.TextSecondary : "#A9CFEC", UiScale.Sp(isNote ? 15 : 18));
+                Style(h, isNote ? InkTranslucency.TextSecondary : "#A9CFEC", UiScale.Caption);
                 InkTranslucency.ApplyReadabilityShadow(h);
                 line.AddView(h);
                 line.SetBackgroundColor(Color.Transparent);
@@ -1884,7 +1885,7 @@ public partial class MainActivity : Activity
                         // #61 尺寸令补漏：台标此前高度写死 28dp 不随档（AdjustViewBounds 在固定 LayoutParams 下无效）——
                         // 改与首字占位块同框（40×28 基准×档位系数），ImageView 默认 FitCenter 框内等比不变形
                         img.SetImageResource(resId);
-                        line.AddView(img, new LinearLayout.LayoutParams((int)(40 * density * UiScale.Factor), (int)(28 * density * UiScale.Factor))
+                        line.AddView(img, new LinearLayout.LayoutParams((int)(40 * density * UiScale.Scale), (int)(28 * density * UiScale.Scale))
                         { RightMargin = UiScale.Px(16), Gravity = GravityFlags.CenterVertical });
                     }
                 }
@@ -1893,10 +1894,10 @@ public partial class MainActivity : Activity
             if (!row.DeadOnly && logoRes == null)
             {
                 var ph = new TextView(ctx) { Text = ch.Name.Substring(0, 1) };
-                Style(ph, InkTranslucency.TextSecondary, UiScale.Sp(14));
+                Style(ph, InkTranslucency.TextSecondary, UiScale.Item);
                 ph.Gravity = GravityFlags.Center;
                 ph.SetBackgroundColor(Color.ParseColor("#3A4750"));
-                line.AddView(ph, new LinearLayout.LayoutParams((int)(40 * density * UiScale.Factor), (int)(28 * density * UiScale.Factor)) // #15 尺寸令
+                line.AddView(ph, new LinearLayout.LayoutParams((int)(40 * density * UiScale.Scale), (int)(28 * density * UiScale.Scale)) // #15 尺寸令
                 { RightMargin = UiScale.Px(16), Gravity = GravityFlags.CenterVertical });
             }
             if (row.DeadOnly)
@@ -1905,20 +1906,20 @@ public partial class MainActivity : Activity
             }
 
             var num = new TextView(ctx) { Text = $"{IndexInTable(ch),3}", Gravity = GravityFlags.Right };
-            Style(num, InkTranslucency.TextSecondary, UiScale.Sp(20));
+            Style(num, InkTranslucency.TextSecondary, UiScale.Item);
             InkTranslucency.ApplyReadabilityShadow(num);
             num.SetPadding(0, 0, UiScale.Px(32), 0);
             line.AddView(num);
 
             var star = new TextView(ctx) { Text = _favorites.Contains(ch.Id) ? "★" : " " };
-            Style(star, "#F0C563", UiScale.Sp(20));
+            Style(star, "#F0C563", UiScale.Item);
             InkTranslucency.ApplyReadabilityShadow(star);
             star.SetPadding(0, 0, UiScale.Px(24), 0);
             line.AddView(star);
 
             var name = new TextView(ctx) { Text = ch.Name };
             var isCur = _currentId() == ch.Id;
-            Style(name, isCur ? "#FFFFFF" : InkTranslucency.TextSecondary, UiScale.Sp(22));
+            Style(name, isCur ? "#FFFFFF" : InkTranslucency.TextSecondary, UiScale.Item);
             InkTranslucency.ApplyReadabilityShadow(name);
             if (isCur)
             {
@@ -1940,7 +1941,7 @@ public partial class MainActivity : Activity
                 _ => ("●", "#8894A0"),
             };
             var dot = new TextView(ctx) { Text = mark };
-            Style(dot, color, UiScale.Sp(18));
+            Style(dot, color, UiScale.Caption);
             InkTranslucency.ApplyReadabilityShadow(dot);
             dot.SetPadding(UiScale.Px(24), 0, 0, 0);
             line.AddView(dot);
