@@ -1353,10 +1353,12 @@ public partial class MainActivity : Activity
         EnforceSingleWindow(); // #64 窗口唯一令：开新先关旧（退出弹窗也是窗口）
         var box = new LinearLayout(this) { Orientation = Orientation.Vertical };
         float density = Resources!.DisplayMetrics!.Density; // #68 语义字号令：浮层间距与文字同口径重定标
-        int pad = UiScale.Px(20 * density);
+        // #71 退出弹窗重定基（老板真机反馈②：同尺寸下弹窗太大）——#68 把浮层 chrome 从旧观感放大了 1.8 倍（Factor→Scale），
+        // 间距/最小宽按中档实值折回旧观感（旧值÷1.8）：pad≈11dp、最小宽≈267dp；字体 Title/Item/Caption 不动
+        int pad = UiScale.Px(11 * density);
         box.SetPadding(pad * 2, pad * 2, pad * 2, pad);
         box.SetBackgroundColor(InkTranslucency.PanelColor(this)); // 半透明水墨底，与抽屉面板同源同号
-        box.SetMinimumWidth(UiScale.Px(480 * density)); // 居中浮层不因文案缩成窄条
+        box.SetMinimumWidth(UiScale.Px(267 * density)); // 居中浮层不因文案缩成窄条
 
         var msg = new TextView(this) { Text = "确认退出 TaoLive？", TextSize = UiScale.Title };
         msg.SetTextColor(InkTranslucency.TextPrimary(this)); // 统一 Token，暗屏自动提白
@@ -1366,16 +1368,16 @@ public partial class MainActivity : Activity
         var note = new TextView(this) { Text = "退出后开机自启仍可用，随时回来看", TextSize = UiScale.Caption };
         note.SetTextColor(Color.ParseColor(InkTranslucency.TextSecondary));
         InkTranslucency.ApplyReadabilityShadow(note);
-        box.AddView(note, new LinearLayout.LayoutParams(-2, -2) { TopMargin = UiScale.Px(8 * density) });
+        box.AddView(note, new LinearLayout.LayoutParams(-2, -2) { TopMargin = UiScale.Px(4 * density) }); // #71 重定基：旧观感 8÷1.8
 
         var buttons = new LinearLayout(this) { Orientation = Orientation.Horizontal };
         var lp = new LinearLayout.LayoutParams(0, -2, 1f) { TopMargin = pad, LeftMargin = pad / 2, RightMargin = pad / 2 };
         // vc22 第 11 项：按钮改 TextView 自绘——ROM Material 按钮的焦点高亮/系统着色从根上去掉
         var no = new TextView(this) { Text = "取消（继续看）", Gravity = GravityFlags.Center, TextSize = UiScale.Item }; // #68 语义字号令：弹窗按钮此前漏设字号吃系统默认
-        no.SetPadding(pad / 2, UiScale.Px(14 * density), pad / 2, UiScale.Px(14 * density));
+        no.SetPadding(pad / 2, UiScale.Px(8 * density), pad / 2, UiScale.Px(8 * density)); // #71 重定基：旧观感 14÷1.8
         no.Click += (_, _) => { _exitDialog?.Dismiss(); _exitDialog = null; };
         var yes = new TextView(this) { Text = "退出", Gravity = GravityFlags.Center, TextSize = UiScale.Item };
-        yes.SetPadding(pad / 2, UiScale.Px(14 * density), pad / 2, UiScale.Px(14 * density));
+        yes.SetPadding(pad / 2, UiScale.Px(8 * density), pad / 2, UiScale.Px(8 * density)); // #71 重定基：旧观感 14÷1.8
         yes.Click += (_, _) => { _exitDialog?.Dismiss(); _exitDialog = null; Finish(); };
         // v1.0.10 修复④：左右键在「退出」与「取消（继续看）」间切换——显式指路，不靠焦点搜索碰运气
         no.Id = View.GenerateViewId();
