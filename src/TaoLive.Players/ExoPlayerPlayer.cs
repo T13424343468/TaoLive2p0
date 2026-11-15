@@ -34,9 +34,9 @@ public sealed class ExoPlayerPlayer : IPlayer
     {
         ArgumentNullException.ThrowIfNull(context);
         _forwarder = new Forwarder(this);
-        _player = new AndroidX.Media3.ExoPlayer.ExoPlayerBuilder(context)
-            .SetLoadControl(BuildLoadControl(context))
-            .Build()!;
+        var playerBuilder = new AndroidX.Media3.ExoPlayer.ExoPlayerBuilder(context);
+        playerBuilder.SetLoadControl(BuildLoadControl(context));
+        _player = playerBuilder.Build()!;
         _player.AddListener(_forwarder);
         _main = new Android.OS.Handler(Android.OS.Looper.MainLooper!);
         _streamResolver = streamResolver;
@@ -66,14 +66,8 @@ public sealed class ExoPlayerPlayer : IPlayer
         int watermarkMs = BufferPolicy.MaxWatermarkSeconds(totalMem) * 1000;
         int startupGateMs = (int)PrefetchCurve.StartupThreshold.TotalMilliseconds;
         return new AndroidX.Media3.ExoPlayer.DefaultLoadControl.Builder()
-            .SetBufferDurationsMs(
-                minBufferMs: watermarkMs,
-                maxBufferMs: watermarkMs,
-                bufferForPlaybackMs: startupGateMs,
-                bufferForPlaybackAfterRebufferMs: startupGateMs,
-                backBufferDurationMs: 0,
-                resetPositionOnBackBuffer: true,
-                prioritizeTimeOverSizeThresholds: true)
+            // 绑定参数名与 Java 源有差：按位传参（min,max,起播门槛,重缓门槛,回退缓冲,回退重定位,时间优先）
+            .SetBufferDurationsMs(watermarkMs, watermarkMs, startupGateMs, startupGateMs, 0, true, true)
             .Build();
     }
 
