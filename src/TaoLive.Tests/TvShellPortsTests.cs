@@ -94,8 +94,10 @@ public class TvShellPortsTests
     private static async Task<ChannelPrecheck> PrecheckAfterRoundsAsync(int okRounds, Channel ch)
     {
         var precheck = new ChannelPrecheck(_ => Task.FromResult(true), intervalMs: 0);
+        // 核验时间用真实当前时刻（Unix 毫秒）：24 小时新鲜期（老板令 2026-11-15）会把 1970 年的假时间戳读作作废
+        long baseMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         for (int i = 0; i < okRounds; i++)
-            precheck.ReportSourceResult(ch, ok: true, nowMs: 1000 + i);
+            precheck.ReportSourceResult(ch, ok: true, nowMs: baseMs + i);
         await Task.Yield();
         return precheck;
     }
@@ -117,7 +119,7 @@ public class TvShellPortsTests
         var untouched = new ChannelPrecheck(_ => Task.FromResult(true));
         Assert.Equal(ChannelHealth.Checking, untouched.MarkOf(ch)); // 未探=灰
         var dead = await PrecheckAfterRoundsAsync(0, ch);
-        dead.ReportSourceResult(ch, ok: false, nowMs: 1000);
+        dead.ReportSourceResult(ch, ok: false, nowMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
         dead.MarkState(ch, ChannelHealth.Dead);
         Assert.Equal(ChannelHealth.Dead, dead.MarkOf(ch)); // 全败=红
     }

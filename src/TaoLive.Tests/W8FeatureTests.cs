@@ -446,4 +446,24 @@ public class W8FeatureTests
             TicketResolver.Http = previous;
         }
     }
+
+    [Fact]
+    public async Task SourceHealth_stale_after_24h_reads_as_unknown_and_reprobes()
+    {
+        // 老板令 2026-11-15：健康账条目超 24 小时未核验=作废——读作未探测，交回预检重探
+        var ch = new Channel("src-a", "CCTV-4", "央视",
+            new[] { new SourceEndpoint("https://a/stream", SourceKind.Cdn, 1) });
+        var precheck = new ChannelPrecheck(_ => Task.FromResult(true));
+        await precheck.RunAsync(new[] { ch });
+        Assert.NotNull(precheck.SourceHealthOf(ch)); // 新核验账在，正常可读
+
+        // 把核验时间改到 24 小时前：查询口作废（返回 null），交回重探口径
+        var entry = precheck.SourceHealthOf(ch)!;
+        entry.CheckedAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - ChannelPrecheck.StaleAfterMs - 1000;
+        Assert.Null(precheck.SourceHealthOf(ch)); // 旧账作废：读作未探测
+
+        // 重探后账面刷新，恢复可读（重探=预检循环自然覆盖，无需额外触发）
+        await precheck.RunAsync(new[] { ch });
+        Assert.NotNull(precheck.SourceHealthOf(ch));
+    }
 }

@@ -53,6 +53,12 @@ public class ChannelPrecheck
     /// <summary>连续失败多少次自动淘汰该来源记录（v1.0.10）：淘汰后交回预检重探，绝不把挂了的源一直当可用。</summary>
     public const int RetireAfterConsecutiveFails = 3;
 
+    /// <summary>健康账新鲜期（老板令 2026-11-15）：超过 24 小时未核验的条目作废——读作未探测，交回预检重探。</summary>
+    public const long StaleAfterMs = 24 * 60 * 60 * 1000L;
+
+    private static bool IsStale(SourceHealthEntry e) =>
+        e is null || (e.CheckedAtMs > 0 && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - e.CheckedAtMs >= StaleAfterMs);
+
     /// <summary>状态变化事件：(台 EPG 键, 新状态)。UI 层订阅后刷新列表。</summary>
     public event Action<string, ChannelHealth>? StateChanged;
 
@@ -105,9 +111,12 @@ public class ChannelPrecheck
     public ChannelHealth Of(Channel ch) =>
         _states.TryGetValue(ch.EpgKey, out var s) ? s : ChannelHealth.Unknown;
 
-    /// <summary>查询某台某来源的健康记录（未探测返回 null）。</summary>
-    public SourceHealthEntry? SourceHealthOf(Channel ch) =>
-        _sourceHealth.TryGetValue(SourceKey(ch), out var e) ? e : null;
+    /// <summary>查询某台某来源的健康记录（未探测返回 null；超 24 小时未核验=作废重探，老板令 2026-11-15）。</summary>
+    public SourceHealthEntry? SourceHealthOf(Channel ch)
+    {
+        if (!_sourceHealth.TryGetValue(SourceKey(ch), out var e)) return null;
+        return IsStale(e) ? null : e;
+    }
 
     /// <summary>列表健康点门槛：连续探活成功达此次数才亮绿（方案书收口批②：近 3 轮探活全通=绿）。</summary>
     public const int MarkGreenMinConsecutiveOks = 3;
