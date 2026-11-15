@@ -55,17 +55,13 @@ public static class FallbackSourceRegistry
 
     private static readonly FallbackEntry[] Cctv =
     {
-        // B 组降序（老板 14:07 令）：CCTV1 74.91 路 404 三采样稳定死、CCTV5 74.91 路伪 200 错误文案型，
-        // 两路挪到 Batch4 末位独立家族之后观察，不再顶前；CCTV12 旧路同理挪 Batch4 观察。
-        // 17:18 支援摸排收录（老板 17:30 令）：全链实测 清单200→首分片206 实数据；与 CCTV1 同源族单点，
-        // 评分侧按单点降权；纯 IP 字面量不走系统解析，对解析僵死场景天然免疫（与⑤网络自愈互为逃生线）
-        new("CCTV2财经", "http://74.91.26.218:82/live/cctv2hd.m3u8"),
-        new("CCTV6电影", "http://74.91.26.218:82/live/cctv6hd.m3u8"),
-        // 19:2x 支援摸排收录（老板 19:28 令「全部干完」）：CCTV3/5/8 同 74.91 家族全链实测活
-        // （清单→相对分片按重定向后最终基址 5.5MB 实 TS）；cctv5plushd 已死（「没有配置任何服务器」）不收。
-        // 同源族单点特性不变，评分侧按单点降权；央视备援 6→9 路
-        new("CCTV3综艺", "http://74.91.26.218:82/live/cctv3hd.m3u8"),
-        new("CCTV8电视剧", "http://74.91.26.218:82/live/cctv8hd.m3u8"),
+        // 老板令 2026-11-15 #20：74.91 家族整族降观察档——真机 11-15 18:16 实测 CCTV6 路 BAD_HTTP_STATUS
+        // （自诊断台账第一手证据），B 组 CCTV1/5 两路更早已三采样稳定死；沙箱侧复测该族仍活，
+        // 不物理删表、整族垫底（同族备线性质），运行时另有健康账轻排序+播放实测回写兜底，自救不再踩死路。
+        new("CCTV2财经", "http://74.91.26.218:82/live/cctv2hd.m3u8", ObservationRank: true),
+        new("CCTV6电影", "http://74.91.26.218:82/live/cctv6hd.m3u8", ObservationRank: true),
+        new("CCTV3综艺", "http://74.91.26.218:82/live/cctv3hd.m3u8", ObservationRank: true),
+        new("CCTV8电视剧", "http://74.91.26.218:82/live/cctv8hd.m3u8", ObservationRank: true),
         new("CCTV4中文国际", "https://dash2.antik.sk/cctv4/index.m3u8"),
         new("CCTV13新闻", "https://ali-m-l.cztv.com/lantian/channel21/index.m3u8"),
     };

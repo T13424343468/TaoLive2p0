@@ -4,8 +4,9 @@ namespace TaoLive.Foundation;
 
 /// <summary>
 /// 缓冲水位口径（v1.0.10 修复⑨B+⑩）：默认贴直播边缘零延迟感；
-/// 水位下降/网络抖动时主动落后一个安全水位吸收抖动（按设备内存自适应：
-/// 内存足最高约 60 秒，低配自动缩到 30–45 秒），全程内存环形缓冲不落磁盘；
+/// 水位下降/网络抖动时主动落后一个安全水位吸收抖动；
+/// 老板令 2026-11-15 #21：内存分档废止，一律按 60 秒上限拉满（内核自身按内存吃满自然封顶，
+/// 不再替内核保守降档）；全程内存环形缓冲不落磁盘；
 /// 网络恢复平稳后平滑追回直播边缘。水位是看门狗自救的缓冲池：先吃池子再动手。
 /// </summary>
 public enum BufferAction { HoldEdge, BuildUp, CatchUp }
@@ -14,14 +15,9 @@ public static class BufferPolicy
 {
     public const long MB = 1024L * 1024;
 
-    /// <summary>安全水位上限（秒）：内存充裕 60；低配 45；极低配 30。</summary>
-    public static int MaxWatermarkSeconds(long totalMemBytes)
-    {
-        if (totalMemBytes <= 0) return 30;           // 未知内存按低配保守
-        if (totalMemBytes >= 3L * 1024 * MB) return 60;
-        if (totalMemBytes >= 2L * 1024 * MB) return 45;
-        return 30;
-    }
+    /// <summary>安全水位上限（秒）：老板令 2026-11-15 #21——内存分档废止，固定 60 秒拉满
+    /// （totalMemBytes 参数保留兼容既有调用口径，不再参与分档）。</summary>
+    public static int MaxWatermarkSeconds(long totalMemBytes) => 60;
 
     /// <summary>
     /// 喂一次水位（秒）与网络平稳状态：
@@ -32,7 +28,7 @@ public static class BufferPolicy
     public static BufferAction Observe(double bufferedSeconds, bool networkSteady, long totalMemBytes)
     {
         int max = MaxWatermarkSeconds(totalMemBytes);
-        double low = max / 3.0;               // 低水位线：上限的 1/3（60→20s，30→10s）
+        double low = max / 3.0;               // 低水位线：上限的 1/3（60→20s）
         if (!networkSteady || bufferedSeconds < low) return BufferAction.BuildUp;
         if (bufferedSeconds < max * 0.9) return BufferAction.CatchUp; // 平稳未满：平滑追回
         return BufferAction.HoldEdge;

@@ -73,7 +73,12 @@ public sealed class TicketResolver
                 return null;
             }
             PutCache(key, url, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
-            Reporter?.Invoke($"[取票] {uri.Host} 成功（耗时 {sw.ElapsedMilliseconds}ms，缓存未命中）");
+            // 文案口径修正（真机反馈批#20）：直连端点原样放行，无换流动作、0ms 是常态——
+            // 「成功（耗时 0ms，缓存未命中）」读作「假票/账目异常」，改口径与网络换流端点区分开
+            if (ReferenceEquals(url, endpoint.Url))
+                Reporter?.Invoke($"[取票] {uri.Host} 直连放行（免换流，不入耗时账）");
+            else
+                Reporter?.Invoke($"[取票] {uri.Host} 成功（耗时 {sw.ElapsedMilliseconds}ms，缓存未命中）");
             return url;
         }
         finally { _gate.Release(); }
