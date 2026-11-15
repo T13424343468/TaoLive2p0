@@ -163,7 +163,9 @@ public partial class MainActivity : Activity
         // #15：经 Shell 路由——内核跨 Recreate 存活，帧节拍必须打到当前壳，不钉死建内核时的那个壳
         void WireVeilReveal(ExoPlayerPlayer player)
         {
-            player.OnFrameTick += (_, _) => Shell?.VeilFrameTick(player);
+            // vc72 审查清零 P1：帧回调在渲染线程，VeilFrameTick 写遮罩代/出画倒计时账与主线程
+            // 遮罩倒计时并发——过 _main 归主线程（L162 注释「回调落主线程」自本修起为真）。
+            player.OnFrameTick += (_, _) => _main.Post(() => Shell?.VeilFrameTick(player));
         }
 
         // vc66 审查修正（老板审批方案第三刀「根因上屏」）：内核视频解码器报错即触发 OnVideoFault——
@@ -198,6 +200,11 @@ public partial class MainActivity : Activity
             bool startupReported = false;            // 台账只记一次
             player.OnFrameTick += (_, e) =>
             {
+                // vc72 审查清零 P1：帧回调在内核渲染线程（IPlayer 契约），零帧账/平稳账/起播账同时被
+                // 主线程守卫泵读写——整处理器体过 _main 归主线程（与 WireVideoFault 同款），
+                // List/Queue 并发读写即断；注释「渲染线程回调落主线程执行」自本修起为真（原注释与契约矛盾）。
+                _main.Post(() =>
+                {
                 // vc66：帧账只认当前会话的内核——热备攒流哑面解码的帧不替当前台续零帧账（只出声兜底不失明）
                 if (_manager.Current is not { } c || !ReferenceEquals(c.Kernel, player)) return;
                 _lastVideoFrameAtMs = System.Environment.TickCount64; // #75 音画同出兜底：视频帧活着，账随帧走
@@ -237,6 +244,7 @@ public partial class MainActivity : Activity
                 CrashNet.Record(pulse.StallSuspicion
                     ? $"[画面平稳] {c.CurrentChannel?.Name ?? c.CurrentChannel?.Id ?? "?"} 疑似卡顿：连续 3 窗帧间隔 P95 {ms}ms 超阈 {FramePulse.P95ThresholdMs}ms"
                     : $"[画面平稳] {c.CurrentChannel?.Name ?? c.CurrentChannel?.Id ?? "?"} 帧间隔 P95 {ms}ms（阈 {FramePulse.P95ThresholdMs}ms）");
+                });
             };
         }
 

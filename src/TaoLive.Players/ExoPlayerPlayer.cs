@@ -211,6 +211,9 @@ public sealed class ExoPlayerPlayer : IPlayer
 
     public void Stop()
     {
+        // vc72 审查清零 P1：Stop 同 Dispose 口径作废在途 resolver 回调——否则让位会话的内核
+        // 会被迟到的取流回调复活，旧台无声画但外放音频（vc68「退软件音频照放」残余通路）。
+        _playGeneration++;
         _firstFrameRaisedThisPlay = false;
         _player.Stop();
         _player.ClearMediaItems();

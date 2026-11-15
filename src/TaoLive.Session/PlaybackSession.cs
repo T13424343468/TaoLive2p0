@@ -693,6 +693,8 @@ public sealed class PlaybackSession
         }
         var from = _queue[_endpointIndex];
         _endpointIndex = next;
+        _stallTimes.Clear(); // vc72 审查清零 P1：自救路径同换台/换线/预防介入口径清账（账只记本线，不跟去新线）
+        _smoothnessTimes.Clear();
         FailoverCount++;
         _freshTicketRetried = false; // vc69：坏票重试机会每线路一次，切线重记
         _ticketRetrySinceMs = null;
