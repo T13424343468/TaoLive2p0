@@ -65,7 +65,7 @@ public partial class MainActivity : Activity
             _prefs.GetInt("adv_cache_sec", AdvancedTuning.DefaultListCacheSec),
             _prefs.GetInt("adv_retry_base_sec", 120) * 1000L,
             _prefs.GetInt("adv_retry_max_min", 120) * 60_000L,
-            _prefs.GetInt("adv_proxy_port", AdvancedTuning.DefaultProxyPort));
+            AdvancedTuning.DefaultProxyPort);
         CrashNet.Install(); // 未捕获异常先落日志再放行（崩溃日志页可查可清）
 
         var resolver = _resolver = new TicketResolver();
