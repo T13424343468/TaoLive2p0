@@ -1607,8 +1607,9 @@ public partial class MainActivity : Activity
         }
     }
 
-    /// <summary>列表宽度随内容（vc53 ApplyListWidth + ListMetrics v1.0.8 口径）：越小越好，下限 360dp、上限半屏。
-    /// #15 尺寸令：估宽基准与下限全部随档缩放——「小」档行字缩了，抽屉宽度跟着收，不留大片空白。</summary>
+    /// <summary>列表宽度随内容（vc53 ApplyListWidth + ListMetrics v1.0.8 口径）：越小越好，下限 300dp、上限半屏。
+    /// #15 尺寸令：估宽基准与下限全部随档缩放——「小」档行字缩了，抽屉宽度跟着收，不留大片空白。
+    /// #72 列表贴内容（老板真机反馈① 2026-11-15）：估宽计入台标+边距、去掉与行内 padding 重复的额外留白、下限 360→300dp。</summary>
     private void ApplyListWidth(IReadOnlyList<Row> rows)
     {
         float density = Resources!.DisplayMetrics!.Density;
@@ -1627,16 +1628,17 @@ public partial class MainActivity : Activity
                 max = Math.Max(max, Estimate(r.Header, 20));
             else if (r.Channel != null)
             {
-                // 行宽 = 左右 padding(48×2) + 号(3字符) + 间距(32) + 星(1字符) + 间距(24) + 台名 + 状态标识
-                var w = 96 * scale + Estimate(new string('0', 3), 20) + 32 * scale
+                // #72 列表贴内容（老板真机反馈①：右侧空白太多）——行宽计入台标(40)+边距(16)；
+                // 行宽 = 左右 padding(48×2) + 台标+边距(40+16) + 号(3字符) + 间距(32) + 星(1字符) + 间距(24) + 台名 + 状态标识
+                var w = 96 * scale + 56 * scale + Estimate(new string('0', 3), 20) + 32 * scale
                         + Estimate("★", 20) + 24 * scale + Estimate(r.Channel.Name, 22)
                         + Estimate("●", 20) + 24 * scale;
                 max = Math.Max(max, w);
             }
         }
-        // ListMetrics（vc53 v1.0.8）：行内容 + 48px 留白，下限 360dp，上限半屏
-        float total = max + 48 * density * scale;
-        float lo = 360f * density * scale;
+        // ListMetrics（vc53 v1.0.8）：行内已有 48×2 padding 不再加额外留白（#72：去掉重复预留，面板宽度贴住最长行），下限 300dp，上限半屏
+        float total = max;
+        float lo = 300f * density * scale;
         float hi = Resources.DisplayMetrics.WidthPixels / 2f;
         int width = (int)Math.Clamp(total, Math.Min(lo, hi), Math.Max(lo, hi));
         _listPage.LayoutParameters = new FrameLayout.LayoutParams(width, FrameLayout.LayoutParams.MatchParent, GravityFlags.Left);
