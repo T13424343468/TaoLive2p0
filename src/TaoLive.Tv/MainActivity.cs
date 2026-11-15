@@ -121,7 +121,8 @@ public partial class MainActivity : Activity
             _prefs.GetInt("adv_reprobe_min", 5) * 60_000L,
             _prefs.GetInt("adv_cache_sec", AdvancedTuning.DefaultListCacheSec),
             _prefs.GetInt("adv_retry_base_sec", 120) * 1000L,
-            _prefs.GetInt("adv_retry_max_min", 120) * 60_000L);
+            _prefs.GetInt("adv_retry_max_min", 120) * 60_000L,
+            _prefs.GetInt("adv_prefetch_sec", AdvancedTuning.DefaultPrefetchWindowSec)); // #67 库存档旋钮
         CrashNet.Install(); // 未捕获异常先落日志再放行（崩溃日志页可查可清）
 
         // 真机反馈批#15：进程级壳引用先立（内核/会话回调经它路由到当前实例）

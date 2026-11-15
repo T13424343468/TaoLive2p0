@@ -15,9 +15,10 @@ public static class BufferPolicy
 {
     public const long MB = 1024L * 1024;
 
-    /// <summary>安全水位上限（秒）：老板令 2026-11-15 #21——内存分档废止，固定 60 秒拉满
+    /// <summary>安全水位上限（秒）：老板令 2026-11-15 #21 曾固定 60 秒拉满；#67 三档位令改走
+    /// AdvancedTuning.PrefetchWindowSec 旋钮（30/45/60 档，默认 60=原固定口径），总纲「旋钮写活不写死」。
     /// （totalMemBytes 参数保留兼容既有调用口径，不再参与分档）。</summary>
-    public static int MaxWatermarkSeconds(long totalMemBytes) => 60;
+    public static int MaxWatermarkSeconds(long totalMemBytes) => AdvancedTuning.PrefetchWindowSec;
 
     /// <summary>
     /// 喂一次水位（秒）与网络平稳状态：

@@ -15,6 +15,7 @@ public static class AdvancedTuning
     public const int DefaultListCacheSec = 60;
     public const long DefaultRetryBaseMs = 120_000;
     public const long DefaultRetryMaxMs = 16 * 60_000; // vc53 HotSwap 口径：2 分钟起步、2/4/8/16 分钟封顶（方案书 v27「沿 vc53 口径」归一）
+    public const int DefaultPrefetchWindowSec = 60;    // 老板令 #21（2026-11-15）：固定 60 秒拉满即原出厂口径
 
     // ---- 合法范围（Apply 钳制） ----
     public const int FailGateMin = 1, FailGateMax = 20;
@@ -22,6 +23,7 @@ public static class AdvancedTuning
     public const int ListCacheSecMin = 5, ListCacheSecMax = 600;
     public const long RetryBaseMsMin = 10_000, RetryBaseMsMax = 30 * 60_000;
     public const long RetryMaxMsMin = 60_000, RetryMaxMsMax = 24 * 60 * 60_000;
+    public const int PrefetchWindowSecMin = 10, PrefetchWindowSecMax = 300;
 
     /// <summary>自愈门槛：连续起播失败几次才启动自救判别（低=自救快但易误伤，高=稳但自救慢）。</summary>
     public static int SelfHealFailGate { get; private set; } = DefaultFailGate;
@@ -33,10 +35,17 @@ public static class AdvancedTuning
     public static long RetryBaseMs { get; private set; } = DefaultRetryBaseMs;
     /// <summary>被拒重试封顶：指数退避最深退到几时（低=恢复探测勤，高=长退避省请求）。</summary>
     public static long RetryMaxMs { get; private set; } = DefaultRetryMaxMs;
+    /// <summary>预取库存时长（老板令 2026-11-15 三档位）：切片预取攒多深的库存（内核 LoadControl
+    /// 水位上限），档位 30/45/60 秒；默认 60=vc60 固定口径。改档后新开的台生效，正在播的台保持原档。</summary>
+    public static int PrefetchWindowSec { get; private set; } = DefaultPrefetchWindowSec;
 
     /// <summary>写入并钳制（UI 设置页与批量还原同一入口）。retryMax &lt; retryBase 时按 retryBase 收敛。</summary>
     public static void Apply(int failGate, long reprobeMs, int listCacheSec,
-        long retryBaseMs, long retryMaxMs)
+        long retryBaseMs, long retryMaxMs) =>
+        Apply(failGate, reprobeMs, listCacheSec, retryBaseMs, retryMaxMs, PrefetchWindowSec);
+
+    public static void Apply(int failGate, long reprobeMs, int listCacheSec,
+        long retryBaseMs, long retryMaxMs, int prefetchWindowSec)
     {
         SelfHealFailGate = Math.Clamp(failGate, FailGateMin, FailGateMax);
         SelfHealReprobeMs = Math.Clamp(reprobeMs, ReprobeMsMin, ReprobeMsMax);
@@ -44,9 +53,10 @@ public static class AdvancedTuning
         RetryBaseMs = Math.Clamp(retryBaseMs, RetryBaseMsMin, RetryBaseMsMax);
         RetryMaxMs = Math.Clamp(retryMaxMs, RetryMaxMsMin, RetryMaxMsMax);
         if (RetryMaxMs < RetryBaseMs) RetryMaxMs = RetryBaseMs;
+        PrefetchWindowSec = Math.Clamp(prefetchWindowSec, PrefetchWindowSecMin, PrefetchWindowSecMax);
     }
 
     /// <summary>一键还原默认：全部回出厂值（设置页「一键还原默认」唯一入口）。</summary>
     public static void ResetToDefaults() =>
-        Apply(DefaultFailGate, DefaultReprobeMs, DefaultListCacheSec, DefaultRetryBaseMs, DefaultRetryMaxMs);
+        Apply(DefaultFailGate, DefaultReprobeMs, DefaultListCacheSec, DefaultRetryBaseMs, DefaultRetryMaxMs, DefaultPrefetchWindowSec);
 }

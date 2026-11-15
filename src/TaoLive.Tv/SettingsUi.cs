@@ -780,6 +780,7 @@ public partial class MainActivity
     private static readonly int[] AdvGateSteps = { 1, 2, 3, 5, 8, 12 };
     private static readonly int[] AdvReprobeMinSteps = { 1, 2, 5, 10, 15 };
     private static readonly int[] AdvCacheSecSteps = { 15, 30, 60, 120, 300 };
+    private static readonly int[] AdvWindowSecSteps = { 30, 45, 60 }; // #67 库存档三档位（老板令 2026-11-15）
     private static readonly int[] AdvRetrySecSteps = { 30, 60, 120, 300, 600 }; // 起步；封顶 16 分钟（AdvancedTuning.DefaultRetryMaxMs 口径）
 
     private static int NextStep(int[] steps, int current)
@@ -886,6 +887,11 @@ public partial class MainActivity
                 () => $"重试节奏：起步 {AdvancedTuning.RetryBaseMs / 1000} 秒（默认 120）",
                 v => AdvancedTuning.Apply(AdvancedTuning.SelfHealFailGate, AdvancedTuning.SelfHealReprobeMs, AdvancedTuning.ListCacheSec, v * 1000L, AdvancedTuning.RetryMaxMs),
                 () => (int)(AdvancedTuning.RetryBaseMs / 1000));
+            AddKnob("切片预取的库存时长：出画后后台往深里攒多久的切片——攒深卡不住但直播延迟感重，攒浅跟得紧但抗抖差；改档后新开的台生效（默认 60）",
+                AdvWindowSecSteps,
+                () => $"预取库存：{AdvancedTuning.PrefetchWindowSec} 秒",
+                v => AdvancedTuning.Apply(AdvancedTuning.SelfHealFailGate, AdvancedTuning.SelfHealReprobeMs, AdvancedTuning.ListCacheSec, AdvancedTuning.RetryBaseMs, AdvancedTuning.RetryMaxMs, v),
+                () => AdvancedTuning.PrefetchWindowSec);
 
             var tip = new TextView(this)
             {
@@ -955,6 +961,7 @@ public partial class MainActivity
             ?.PutInt("adv_cache_sec", AdvancedTuning.ListCacheSec)
             ?.PutInt("adv_retry_base_sec", (int)(AdvancedTuning.RetryBaseMs / 1000))
             ?.PutInt("adv_retry_max_min", (int)(AdvancedTuning.RetryMaxMs / 60_000))
+            ?.PutInt("adv_prefetch_sec", AdvancedTuning.PrefetchWindowSec) // #67 库存档旋钮
             ?.Apply();
     }
 }
