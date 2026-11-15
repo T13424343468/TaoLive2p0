@@ -6,7 +6,7 @@ using Xunit;
 namespace TaoLive.Tests;
 
 /// <summary>
-/// 收口批①：58 路备源队列注入会话 + 稳定后回主源（迟滞判据）。
+/// 收口批①：84 条备源队列注入会话 + 稳定后回主源（迟滞判据）+ 活性按健康账轻排序（同台活源在前）。
 /// 固定时钟快拍不真等；回主源计时按注入单调钟推进。
 /// </summary>
 public class FallbackQueueTests
@@ -18,6 +18,42 @@ public class FallbackQueueTests
         var sources = urls.Select((u, i) =>
             new SourceEndpoint(u, i == 0 ? SourceKind.PureIp : SourceKind.Cdn, 10 - i)).ToList();
         return new Channel(id, $"频道-{id}", "测试", sources);
+    }
+
+    // ---- 活性按健康账轻排序（收口批①+v28：同台活源在前、账新者在前，只动同台内排序） ----
+
+    [Fact]
+    public void FromRegistry_light_sorts_alive_sources_first_by_recency()
+    {
+        // 注册表真实候选（新疆卫视 3 路）：按候选顺序注入健康账提示——
+        // 首路无账（保持纪律序垫到活源后）、次路死账、三路活账（两路活账中账新者在前）
+        var ch = new Channel("xj", "新疆卫视", "测试", new List<SourceEndpoint>());
+        var urls = FallbackQueueSource.FromRegistry(ch).Select(s => s.Url).ToList();
+        Assert.True(urls.Count >= 3, "注册表新疆卫视应有 ≥3 路候选");
+
+        long at = T0.ToUnixTimeMilliseconds();
+        var sorted = FallbackQueueSource.FromRegistry(ch, e => e.Url switch
+        {
+            var u when u == urls[0] => null,                                    // 无账：保持纪律序
+            var u when u == urls[1] => new FallbackQueueSource.FallbackHealthHint(false, at),      // 失效账
+            var u when u == urls[2] => new FallbackQueueSource.FallbackHealthHint(true, at + 60_000), // 活账（新）
+            _ => null,
+        }).Select(s => s.Url).ToList();
+
+        // 活源（账新者）排最前；无账与死账保持原注册表纪律序
+        Assert.Equal(urls[2], sorted[0]);
+        Assert.Equal(urls[0], sorted[1]);
+        Assert.Equal(urls[1], sorted[2]);
+        if (urls.Count > 3) Assert.Equal(urls.Skip(3), sorted.Skip(3));
+    }
+
+    [Fact]
+    public void FromRegistry_without_health_lookup_keeps_registry_order()
+    {
+        var ch = new Channel("xj", "新疆卫视", "测试", new List<SourceEndpoint>());
+        var expected = FallbackSourceRegistry.GetAll("新疆卫视").Select(e => e.Url).ToList();
+        var actual = FallbackQueueSource.FromRegistry(ch).Select(s => s.Url).ToList();
+        Assert.Equal(expected, actual);
     }
 
     // ---- 备源队列吃内置表 ----

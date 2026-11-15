@@ -66,7 +66,8 @@ public partial class MainActivity : Activity
         //（缩放档须在 BuildRoot 前就位，全套令牌按档位重算）
         _prefs = GetSharedPreferences("taolive_prefs", FileCreationMode.Private)!;
         UiScale.Factor = _prefs.GetFloat("ui_scale", 4f / 9f);
-        _warmupEnabled = _prefs.GetBoolean("warmup_enabled", true);
+        // 收口批④开关合流：预热与预检共车道只留预检开关，预热（开机全量预热+换台邻台预取+开机默认台焐热）
+        // 一律随 _precheckEnabled 同起同停——两个开关管同一条车道必出一个死开关（方案书收口批④原文）。
         _precheckEnabled = _prefs.GetBoolean("precheck_enabled", true);
         AdvancedTuning.Apply(
             _prefs.GetInt("adv_fail_gate", AdvancedTuning.DefaultFailGate),
@@ -125,16 +126,17 @@ public partial class MainActivity : Activity
             .AddTaoLiveSession(KernelFactory, ch =>
             {
                 // 换台即触发邻台预取（火车道让路：首帧未落地铁道自动门控，画面平稳优先）；
-                // 后台预热开关关闭时同步停——开关真实生效，不留死旋钮
-                if (_warmupEnabled) _ = Task.Run(() => prefetcher.PrefetchNeighborsAsync(ch, _channels));
+                // 预热随预检开关同起同停（收口批④开关合流）
+                if (_precheckEnabled) _ = Task.Run(() => prefetcher.PrefetchNeighborsAsync(ch, _channels));
             })
             .BuildServiceProvider();
         _manager = _services.GetRequiredService<PlaybackSessionManager>();
         // 内核回调异常出口（闪退镜黄⑤）：矩阵外跳转不掀回调链，落运行台账
         TaoLive.Session.PlaybackSession.KernelCallbackFailed += (_, msg) => CrashNet.Record($"[KernelCallback] {msg}");
-        // 收口批①：备源队列吃内置表（换源触发时才遍历注册表，不进预检常驻轮）；
+        // 收口批①：备源队列吃内置表（换源触发时才遍历注册表，不进预检常驻轮）+ 活性按健康账轻排序
+        // （同台活源在前、账新者在前——只动同台内排序不改台间顺序，v28 轻排序条款）；
         // 回主源迟滞判据=主源预检轮次连续命中 OK ≥3 次（复用预检结果，不另起独立探测）+ 稳定 5 分钟（管理器内判）
-        _manager.FallbackSourceProvider = TaoLive.Session.FallbackQueueSource.FromRegistry;
+        _manager.FallbackSourceProvider = ch => FallbackQueueSource.FromRegistry(ch, FallbackHealthHintOf);
         _manager.PrimaryAliveConfirmed = ch =>
             _precheck.SourceHealthOf(ch) is { State: ChannelHealth.Alive, ConsecutiveOks: >= PlaybackSessionManager.ReturnToPrimaryMinConsecutiveOks };
         // 收口批③：会话 LRU 按内存分档（memoryClass≤128MB 低配档 4、高配 8；定标后只调常量）；取不到按低配保守
@@ -192,8 +194,8 @@ public partial class MainActivity : Activity
         };
 
         // 开机预热（W8：取票口预取进 5 分钟缓存，换台零等待；退避账挂账不烧请求）
-        // 后台预热开关关闭时跳过（设置面板真实开关，不留死旋钮）
-        if (_warmupEnabled)
+        // 预热随预检开关同起同停（收口批④开关合流，不再单设开关）
+        if (_precheckEnabled)
         {
             _ = Task.Run(async () =>
             {
@@ -237,7 +239,7 @@ public partial class MainActivity : Activity
                 {
                     var idx = DefaultChannelIndex();
                     ShowToast($"正在打开 {_channels[idx].Name}");
-                    if (_warmupEnabled)
+                    if (_precheckEnabled)
                     {
                         try
                         {
@@ -492,6 +494,29 @@ public partial class MainActivity : Activity
     {
         _precheckCts?.Cancel();
         _precheckCts = null;
+    }
+
+    /// <summary>备援候选健康提示（收口批①轻排序只读账，不写账）：
+    /// 候选 URL 对上台目录内来源变体（同址匹配），取健康账结论——活源带核验时间（账新者在前，越旧权重越低）；
+    /// 无账/未探返回 null（保持注册表纪律序）。只动同台内排序，不改台间顺序（v28 条款）。</summary>
+    private FallbackQueueSource.FallbackHealthHint? FallbackHealthHintOf(SourceEndpoint endpoint)
+    {
+        long bestAt = 0;
+        var best = ChannelHealth.Unknown;
+        foreach (var ch in _channels)
+        {
+            if (ch.Unavailable) continue;
+            var hasUrl = false;
+            foreach (var s in ch.Sources)
+            {
+                if (string.Equals(s.Url, endpoint.Url, StringComparison.Ordinal)) { hasUrl = true; break; }
+            }
+            if (!hasUrl) continue;
+            var entry = _precheck.SourceHealthOf(ch);
+            if (entry is null) continue;
+            if (entry.CheckedAtMs > bestAt) { bestAt = entry.CheckedAtMs; best = entry.State; }
+        }
+        return best == ChannelHealth.Unknown ? null : new FallbackQueueSource.FallbackHealthHint(best == ChannelHealth.Alive, bestAt);
     }
 
     private void SwitchToCurrent()

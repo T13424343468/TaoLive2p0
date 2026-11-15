@@ -39,7 +39,6 @@ public partial class MainActivity
     private TextView? _licenseCloseBtn;
 
     private ISharedPreferences _prefs = default!;
-    private bool _warmupEnabled = true;
 
     private int Dp(float v) => (int)(v * Resources!.DisplayMetrics!.Density + 0.5f);
 
@@ -184,10 +183,10 @@ public partial class MainActivity
             ToggleAutoStart, "#F7F5EE", OpenAutoStartSettings);
         // ⑥开机默认台（方案书收口批②）：设置项指定台，未设进频道列表首位；确认=循环下一个台（含「未指定」档）
         AddRow($"开机默认台：{DefaultChannelLabel()}（确认切换）", CycleDefaultChannel, "#F7F5EE");
-        // 后台预热：真实控制开机全量预热与换台邻台预取（关=两条链路同步停）
-        AddRow($"后台预热：{(_warmupEnabled ? "开" : "关")}（确认键切换）", ToggleWarmup, "#F7F5EE");
-        // 预检握手（vc53 v1.0.8 一比一）：真实控制常驻循环预检（关=循环同停）
-        AddRow($"预检握手：{(_precheckEnabled ? "开" : "关")}（确认键切换）", TogglePrecheck, "#F7F5EE");
+        // 预检握手（vc53 v1.0.8 一比一）：真实控制常驻循环预检（关=循环同停）；
+        // 收口批④开关合流：预热与预检两个开关管同一条车道必出一个死开关——只留本开关，
+        // 预热（开机全量预热+换台邻台预取）随预检同起同停，不再单设开关。
+        AddRow($"预检握手：{(_precheckEnabled ? "开" : "关")}（确认键切换 · 预热随此开关同起同停）", TogglePrecheck, "#F7F5EE");
         AddRow($"显示大小：{DisplaySizeLabel()}（确认键切换）", CycleDisplaySize, "#F7F5EE");
         AddRow("崩溃日志（点按查看）", ShowCrashLog, "#C9D6E2");
         AddRow("自诊断（点按查看）", ShowDiagPanel, "#C9D6E2");
@@ -238,14 +237,6 @@ public partial class MainActivity
         _prefs.Edit()?.PutString("default_channel", next < 0 ? "" : channels[next].Id)?.Apply();
         RefreshSettingsRows();
         ShowToast(next < 0 ? "开机默认台：未指定（列表第一个）" : $"开机默认台：{channels[next].Name}");
-    }
-
-    private void ToggleWarmup()
-    {
-        _warmupEnabled = !_warmupEnabled;
-        _prefs.Edit()?.PutBoolean("warmup_enabled", _warmupEnabled)?.Apply();
-        RefreshSettingsRows();
-        ShowToast(_warmupEnabled ? "后台预热：开（重启后恢复全量预热）" : "后台预热：关（邻台预取同步停）");
     }
 
     private void TogglePrecheck()
