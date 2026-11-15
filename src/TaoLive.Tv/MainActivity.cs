@@ -579,7 +579,7 @@ public partial class MainActivity : Activity
             Visibility = ViewStates.Invisible,
         };
         _toast.SetTextColor(InkTranslucency.TextPrimary(this));
-        _toast.SetBackgroundColor(InkTranslucency.InfoColor(this));
+        _toast.Background = InkTranslucency.HintBackground(this); // #66 高透自适应水墨皮（亮屏深托字、暗房高透）
         InkTranslucency.ApplyReadabilityShadow(_toast);
         _toast.SetPadding(UiScale.Px(36), UiScale.Px(16), UiScale.Px(36), UiScale.Px(16)); // #15 尺寸令
         _toast.TextSize = UiScale.Sp(22);
@@ -1690,10 +1690,12 @@ public partial class MainActivity : Activity
         _main.PostDelayed(_digitCommit, 1200);
     }
 
-    /// <summary>信息条（vc53 InfoBar 口径）：顶部居中，自动隐藏；文案即给即显。</summary>
+    /// <summary>信息条（vc53 InfoBar 口径）：顶部居中，自动隐藏；文案即给即显。
+    /// #66：每次亮条重取自适应水墨皮——开关灯/调亮度后底色随之变化，不必等重建界面。</summary>
     private void ShowToast(string text)
     {
         _toast.Text = text;
+        _toast.Background = InkTranslucency.HintBackground(this);
         _toast.Visibility = ViewStates.Visible;
         _main.RemoveCallbacks(_toastHide);
         _main.PostDelayed(_toastHide, 2200);

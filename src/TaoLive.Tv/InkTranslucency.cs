@@ -33,8 +33,11 @@ public static class InkTranslucency
     /// <summary>焦点细边框透明度：v1.0.9 第③项加深（104→160），低配电视肉眼清晰可辨。</summary>
     public const int FocusStrokeAlpha = 160;
 
-    /// <summary>FlashInfo/信息条底色透明度：v1.0.9 第③项调深（150→200），亮画面上文字保持可读。</summary>
-    public const int InfoAlpha = 200;
+    /// <summary>FlashInfo/信息条底色透明度：#66 老板令 2026-11-15 起改按系统亮度连续自适应——
+    /// 原固定 200 过闷；亮屏（亮画面上白字需深底托住）取 152、暗房取 88 高透，中间线性插值，
+    /// 文字清晰由可读性阴影兜底。范围钳制 64–200。</summary>
+    public const int InfoAlphaBright = 152;
+    public const int InfoAlphaDark = 88;
 
     /// <summary>起播亮牌底色透明度。</summary>
     public const int LoadingAlpha = 216;
@@ -67,8 +70,30 @@ public static class InkTranslucency
     /// <summary>进阶调优页底色：固定加深一档，不跟画面亮度走（vc41 口径）。</summary>
     public static Color PanelColorDeep(Context ctx) => Color.Argb(PanelDeepAlpha, InkR, InkG, InkB);
 
-    /// <summary>自适应信息条底色：暗屏时加深一档，文字保持可读。</summary>
-    public static Color InfoColor(Context ctx) => Color.Argb(Boost(ctx, InfoAlpha), InkR, InkG, InkB);
+    /// <summary>#66 提示底自适应透明度：按系统亮度 0–255 连续插值——亮屏取 InfoAlphaBright（亮画面上
+    /// 白字需深底托住），暗房取 InfoAlphaDark（高透），中间线性过渡；钳制 64–200。</summary>
+    private static int HintAlphaFor(Context ctx)
+    {
+        int bright = 128;
+        try { bright = global::Android.Provider.Settings.System.GetInt(ctx.ContentResolver,
+            global::Android.Provider.Settings.System.ScreenBrightness, 128); } catch { }
+        float t = Math.Clamp(bright / 255f, 0f, 1f);
+        return Math.Clamp((int)(InfoAlphaDark + (InfoAlphaBright - InfoAlphaDark) * t + 0.5f), 64, 200);
+    }
+
+    /// <summary>自适应信息条底色：#66 起改高透+按系统亮度连续自适应（亮屏深托字、暗房高透），文字由可读性阴影兜底。</summary>
+    public static Color InfoColor(Context ctx) => Color.Argb(HintAlphaFor(ctx), InkR, InkG, InkB);
+
+    /// <summary>信息条完整皮：自适应水墨底 + 纸白细边框圆角（同 FocusDrawable 效果层同构），
+    /// #66 风格统一口径——画面上的提示与面板/焦点效果同一套水墨语言。每次亮条重取，亮度变化即生效。</summary>
+    public static GradientDrawable HintBackground(Context ctx)
+    {
+        var d = new GradientDrawable(GradientDrawable.Orientation.LeftRight, new int[] { 0, 0 });
+        d.SetColor(InfoColor(ctx));
+        d.SetStroke(1, Color.Argb(FocusStrokeAlpha, PaperR, PaperG, PaperB));
+        d.SetCornerRadius(8f);
+        return d;
+    }
 
     /// <summary>自适应亮牌底色：暗屏时加深一档。</summary>
     public static Color LoadingColor(Context ctx) => Color.Argb(Boost(ctx, LoadingAlpha), InkR, InkG, InkB);
