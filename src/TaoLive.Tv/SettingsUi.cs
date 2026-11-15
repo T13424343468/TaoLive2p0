@@ -13,7 +13,7 @@ namespace TaoLive.Tv;
 /// <summary>
 /// 软件设置面板 + 三子页（崩溃日志全屏 / 自诊断 / 进阶调优）+ 显示大小档 + 三级跳。
 /// UI 布局与文案照 vc53（eef464b MainActivity 对应段）；2.0 只接真实接线面：
-/// 预检握手 / 开机自启在 2.0 无承接（无预检调度、无 BootReceiver），砍行不留死旋钮；
+/// 预检握手已接真（常驻循环预检，MainActivity.StartPrecheckLoop）；开机自启在 2.0 无 BootReceiver 承接，砍行不留死旋钮；
 /// 后台预热开关真实控制开机全量预热与换台邻台预取。
 /// </summary>
 public partial class MainActivity
@@ -169,6 +169,8 @@ public partial class MainActivity
         AddLabel("── 软件设置 ──");
         // 后台预热：真实控制开机全量预热与换台邻台预取（关=两条链路同步停）
         AddRow($"后台预热：{(_warmupEnabled ? "开" : "关")}（确认键切换）", ToggleWarmup, "#F7F5EE");
+        // 预检握手（vc53 v1.0.8 一比一）：真实控制常驻循环预检（关=循环同停）
+        AddRow($"预检握手：{(_precheckEnabled ? "开" : "关")}（确认键切换）", TogglePrecheck, "#F7F5EE");
         AddRow($"显示大小：{DisplaySizeLabel()}（确认键切换）", CycleDisplaySize, "#F7F5EE");
         AddRow("崩溃日志（点按查看）", ShowCrashLog, "#C9D6E2");
         AddRow("自诊断（点按查看）", ShowDiagPanel, "#C9D6E2");
@@ -193,6 +195,16 @@ public partial class MainActivity
         _prefs.Edit()?.PutBoolean("warmup_enabled", _warmupEnabled)?.Apply();
         RefreshSettingsRows();
         ShowToast(_warmupEnabled ? "后台预热：开（重启后恢复全量预热）" : "后台预热：关（邻台预取同步停）");
+    }
+
+    private void TogglePrecheck()
+    {
+        _precheckEnabled = !_precheckEnabled;
+        _prefs.Edit()?.PutBoolean("precheck_enabled", _precheckEnabled)?.Apply();
+        if (_precheckEnabled) StartPrecheckLoop();
+        else StopPrecheckLoop();
+        RefreshSettingsRows();
+        ShowToast(_precheckEnabled ? "预检握手：开" : "预检握手：关");
     }
 
     // —— 显示大小（vc42 定稿梯子）：大=2/3、中=4/9、小=8/27；面板/字/间距同一系数整体缩放 ——

@@ -43,6 +43,11 @@ public partial class MainActivity : Activity
     private Java.Lang.Runnable _toastHide = default!;
     private readonly CntvEpgClient _epg = new();
     private HashSet<string> _favorites = new();
+    private bool _precheckEnabled = true;   // 预检握手开关（vc53 v1.0.8 用户拍板：设置面板可切，持久化）
+    private ChannelPrecheck _precheck = default!;
+    private TicketResolver _resolver = default!;
+    private System.Threading.CancellationTokenSource? _precheckCts;
+    private static readonly HttpClient PrecheckHttp = new() { Timeout = TimeSpan.FromSeconds(5) };
 
     protected override void OnCreate(Bundle? savedInstanceState)
     {
@@ -53,6 +58,7 @@ public partial class MainActivity : Activity
         _prefs = GetSharedPreferences("taolive_prefs", FileCreationMode.Private)!;
         UiScale.Factor = _prefs.GetFloat("ui_scale", 4f / 9f);
         _warmupEnabled = _prefs.GetBoolean("warmup_enabled", true);
+        _precheckEnabled = _prefs.GetBoolean("precheck_enabled", true);
         AdvancedTuning.Apply(
             _prefs.GetInt("adv_fail_gate", AdvancedTuning.DefaultFailGate),
             _prefs.GetInt("adv_reprobe_min", 5) * 60_000L,
@@ -62,7 +68,7 @@ public partial class MainActivity : Activity
             _prefs.GetInt("adv_proxy_port", AdvancedTuning.DefaultProxyPort));
         CrashNet.Install(); // 未捕获异常先落日志再放行（崩溃日志页可查可清）
 
-        var resolver = new TicketResolver();
+        var resolver = _resolver = new TicketResolver();
 
         // 每会话独享内核（Current+Standby 双实例热切的资源前提）；
         // 取流解析器闭包持有本实例，频道上下文由内核 Play 自取（双实例不共用上下文）
@@ -136,6 +142,14 @@ public partial class MainActivity : Activity
                 catch { /* 预热失败不影响播放 */ }
             });
         }
+
+        // 开机预检握手（vc53 v1.0.8 一比一，常驻后台轮）：全台按序轻探——Web 取票口换票成功=服务器可达
+        // （顺手焐热取票缓存，换台零等待）；直连源只取几 KB 头数据验证，不建视频传输。600ms/台限速
+        // 防判异常流量；探测结果落健康账（持久化，跨启动可比）。开关关=循环同停，不留死旋钮。
+        _precheck = new ChannelPrecheck(ProbeChannelAsync, 600);
+        try { _precheck.AttachHealthStore(new SourceHealthStore(FilesDir!.AbsolutePath)); }
+        catch { /* 账本初始化失败按账空跑，预检不挡启动 */ }
+        if (_precheckEnabled) StartPrecheckLoop();
 
         Window!.AddFlags(WindowManagerFlags.KeepScreenOn);
         BuildRoot();
@@ -214,6 +228,57 @@ public partial class MainActivity : Activity
         _currentIndex = index;
         SwitchToCurrent();
         ShowPlayer();
+    }
+
+    /// <summary>预检轻探（vc53 口径）：Web 取票口换票成功即服务器可达（结果落 5 分钟缓存）；直连源只取头数据验证，不建视频传输。</summary>
+    private async Task<bool> ProbeChannelAsync(Channel ch)
+    {
+        foreach (var ep in ch.Sources)
+        {
+            if (!ep.IsValid) continue;
+            try
+            {
+                if (ep.Kind == SourceKind.Web)
+                {
+                    var url = await _resolver.ResolveAsync(ep, ch.Id, ch.Name).ConfigureAwait(false);
+                    if (!string.IsNullOrEmpty(url)) return true;
+                }
+                else
+                {
+                    using var req = new HttpRequestMessage(HttpMethod.Get, ep.Url);
+                    req.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, 8191);
+                    using var res = await PrecheckHttp.SendAsync(req).ConfigureAwait(false);
+                    if ((int)res.StatusCode < 400) return true;
+                }
+            }
+            catch { /* 单源失败落下一源；全断才判死 */ }
+        }
+        return false;
+    }
+
+    /// <summary>常驻循环预检（vc53 口径）：保态复测列表不闪烁；轮间歇 20 秒；单轮失败下一轮再来。</summary>
+    private void StartPrecheckLoop()
+    {
+        StopPrecheckLoop();
+        _precheckCts = new System.Threading.CancellationTokenSource();
+        var ct = _precheckCts.Token;
+        _ = Task.Run(async () =>
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                try { await _precheck.RunAsync(_channels, ct, keepKnownState: true).ConfigureAwait(false); }
+                catch (OperationCanceledException) { return; }
+                catch { /* 单轮失败不掀循环 */ }
+                try { await Task.Delay(20_000, ct).ConfigureAwait(false); }
+                catch (OperationCanceledException) { return; }
+            }
+        });
+    }
+
+    private void StopPrecheckLoop()
+    {
+        _precheckCts?.Cancel();
+        _precheckCts = null;
     }
 
     private void SwitchToCurrent()
