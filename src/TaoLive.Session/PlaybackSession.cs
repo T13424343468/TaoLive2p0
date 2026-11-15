@@ -60,6 +60,12 @@ public sealed class PlaybackSession
     /// <summary>本会话累计断流自救切换次数；换台归零。</summary>
     public int FailoverCount { get; private set; }
 
+    /// <summary>
+    /// 备源队列吃内置表（方案书收口批①）：建队列时在本台源之后追加该供给给出的备援候选
+    /// （URL 去重，本台已有同址不重复入队）；空=不吃内置表（既有契约不变，测试可注空）。
+    /// </summary>
+    public Func<Channel, IReadOnlyList<SourceEndpoint>>? FallbackSourceProvider { get; set; }
+
     /// <summary>当前输出面句柄（管理器热切换移交用）；未接面为 IntPtr.Zero。</summary>
     public IntPtr SurfaceHandle => _surfaceHandle;
 
@@ -123,6 +129,7 @@ public sealed class PlaybackSession
         _active = true;
         _channel = p.Channel;
         _queue = p.Channel.Sources.Where(s => s.IsValid).ToList();
+        AppendFallbacks();
         _endpointIndex = _queue.FindIndex(s => s.Url == p.Endpoint.Url);
         _preferLowLatency = p.PreferLowLatency;
         Transition(PlaybackState.Buffering, "start requested");
@@ -150,6 +157,7 @@ public sealed class PlaybackSession
         _active = true;
         _channel = channel;
         _queue = channel.Sources.Where(s => s.IsValid).ToList();
+        AppendFallbacks();
         _endpointIndex = 0;
         FailoverCount = 0;
         Transition(PlaybackState.Buffering, "change channel");
@@ -311,6 +319,27 @@ public sealed class PlaybackSession
         if (_hasSurface)
         {
             _player.AttachSurface(_surfaceHandle);
+        }
+    }
+
+    /// <summary>
+    /// 备源队列吃内置表（方案书收口批①）：换源触发时才遍历注册表（不进预检常驻轮），
+    /// 本台源在前、注册表纪律序（观察档垫底/纯 IP 优先/登记序=2026-11-12 实测活性基线）在后；
+    /// 同址去重，本台已有的源不重复入队。注册表 Referer/UA 在 2.0 端点模型无承接面（内核不带每源头），仅收录 URL。
+    /// </summary>
+    private void AppendFallbacks()
+    {
+        if (_channel is null || FallbackSourceProvider is not { } provider)
+        {
+            return;
+        }
+        var seen = new HashSet<string>(_queue.Select(s => s.Url), StringComparer.Ordinal);
+        foreach (var candidate in provider(_channel))
+        {
+            if (candidate.IsValid && seen.Add(candidate.Url))
+            {
+                _queue.Add(candidate);
+            }
         }
     }
 }

@@ -26,6 +26,7 @@ public class SourceHealthEntry
     public ChannelHealth State { get; set; } = ChannelHealth.Unknown;
     public long CheckedAtMs { get; set; }   // 最近核验时间（Unix 毫秒，跨启动可比；0=未核验）
     public int ConsecutiveFails { get; set; } // 连续失败计数（v1.0.10：达阈值自动淘汰交回重探）
+    public int ConsecutiveOks { get; set; }   // 连续探活成功计数（收口批①回主源判据：预检轮次连续命中 ≥3 次才回主源；不落盘，重启从严从零计）
 }
 
 /// <summary>
@@ -180,6 +181,7 @@ public class ChannelPrecheck
         entry.State = ok ? ChannelHealth.Alive : ChannelHealth.Dead;
         entry.CheckedAtMs = nowMs > 0 ? nowMs : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         entry.ConsecutiveFails = ok ? 0 : entry.ConsecutiveFails + 1;
+        entry.ConsecutiveOks = ok ? entry.ConsecutiveOks + 1 : 0; // 回主源判据账：连续命中次数随每轮预检/实测回写累计
         if (!ok && entry.ConsecutiveFails >= RetireAfterConsecutiveFails)
         {
             _sourceHealth.TryRemove(key, out _); // 连挂自动淘汰：不再被选源取用，交回预检重探

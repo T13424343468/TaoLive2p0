@@ -21,21 +21,61 @@ public sealed class PlaybackSessionManager
     /// <summary>会话表容量上限（LRU 淘汰已让位会话；Current/Standby 永不淘汰）。</summary>
     public const int MaxRetainedSessions = 8;
 
+    /// <summary>回主源稳定窗口（方案书收口批①·迟滞判据初值）：断流自救后播放无断流满此时长才回；终值随真机定标。</summary>
+    public static readonly TimeSpan ReturnToPrimaryStableFor = TimeSpan.FromMinutes(5);
+
+    /// <summary>回主源健康账门槛：主源预检轮次连续命中 OK 至少此次数（复用预检结果，不另起独立探测）。</summary>
+    public const int ReturnToPrimaryMinConsecutiveOks = 3;
+
     private readonly Func<PlaybackSession> _sessionFactory;
     private readonly IMainThreadDispatcher _dispatcher;
     private readonly Action<Channel>? _onSwitchingChannel;
     private readonly bool _hotStandbyEnabled;
     private readonly Dictionary<string, PlaybackSession> _sessions = new(StringComparer.Ordinal);
     private readonly Dictionary<string, long> _lastUsed = new(StringComparer.Ordinal);
+    private readonly object _returnGate = new();
+    private readonly Func<long> _monotonicMs;
+    private Func<Channel, IReadOnlyList<SourceEndpoint>>? _fallbackProvider;
+    private Func<Channel, bool>? _primaryAliveConfirmed;
+    private PlaybackSession? _returnStableSession;
+    private long _returnStableSinceMs;
     private long _stamp;
 
     public PlaybackSessionManager(Func<PlaybackSession> sessionFactory, IMainThreadDispatcher? dispatcher = null,
-        Action<Channel>? onSwitchingChannel = null, bool hotStandbyEnabled = false)
+        Action<Channel>? onSwitchingChannel = null, bool hotStandbyEnabled = false,
+        Func<Channel, bool>? primaryAliveConfirmed = null, Func<long>? monotonicMs = null)
     {
         _sessionFactory = sessionFactory ?? throw new ArgumentNullException(nameof(sessionFactory));
         _dispatcher = dispatcher ?? new ImmediateMainThreadDispatcher();
         _onSwitchingChannel = onSwitchingChannel;
         _hotStandbyEnabled = hotStandbyEnabled;
+        _primaryAliveConfirmed = primaryAliveConfirmed;
+        _monotonicMs = monotonicMs ?? (() => Environment.TickCount64); // 单调时钟（方案书 v12：计时账一律按单调钟）
+    }
+
+    /// <summary>
+    /// 备源队列吃内置表（方案书收口批①）：新会话与既有会话统一挂供给；未设=不吃内置表。
+    /// </summary>
+    public Func<Channel, IReadOnlyList<SourceEndpoint>>? FallbackSourceProvider
+    {
+        get => _fallbackProvider;
+        set
+        {
+            _fallbackProvider = value;
+            foreach (var session in _sessions.Values)
+            {
+                session.FallbackSourceProvider = value;
+            }
+        }
+    }
+
+    /// <summary>
+    /// 回主源健康账判据（方案书收口批①）：主源预检轮次连续命中 OK ≥3 次才准回；未设=不回主源（从严）。
+    /// </summary>
+    public Func<Channel, bool>? PrimaryAliveConfirmed
+    {
+        get => _primaryAliveConfirmed;
+        set => _primaryAliveConfirmed = value;
     }
 
     /// <summary>当前前台会话；尚未切换过为空。</summary>
@@ -157,8 +197,46 @@ public sealed class PlaybackSessionManager
     public PlaybackSession? TryGet(string channelId) =>
         _sessions.TryGetValue(channelId, out var session) ? session : null;
 
-    /// <summary>看门狗泵：由壳层定时器周期调用，仅作用于当前会话。</summary>
-    public void Tick() => Current?.CheckWatchdog();
+    /// <summary>看门狗泵：由壳层定时器周期调用，仅作用于当前会话；顺带跑回主源迟滞判据。</summary>
+    public void Tick()
+    {
+        var current = Current;
+        if (current is null)
+        {
+            lock (_returnGate) _returnStableSession = null;
+            return;
+        }
+        current.CheckWatchdog();
+        TryReturnToPrimary(current);
+    }
+
+    /// <summary>
+    /// 稳定后回主源（方案书收口批①·迟滞判据）：断流自救切到备源后——
+    /// 播放无断流满 5 分钟（回后若再断重新计时）且主源预检轮次连续命中 OK ≥3 次，
+    /// 仅当前台前台稳定时触发，热备攒流中不触发（Tick 只泵 Current，防主备横跳）。
+    /// </summary>
+    private void TryReturnToPrimary(PlaybackSession current)
+    {
+        if (current.CurrentLineIndex <= 0 || current.State != PlaybackState.Playing)
+        {
+            return;
+        }
+        lock (_returnGate)
+        {
+            if (!ReferenceEquals(_returnStableSession, current)
+                || _monotonicMs() - _returnStableSinceMs < ReturnToPrimaryStableFor.TotalMilliseconds)
+            {
+                return;
+            }
+            var channel = current.CurrentChannel;
+            if (channel is null || _primaryAliveConfirmed?.Invoke(channel) != true)
+            {
+                return;
+            }
+            _returnStableSession = null; // 回后若再断由 Failover 事件重新起窗计时
+        }
+        current.SwitchLine(0);
+    }
 
     private void Touch(string channelId)
     {
@@ -193,8 +271,44 @@ public sealed class PlaybackSessionManager
 
     private void WireSession(PlaybackSession session)
     {
+        session.FallbackSourceProvider = _fallbackProvider;
+        session.Failover += (s, _) =>
+        {
+            // 回主源计时账（方案书 v12 单调钟）：每次断流自救切换重新起窗（回后若再断重新计时）
+            if (ReferenceEquals(s, Current))
+            {
+                lock (_returnGate)
+                {
+                    _returnStableSession = null; // 先归 Idle/Buffering，等 Playing 再起窗
+                    _returnStableSinceMs = _monotonicMs();
+                }
+            }
+        };
         session.StateChanged += (_, state) =>
+        {
+            TrackReturnStability(session, state);
             _dispatcher.Post(() => SessionStateChanged?.Invoke(this, new SessionStateEventArgs(session, state)));
+        };
+    }
+
+    /// <summary>回主源稳定窗：当前台切回 Playing 起窗，离开 Playing（断流/换台）即重新计时。</summary>
+    private void TrackReturnStability(PlaybackSession session, PlaybackState state)
+    {
+        lock (_returnGate)
+        {
+            if (state == PlaybackState.Playing
+                && ReferenceEquals(session, Current)
+                && session.CurrentLineIndex > 0)
+            {
+                _returnStableSession = session;
+                _returnStableSinceMs = _monotonicMs();
+            }
+            else if (_returnStableSession is { } armed
+                     && (state != PlaybackState.Playing || !ReferenceEquals(session, Current)))
+            {
+                _returnStableSession = null;
+            }
+        }
     }
 
     private void RaiseCurrentChanged(PlaybackSession session) =>

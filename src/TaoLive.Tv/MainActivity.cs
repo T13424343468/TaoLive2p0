@@ -101,6 +101,11 @@ public partial class MainActivity : Activity
             })
             .BuildServiceProvider();
         _manager = _services.GetRequiredService<PlaybackSessionManager>();
+        // 收口批①：备源队列吃内置表（换源触发时才遍历注册表，不进预检常驻轮）；
+        // 回主源迟滞判据=主源预检轮次连续命中 OK ≥3 次（复用预检结果，不另起独立探测）+ 稳定 5 分钟（管理器内判）
+        _manager.FallbackSourceProvider = TaoLive.Session.FallbackQueueSource.FromRegistry;
+        _manager.PrimaryAliveConfirmed = ch =>
+            _precheck.SourceHealthOf(ch) is { State: ChannelHealth.Alive, ConsecutiveOks: >= PlaybackSessionManager.ReturnToPrimaryMinConsecutiveOks };
         _favorites = GetSharedPreferences("favorites", FileCreationMode.Private)!
             .GetStringSet("ids", new List<string>())!.ToHashSet();
         // 备源耗尽提示（一期口径：全源不可达时明确提示，不静默装死；OK 键重试）
