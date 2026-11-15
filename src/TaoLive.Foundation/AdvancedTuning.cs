@@ -14,7 +14,7 @@ public static class AdvancedTuning
     public const long DefaultReprobeMs = 5 * 60_000;
     public const int DefaultListCacheSec = 60;
     public const long DefaultRetryBaseMs = 120_000;
-    public const long DefaultRetryMaxMs = 7_200_000;
+    public const long DefaultRetryMaxMs = 16 * 60_000; // vc53 HotSwap 口径：2 分钟起步、2/4/8/16 分钟封顶（方案书 v27「沿 vc53 口径」归一）
 
     // ---- 合法范围（Apply 钳制） ----
     public const int FailGateMin = 1, FailGateMax = 20;
