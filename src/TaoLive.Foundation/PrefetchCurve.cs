@@ -12,6 +12,11 @@ public static class PrefetchCurve
     /// 卡后重入门槛同用此值（LoadControl 第 3/4 参同源）。</summary>
     public static readonly TimeSpan StartupThreshold = TimeSpan.FromSeconds(12);
 
+    /// <summary>首帧门槛线（vc66 提速令 2026-11-15 老板问「能不能加快解码器渲染」）：
+    /// 首次起播缓冲到 5 秒即出画——12 秒门槛里音频/视频都陪等满水位，慢热被放大成「音迟迟不出、画迟迟不出」。
+    /// 出画后内核后台继续填水到预取水位线；卡后重入门槛仍用 StartupThreshold（12 秒），出得快也不掉顺滑（#12 意图保留）。</summary>
+    public static readonly TimeSpan FirstFrameGate = TimeSpan.FromSeconds(5);
+
     /// <summary>预取水位线：出画后继续填到窗口取满（对应 10~30 秒延迟取舍）。</summary>
     public static readonly TimeSpan PrefillWaterline = TimeSpan.FromSeconds(30);
 }

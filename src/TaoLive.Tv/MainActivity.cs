@@ -174,6 +174,8 @@ public partial class MainActivity : Activity
             bool startupReported = false;            // 台账只记一次
             player.OnFrameTick += (_, e) =>
             {
+                // vc66：帧账只认当前会话的内核——热备攒流哑面解码的帧不替当前台续零帧账（只出声兜底不失明）
+                if (_manager.Current is not { } c || !ReferenceEquals(c.Kernel, player)) return;
                 _lastVideoFrameAtMs = System.Environment.TickCount64; // #75 音画同出兜底：视频帧活着，账随帧走
                 pulse.Record(e.AtUtc);
                 // 起播流畅台账（真机反馈批#12 统计令 2026-11-15，统计不能少）：首帧出画到平稳的时长落
@@ -374,8 +376,10 @@ public partial class MainActivity : Activity
         else if (e.State == PlaybackState.Buffering)
         {
             HideEmptyState();
-            _lastVideoFrameAtMs = System.Environment.TickCount64; // #75：进过渡即续账，恢复 Playing 后给 5 秒出帧宽限
-            _stallRebuildCount = 0;
+            _lastVideoFrameAtMs = System.Environment.TickCount64; // #75：进过渡即续账，恢复 Playing 后给出帧宽限
+            // vc66 修（老板真机反馈「画一直黑几秒后全线路不可达」）：此处不再清零重建计数——
+            // 只出声守卫的同源重建走的就是 Buffering 过渡，清了账就永远到不了「2 次封顶切线路」，原地打转烧队列。
+            // 计数只在用户真实换台（SwitchToCurrent）与帧恢复（守卫内）归零。
             // 断流自救（FailoverCount>0）零提示（方案书「热切断流自救全程零提示」，四镜·黑屏镜 11-15 修）：
             // 不铺遮罩不弹 OSD，画面保持最后一帧直到新流就绪；换台过渡（FailoverCount=0）才走 SwitchRevealPolicy。
             // 真机反馈批#2/#8 修 2026-11-15：铺遮罩=立即盖上不透明水墨深底（vc53 L588-605 口径），
@@ -393,19 +397,21 @@ public partial class MainActivity : Activity
             // 提示先于画面消失（老板令：文字要亮到真出画）。改由 VeilFrameTick 真出画一并撤字撤底。
             // 真机反馈批#11 续修 2026-11-15：Playing=内核 Ready（音视频齐），但新流首帧尚未真渲染，
             // 此刻撤遮罩会露旧台冻结帧几秒（老板真机实锤「台已切过来但画面一直挂着上个台」）。
-            // 遮罩改挂待撤旗：本台第一帧真出画（OnFrameTick）才撤（WireVeilReveal）；
-            // 10 秒安全网兜底（纯音频流/帧监听缺失，#75 音画同出口径），防遮罩长挂死屏。
+            // 遮罩改挂待撤旗：本台第一帧真出画（OnFrameTick）才撤（WireVeilReveal）。
+            // vc66 修（老板真机反馈「过一会音出来画还是黑」）：10 秒安全网掀盖取消——零帧掀盖就是露黑屏本身；
+            // 改挂 30 秒「帧活兜底网」：只有帧账活着（帧节拍在跳）但揭幕判定失灵的极端边角才掀盖，
+            // 真零帧期间遮罩保持 Loading，只出声守卫递进（重建→切线路→换源）直至真出画或失败终态接管。
             _veilAwaitingReveal = true;
             int revealSeq = _veilSeq;
             _main.PostDelayed(() =>
             {
                 if (!_veilAwaitingReveal || revealSeq != _veilSeq) return;
+                bool framesAlive = _lastVideoFrameAtMs != 0
+                    && System.Environment.TickCount64 - _lastVideoFrameAtMs < 5_000;
+                if (!framesAlive) return; // 真零帧：遮罩不掀，守卫递进中，失败终态/真出画接管
                 _veilAwaitingReveal = false;
                 HideSwitchVeil();
-                // #75 音画同出修（2026-11-15 老板令）：安全网 3 秒→10 秒——内核 Ready 而视频帧未出时
-                // 此前 3 秒即撤遮罩，露「只出声」黑屏（老板实锤「出音不出画」）。出画判定必须音画齐：
-                // 视频帧到（VeilFrameTick）才撤；安全网只兜纯音频流的死屏长挂，给音画同出让路。
-            }, 10000);
+            }, 30_000);
             // 换源黑屏埋点（黑屏镜黄④ 11-15）：换源起点到出画恢复的时长落运行台账（含 ≤500ms 快切段）
             if (_failoverAtMs is { } from)
             {
@@ -1095,30 +1101,34 @@ public partial class MainActivity : Activity
 
     // —— 看门狗泵（会话层 Tick：缓冲超时/卡流自救） ——————————————————
 
-    /// <summary>#75 音画同出兜底（2026-11-15 老板令，泵 3 秒节拍内调）：
-    /// 「放 1 秒卡半秒/出音不出画」=内核 READY 态视频断供，音频照走——既有看门狗不覆盖此态（无 Buffering 事件）。
-    /// 播放中 5 秒零视频帧即介入：同源快速重建（ChangeChannel 原台重起，优先同源恢复），
-    /// 连续 2 次未救回才切下一线路；有帧即清账。换台过渡期（遮罩挂起）不掺和，避免与自救竞速。</summary>
+    /// <summary>#75 音画同出兜底（2026-11-15 老板令，泵 3 秒节拍内调；vc66 重写治「画一直黑几秒后全线路不可达」）：
+    /// 「音出画不出」=内核 READY 态视频断供/慢热。vc66 三修：
+    /// ①零帧判定窗随真机出画耗时自校准（RevealEtaMs 指数均值×2，下限 8 秒）——慢热盒子不被 5 秒死窗掐死重起，
+    ///   画面在路上就被拦下重起是「画永远出不来」的第一根因（真机实锤：以前无守卫等得久但等得到）；
+    /// ②遮罩挂起期（出画倒计时中）同样值守——音频先出视频死时立刻走递进，不再干等安全网掀盖露黑；
+    /// ③计数只认用户换台与帧恢复归零（Buffering 过渡清账缺陷已修），2 次重建→切线路→线路走完强制进换源队列，
+    ///   备源耗尽即全线路不可达终态（空态文案接管），全程递进不原地打转。</summary>
     private void PumpAudioOnlyGuard()
     {
         if (_manager.Current is not { } cur
             || cur.State != PlaybackState.Playing
-            || cur.CurrentChannel is not { } ch
-            || _veilAwaitingReveal)
+            || cur.CurrentChannel is not { } ch)
         {
             return;
         }
-        if (_lastVideoFrameAtMs != 0 && System.Environment.TickCount64 - _lastVideoFrameAtMs < 5_000)
+        // vc66 ①：判定窗=8 秒与「2×真机出画耗时均值」取大——等得过慢热，也兜得住真死
+        var zeroWindowMs = (long)Math.Max(8_000, RevealEtaMs * 2);
+        if (_lastVideoFrameAtMs != 0 && System.Environment.TickCount64 - _lastVideoFrameAtMs < zeroWindowMs)
         {
             _stallRebuildCount = 0; // 有帧即清账：画面健康，重建计数归零
             return;
         }
-        if (_lastVideoFrameAtMs == 0) return; // 尚未出过帧：起播期归看门狗管，不抢
+        if (_lastVideoFrameAtMs == 0) return; // 尚未出过帧：起播极早期，过窗后再判（起播期看门狗同窗兜底）
         _lastVideoFrameAtMs = System.Environment.TickCount64; // 介入即重置：3 秒泵不连发
         if (_stallRebuildCount < 2)
         {
             _stallRebuildCount++;
-            CrashNet.Record($"[只出声兜底] 5 秒零视频帧，同源重建第 {_stallRebuildCount} 次（{ch.Name}）");
+            CrashNet.Record($"[只出声兜底] 零视频帧满 {zeroWindowMs}ms，同源重建第 {_stallRebuildCount} 次（{ch.Name}）");
             cur.ChangeChannel(ch); // 同源快速重建：FailoverCount 归零，先试原路
         }
         else if (cur.CurrentLineIndex + 1 < cur.LineCount)
@@ -1129,8 +1139,10 @@ public partial class MainActivity : Activity
         }
         else
         {
-            CrashNet.Record($"[只出声兜底] 已到最后线路，交会话备源自救（{ch.Name}）");
+            // vc66 ③：线路走完仍零帧不再静默挂 Playing——强制转换源队列，备源耗尽即不可达终态（带原因上屏）
+            CrashNet.Record($"[只出声兜底] 线路走完仍零帧，强制换源队列（{ch.Name}）");
             _stallRebuildCount = 0;
+            cur.ForceFailover("audio-only zero-frame");
         }
     }
 

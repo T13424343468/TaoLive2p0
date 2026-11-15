@@ -289,6 +289,19 @@ public sealed class PlaybackSession
         }
     }
 
+    /// <summary>当前会话内核（vc66：壳层帧账归本会话用——热备攒流哑面解码的帧不再替当前台续零帧账）。</summary>
+    public IPlayer Kernel => _player;
+
+    /// <summary>壳层只出声自救终段（vc66）：线路走完仍零帧，强制转 Failed 走换源队列——
+    /// 备源耗尽即全线路不可达终态，壳层空态接管；Playing/Reconnecting 之外的调用无害。</summary>
+    public void ForceFailover(string reason)
+    {
+        if (!_active) return;
+        if (_state is not (PlaybackState.Playing or PlaybackState.Reconnecting)) return;
+        Transition(PlaybackState.Failed, reason);
+        TryFailover(reason);
+    }
+
     /// <summary>播放中卡流：进入换台中间态，等待看门狗决策（计时按单调钟）。</summary>
     public void NotifyStalled()
     {

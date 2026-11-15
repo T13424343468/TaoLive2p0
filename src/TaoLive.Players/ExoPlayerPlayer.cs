@@ -29,6 +29,8 @@ public sealed class ExoPlayerPlayer : IPlayer
     private int _playGeneration; // 播放代次（闪退镜红② 11-15）：迟到 resolver 回调对不上代次即弃，不碰已释放内核
     private IntPtr _surfaceHandle;
     private bool _hasSurface;
+    private readonly Android.Content.Context _context;
+    private AndroidX.Media3.ExoPlayer.Video.PlaceholderSurface? _warmupSink; // vc66 哑面预热：攒流期焐热视频解码器
 
     /// <summary>
     /// 取流注入点（2.0 W4 口径）：API 取票口端点播前经 resolver 换真实流（频道号+运行时取票），
@@ -40,6 +42,7 @@ public sealed class ExoPlayerPlayer : IPlayer
     {
         ArgumentNullException.ThrowIfNull(context);
         _forwarder = new Forwarder(this);
+        _context = context;
         var playerBuilder = new AndroidX.Media3.ExoPlayer.ExoPlayerBuilder(context);
         playerBuilder.SetLoadControl(BuildLoadControl(context));
         // #76 锁画质防抖（2026-11-15 老板令，治「放 1 秒卡半秒」循环）：默认 ABR 在估速贴档位线抖动时
@@ -65,7 +68,8 @@ public sealed class ExoPlayerPlayer : IPlayer
 
     /// <summary>
     /// 缓冲深水接线（vc53 fix56 思路在 ExoPlayer 内核原生落位）：
-    /// - 起播门槛线=7 秒（PrefetchCurve.StartupThreshold）：缓冲到线即出画，首帧快字当头，不等满水位；
+    /// - 起播门槛线=首帧 5 秒即出画（vc66 提速令），出画后继续填水到预取水位线；
+    ///   卡后重入门槛 12 秒（#12 顺滑令保留）——首帧快、重入稳，两头都要；
     /// - 预取水位线=按设备内存自适应安全水位（BufferPolicy.MaxWatermarkSeconds：内存足 60s、低配 30-45s），
     ///   出画后内核后台继续把窗口填满——保满预取即此；
     /// - 水位读写下沉 Players 适配层口径：水位由内核 LoadControl 承担，会话层不掺内部。
@@ -88,7 +92,11 @@ public sealed class ExoPlayerPlayer : IPlayer
         int startupGateMs = (int)PrefetchCurve.StartupThreshold.TotalMilliseconds;
         // 步进式 builder（消 CS8602 可空链，同构造器口径）：绑定 fluent 链挂在可空返回上会报空解引用
         var loadBuilder = new AndroidX.Media3.ExoPlayer.DefaultLoadControl.Builder();
-        loadBuilder.SetBufferDurationsMs(watermarkMs, watermarkMs, startupGateMs, startupGateMs);
+        // vc66 提速令：首帧门槛与重入门槛分家——首起播 5 秒即出画（快字当头），卡后重入仍 12 秒（出就得流畅，#12 意图保留）
+        loadBuilder.SetBufferDurationsMs(
+            watermarkMs, watermarkMs,
+            (int)PrefetchCurve.FirstFrameGate.TotalMilliseconds,
+            startupGateMs);
         return loadBuilder.Build()!;
     }
 
@@ -167,6 +175,7 @@ public sealed class ExoPlayerPlayer : IPlayer
                 builder.SetMimeType(AndroidX.Media3.Common.MimeTypes.ApplicationM3u8);
             }
             var mediaItem = builder.Build() ?? throw new InvalidOperationException("MediaItem build returned null");
+            EnsureWarmVideoSink(); // vc66 哑面预热：无真面起播（热备攒流）也把视频解码器初始化到位，热切接管零解码器冷启
             _player.SetMediaItem(mediaItem);
             _player.Prepare();
             _player.PlayWhenReady = true;
@@ -197,6 +206,7 @@ public sealed class ExoPlayerPlayer : IPlayer
         _hasSurface = surfaceHandle != IntPtr.Zero;
         if (_hasSurface)
         {
+            ReleaseWarmupSink(); // 真面就位即退哑面：解码器保持热态，换面不换码（setSurface 廉价）
             // 壳层传入的是 Android.Views.Surface 的 Java 对象指针，需还原包装（壳层仍持有所有权，不转移）
             try
             {
@@ -216,6 +226,35 @@ public sealed class ExoPlayerPlayer : IPlayer
                 Reporter?.Invoke($"[内核挂面] 挂面失败（热切重挂遇死面）：{ex.Message}");
             }
         }
+    }
+
+    /// <summary>
+    /// vc66 哑面预热（老板令「加快解码器渲染速度」）：无真面起播时挂内核官方哑面（PlaceholderSurface），
+    /// 视频解码器随攒流初始化并解码——热备「无面起播」此前不解码视频，热切接管才现初始化解码器，
+    /// 慢热全压在换台瞬间（音先画后的主要时延之一）。真面 AttachSurface 即退哑面，解码器不冷启。
+    /// </summary>
+    private void EnsureWarmVideoSink()
+    {
+        if (_hasSurface || _warmupSink is not null) return;
+        try
+        {
+            _warmupSink = AndroidX.Media3.ExoPlayer.Video.PlaceholderSurface.NewInstance(_context, false);
+            if (_warmupSink is { } sink) _player.SetVideoSurface(sink);
+            Reporter?.Invoke("[内核预热] 无面起播挂哑面：视频解码器随攒流预热（vc66 提速令）");
+        }
+        catch (Exception ex)
+        {
+            _warmupSink = null;
+            Reporter?.Invoke($"[内核预热] 哑面预热不可用，退回无面攒流：{ex.Message}");
+        }
+    }
+
+    private void ReleaseWarmupSink()
+    {
+        if (_warmupSink is not { } sink) return;
+        _warmupSink = null;
+        try { _player.ClearVideoSurface(sink); } catch { /* 内核已释放等边界：释放自身即可 */ }
+        sink.Release();
     }
 
     /// <summary>摘输出面：换源/换台/退出前必调，防黑屏花屏。重复 detach 无害。</summary>
@@ -254,6 +293,7 @@ public sealed class ExoPlayerPlayer : IPlayer
     public void Dispose()
     {
         _playGeneration++; // 释放后作废一切在途回调（闪退镜红②）
+        ReleaseWarmupSink();
         _player.RemoveListener(_forwarder);
         _player.RemoveAnalyticsListener(_diagForwarder);
         _player.ClearVideoFrameMetadataListener(null);
