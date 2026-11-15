@@ -67,10 +67,21 @@ public partial class MainActivity : Activity
     private bool _sortMode;      // 收藏排序状态机（v1.0.8 第14项）：列表内长按确认进入，退出恢复默认键位
     private Channel? _sortChannel;
     private readonly List<int> _sortBackup = new();
-    private bool _precheckEnabled = true;   // 预检握手开关（vc53 v1.0.8 用户拍板：设置面板可切，持久化）
+    private static bool _precheckEnabled = true; // 预检握手开关（vc53 v1.0.8 用户拍板：设置面板可切，持久化）；
+                                                 // #15 改静态：进程级 once-block 里的换台预取闭包读它，不能钉在首个壳上
     private ChannelPrecheck _precheck = default!;
     private TicketResolver _resolver = default!;
     private System.Threading.CancellationTokenSource? _precheckCts;
+
+    // ---- 真机反馈批#15：显示大小换档原地换皮 —— 服务图/会话/内核进程级常驻，Recreate 不再断流 ----
+    // 换档旧路径 Recreate() 整个 Activity 推倒重建，播放会话跟着销毁重建、重新取流（真机实锤「切尺寸重连」）。
+    // 改造：服务图只建一次（进程级），会话管理器/内核跨 Recreate 存活；新 Activity 只重挂界面与新 Surface，
+    // 内核回调统一经静态壳引用（Shell）路由到当前实例。当前台、热备、健康账全都不动，画面不闪不断。
+    private static IServiceProvider? _processServices;
+    private static TicketResolver? _processResolver;
+    private static int _prefetchSeq;                        // 邻台预取代数：换台即换代（进程级：预取任务可能跨 Recreate 存活）
+    internal static MainActivity? Shell;                    // 进程级壳引用：内核/会话回调统一指向当前实例
+    private static EventHandler<FailoverEventArgs>? _failoverRelay; // 换源回调转接器：进程级唯一（幂等 -=/+=），换壳不双收
     private static readonly HttpClient PrecheckHttp = new() { Timeout = TimeSpan.FromSeconds(5) };
 
     // ---- vc53 界面搬运：亮牌 / 底部节目单 / 水墨退出弹窗 ----
@@ -79,7 +90,10 @@ public partial class MainActivity : Activity
     private int _loadingSeq;                 // 亮牌代数：换台即换代，旧牌绝不再亮
     private bool _veilAwaitingReveal;        // 换台遮罩待真实出画（真机反馈批#11 续修：Ready≠出画）
     private int _veilSeq;                    // 遮罩代数：迟到的撤牌只撤自己那一代（快速连切防串）
-    private int _prefetchSeq;                // 邻台预取代数：换台即换代，旧代延迟任务作废（真机反馈批#12）
+    private Java.Lang.Runnable? _veilCountdown; // 真机反馈批#16：出画倒计时句柄（换台/出画即作废）
+    private string _veilChannelName = "";    // #16：倒计时文案台名
+    private long _switchAtMs;                // #16：本台切换起点（出画耗时账起点）
+    private static double RevealEtaMs = 3000; // #16：出画耗时指数均值（进程级自校准，倒计时基准）
     private LinearLayout? _epgPanel;
     private TextView? _epgNow;
     private TextView? _epgNext;
@@ -110,13 +124,20 @@ public partial class MainActivity : Activity
             _prefs.GetInt("adv_retry_max_min", 120) * 60_000L);
         CrashNet.Install(); // 未捕获异常先落日志再放行（崩溃日志页可查可清）
 
-        var resolver = _resolver = new TicketResolver();
+        // 真机反馈批#15：进程级壳引用先立（内核/会话回调经它路由到当前实例）
+        Shell = this;
+        _resolver = _processResolver ??= new TicketResolver(); // 取票缓存进程级共享，Recreate 不丢
+        var resolver = _resolver;
 
+        // 服务图进程级只建一次：会话管理器/内核跨 Recreate 存活（#15 原地换皮的核心——
+        // 换档旧路径 Recreate 把播放会话连带销毁，重新取流=真机「切尺寸重连」）
+        if (_processServices is null)
+        {
         // 每会话独享内核（Current+Standby 双实例热切的资源前提）；
-        // 取流解析器闭包持有本实例，频道上下文由内核 Play 自取（双实例不共用上下文）
+        // 内核持 ApplicationContext（随进程存活），不持 Activity——换壳后内核照常解码渲染
         IPlayer KernelFactory()
         {
-            var player = new ExoPlayerPlayer(this);
+            var player = new ExoPlayerPlayer(ApplicationContext!); // 随进程存活的应用上下文，不持 Activity——换壳后内核照常解码渲染
             player.WithStreamResolver(endpoint =>
                 resolver.ResolveAsync(endpoint, player.CurrentChannelKey ?? "", player.CurrentChannelName ?? ""));
             WireFramePulse(player); // 画面平稳埋点（方案书 v76/v20：帧回调 10Hz → 滑窗 P95 断言）
@@ -128,16 +149,10 @@ public partial class MainActivity : Activity
         // （TextureView 停帧保留最后渲染内容，新流首帧渲染前那几秒「一直挂着上个台画面」实锤）。
         // 改挂待撤旗：本台第一帧真渲染的帧节拍才准撤——键位对账：只有「当前会话本台」的帧节拍
         // 有资格（热备攒流/自救尾帧不掺）；渲染线程回调落主线程执行，遮罩代数防快速连切串代。
+        // #15：经 Shell 路由——内核跨 Recreate 存活，帧节拍必须打到当前壳，不钉死建内核时的那个壳
         void WireVeilReveal(ExoPlayerPlayer player)
         {
-            player.OnFrameTick += (_, _) =>
-            {
-                if (!_veilAwaitingReveal) return;
-                if (!string.Equals(player.CurrentChannelKey, _manager.Current?.CurrentChannel?.Id, StringComparison.Ordinal)) return;
-                _veilAwaitingReveal = false;
-                int seq = _veilSeq;
-                _main.Post(() => { if (seq == _veilSeq) HideSwitchVeil(); });
-            };
+            player.OnFrameTick += (_, _) => Shell?.VeilFrameTick(player);
         }
 
         // 画面平稳无感量化埋点（v20）：帧回调进滑窗，每 10 秒取数落 [画面平稳] 日志行；
@@ -197,7 +212,10 @@ public partial class MainActivity : Activity
             },
             async host => { try { await System.Net.Dns.GetHostAddressesAsync(host); } catch { /* 预解析失败不挡预取 */ } });
 
-        _services = new ServiceCollection()
+        // #15：换台预取闭包是进程级一次性的，频道表用静态快照（ChannelTable.Build 静态数据无状态），
+        // 不引用实例 _channels——否则闭包把第一个壳连整个视图树钉死到进程结束（内存泄漏）
+        var channels = ChannelTable.Build();
+        _services = _processServices = new ServiceCollection()
             .AddSingleton<IClock, global::TaoLive.Session.SystemClock>()
             .AddSingleton<IMainThreadDispatcher>(new AndroidMainThreadDispatcher(_main))
             .AddTaoLiveSession(KernelFactory, ch =>
@@ -215,7 +233,7 @@ public partial class MainActivity : Activity
                         {
                             await Task.Delay(TimeSpan.FromSeconds(15));
                             if (seq != _prefetchSeq) return; // 已换台：旧代预取作废
-                            await prefetcher.PrefetchNeighborsAsync(ch, _channels);
+                            await prefetcher.PrefetchNeighborsAsync(ch, channels);
                         }
                         catch { /* 预取失败不影响播放 */ }
                     });
@@ -232,6 +250,18 @@ public partial class MainActivity : Activity
         TaoLive.Catalog.ChannelWarmer.Reporter = m => CrashNet.Record(m);
         TaoLive.Players.ExoPlayerPlayer.Reporter = m => CrashNet.Record(m);
         TaoLive.Session.ChannelPrecheck.Reporter = m => CrashNet.Record(m); // 预检既有 Reporter 此前未接线，一并接通
+        // 备源耗尽提示（一期口径：全源不可达时明确提示，不静默装死；OK 键重试）
+        // 只收当前会话事件（热备攒流/换台竞速不掺内部，画面不受热备起播影响——方案书 v5 口径）
+        // #15：进程级只订阅一次，回调经静态壳路由到当前实例——每个壳重复订阅会让事件翻倍收
+        _manager.SessionStateChanged += (_, e) => Shell?.HandleSessionStateChanged(e);
+        } // ← #15 once-block 闭合：以下为每壳（per-OnCreate）必跑段
+
+        // 服务图已就位（once-block 首建、跨壳复用）：本壳字段接回进程级实例
+        _services = _processServices!; // once-block 已跑过：进程级必非空
+        _manager = _services.GetRequiredService<PlaybackSessionManager>();
+
+        // —— per-OnCreate 段：引用本壳回调/账本/偏好的接线，每次壳重建都要重挂（闭包持 this 的全在这） ——
+
         // 收口批①：备源队列吃内置表（换源触发时才遍历注册表，不进预检常驻轮）+ 活性按健康账轻排序
         // （同台活源在前、账新者在前——只动同台内排序不改台间顺序，v28 轻排序条款）；
         // 回主源迟滞判据=主源预检轮次连续命中 OK ≥3 次（复用预检结果，不另起独立探测）+ 稳定 5 分钟（管理器内判）
@@ -245,89 +275,8 @@ public partial class MainActivity : Activity
             .GetStringSet("ids", new List<string>())!.ToHashSet();
         // 收藏顺序（vc53 v1.0.8 第14项：顺序跨启动记忆；逗号编号串，坏段忽略）
         _favStore.Restore(GetSharedPreferences("favorites", FileCreationMode.Private)!.GetString("order", null));
-        // 备源耗尽提示（一期口径：全源不可达时明确提示，不静默装死；OK 键重试）
-        // 只收当前会话事件（热备攒流/换台竞速不掺内部，画面不受热备起播影响——方案书 v5 口径）
-        _manager.SessionStateChanged += (_, e) =>
-        {
-            // 逐次换源打点：所有会话（含热备）均落运行日志（自诊断/崩溃日志统计口径）
-            e.Session.Failover -= OnSessionFailover;
-            e.Session.Failover += OnSessionFailover;
-            if (e.Session != _manager.Current) return;
-            if (e.State == PlaybackState.Failed)
-            {
-                // 失败打点接真实事件：全线路不可达落运行日志
-                CrashNet.Record($"[ConnectFailure] {e.Session.CurrentChannel?.Name ?? "未知频道"} 全线路不可达");
-                // 播放实测回写（真机反馈批#4 修 2026-11-15）：真实断流写健康账——
-                // 此前 ReportSourceResult 生产零接线，播放正常的台健康账永远不涨（圆点全灰实锤之一）；
-                // 时间戳=Unix 毫秒（真机日志镜修 2026-11-15：CheckedAtMs 契约为跨启动可比的 Unix 时基，
-                // 误传单调钟会把账本时间戳写花，健康提示排序与落盘合并全错账）
-                if (e.Session.CurrentChannel is { } failCh)
-                    _precheck.ReportSourceResult(failCh, false, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), playback: true);
-                // 失败终态驻留空态（方案书 v77，白屏镜红②）：重连耗尽转空态文案，不再用瞬时 Toast；
-                // 键位引导按树内真实键位：OK 重试（退避账管节奏）· 菜单键选台（呼列表）。
-                // 真机反馈批#11 修 2026-11-15：失败终态此前只撤遮罩露旧台冻结帧（TextureView 停帧后
-                // 保留最后渲染内容），「新台没切过来一直挂着上个台画面」实锤——终态改铺全屏不透明
-                // 水墨深底盖旧画，空态文案叠其上（BuildRoot z 序：_emptyState 在 _loadingPanel 之上）。
-                // _loadingSeq 作废亮牌延迟（原 HideLoading 语义保留，只不清遮罩底）。
-                _loadingSeq++;
-                ShowSwitchVeil();
-                _veilAwaitingReveal = false; // 失败终态遮罩由空态文案管，不归帧节拍撤
-                ShowEmptyState("信号中断，全线路不可达\n按 OK 重试 · 菜单键选台");
-            }
-            else if (e.State == PlaybackState.Buffering)
-            {
-                HideEmptyState();
-                // 断流自救（FailoverCount>0）零提示（方案书「热切断流自救全程零提示」，四镜·黑屏镜 11-15 修）：
-                // 不铺遮罩不弹 OSD，画面保持最后一帧直到新流就绪；换台过渡（FailoverCount=0）才走 SwitchRevealPolicy。
-                // 真机反馈批#2/#8 修 2026-11-15：铺遮罩=立即盖上不透明水墨深底（vc53 L588-605 口径），
-                // 不再藏画面——SurfaceView/TextureView 让出即露根布局暖白底，就是「换台白屏」本身。
-                if (e.Session.FailoverCount == 0 && SwitchRevealPolicy.ShouldVeilOnSwitch(_textureSurface is not null))
-                {
-                    ShowSwitchVeil();
-                    ShowToast(TaoLive.Session.SwitchHud.Connecting);
-                }
-            }
-            else if (e.State == PlaybackState.Playing)
-            {
-                HideEmptyState();
-                HideLoading(); // vc53：首帧落地即撤亮牌文字
-                // 真机反馈批#11 续修 2026-11-15：Playing=内核 Ready（音视频齐），但新流首帧尚未真渲染，
-                // 此刻撤遮罩会露旧台冻结帧几秒（老板真机实锤「台已切过来但画面一直挂着上个台」）。
-                // 遮罩改挂待撤旗：本台第一帧真出画（OnFrameTick）才撤（WireVeilReveal）；
-                // 3 秒安全网兜底（纯音频流/帧监听缺失），防遮罩长挂死屏。
-                _veilAwaitingReveal = true;
-                int revealSeq = _veilSeq;
-                _main.PostDelayed(() =>
-                {
-                    if (!_veilAwaitingReveal || revealSeq != _veilSeq) return;
-                    _veilAwaitingReveal = false;
-                    HideSwitchVeil();
-                }, 3000);
-                // 换源黑屏埋点（黑屏镜黄④ 11-15）：换源起点到出画恢复的时长落运行台账（含 ≤500ms 快切段）
-                if (_failoverAtMs is { } from)
-                {
-                    _failoverAtMs = null;
-                    CrashNet.Record($"[换源黑屏] 恢复出画 {System.Environment.TickCount64 - from}ms（{e.Session.CurrentChannel?.Name ?? ""}）");
-                }
-                // 断点台落盘（方案书 v24，黑屏镜黄⑤ 11-15）：每次换台成功即同步写档，恢复读最近成功台
-                if (e.Session.CurrentChannel is { } playingChannel)
-                {
-                    _prefs.Edit()!.PutString("last_channel", playingChannel.Id)!.Apply();
-                    // 播放实测回写（真机反馈批#4 修 2026-11-15）：首帧真出画=强证据直接点亮圆点——
-                    // 此前播放正常的台健康账零回写，圆点只能等预检慢慢滚（真机「看过的台也不绿」实锤）；
-                    // 时间戳=Unix 毫秒（真机日志镜修：时基契约同上）
-                    _precheck.ReportSourceResult(playingChannel, true, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), playback: true);
-                }
-                // 首帧撤遮罩由 HideSwitchVeil 承担（真机反馈批#2 修），载体不再显隐切换
-            }
-            else
-            {
-                HideEmptyState();
-            }
-        };
-
         // 开机预热（W8：取票口预取进 5 分钟缓存，换台零等待；退避账挂账不烧请求）
-        // 预热随预检开关同起同停（收口批④开关合流，不再单设开关）
+        // 预热随预检开关同起同停（收口批④开关合流，不再单设开关）；#15：每壳重跑无妨——取票缓存进程级共享，焐热幂等
         if (_precheckEnabled)
         {
             _ = Task.Run(async () =>
@@ -340,6 +289,7 @@ public partial class MainActivity : Activity
         // 开机预检握手（vc53 v1.0.8 一比一，常驻后台轮）：全台按序轻探——Web 取票口换票成功=服务器可达
         // （顺手焐热取票缓存，换台零等待）；直连源只取几 KB 头数据验证，不建视频传输。600ms/台限速
         // 防判异常流量；探测结果落健康账（持久化，跨启动可比）。开关关=循环同停，不留死旋钮。
+        // #15：预检器随壳重建（重探一轮可接受），健康账落盘进程级共享，跨壳账不丢
         _precheck = new ChannelPrecheck(ProbeChannelAsync, 600);
         try { _precheck.AttachHealthStore(new SourceHealthStore(FilesDir!.AbsolutePath)); }
         catch { /* 账本初始化失败按账空跑，预检不挡启动 */ }
@@ -351,10 +301,123 @@ public partial class MainActivity : Activity
         SetContentView(_root);
         ShowList();
 
-        // 开机默认台（方案书收口批②；真机反馈批#1 修复 2026-11-15）：恢复 vc53「开机即看」口径——
-        // 每次启动（含手动打开）都进默认台，不再只认 from_boot 链路；手动打开与开机同一等网+预热+起播路径
-        _ = EnterByBootAsync();
+        // #15 原地换皮：会话跨壳存活（换显示尺寸 Recreate 到此）——回播放页对准当前台即可，
+        // 不重进不重取流（重进=「切尺寸重连」实锤复发）；进程首启无会话才走开机链路（#17：收藏第一个）
+        if (_manager.Current is { } live)
+        {
+            var liveCh = live.CurrentChannel;
+            int idx = liveCh is null ? -1 : IndexOfChannel(liveCh, _channels);
+            _currentIndex = idx >= 0 ? idx : 0;
+            ShowPlayer(); // 只重挂界面与新 Surface，播放不断流
+        }
+        else
+        {
+            _ = EnterByBootAsync();
+        }
     }
+
+    /// <summary>
+    /// 会话状态回调（#15 自 OnCreate 巨型 lambda 迁入实例方法；订阅在 once-block 内经 Shell 路由到当前壳）：
+    /// failover 转接器摘旧挂新防双收，事件体读本壳界面状态（遮罩/空态/健康账回写）。
+    /// </summary>
+    private void HandleSessionStateChanged(SessionStateEventArgs e)
+    {
+        // 逐次换源打点：所有会话（含热备）均落运行日志（自诊断/崩溃日志统计口径）
+        // #15：转接器进程级唯一（静态字段首次赋值后恒等），对每个会话 -=/+= 幂等——换壳不双收
+        _failoverRelay ??= (s, e2) => Shell?.OnSessionFailover(s, e2);
+        e.Session.Failover -= _failoverRelay;
+        e.Session.Failover += _failoverRelay;
+        if (e.Session != _manager.Current) return;
+        if (e.State == PlaybackState.Failed)
+        {
+            // 失败打点接真实事件：全线路不可达落运行日志
+            CrashNet.Record($"[ConnectFailure] {e.Session.CurrentChannel?.Name ?? "未知频道"} 全线路不可达");
+            // 播放实测回写（真机反馈批#4 修 2026-11-15）：真实断流写健康账——
+            // 此前 ReportSourceResult 生产零接线，播放正常的台健康账永远不涨（圆点全灰实锤之一）；
+            // 时间戳=Unix 毫秒（真机日志镜修 2026-11-15：CheckedAtMs 契约为跨启动可比的 Unix 时基，
+            // 误传单调钟会把账本时间戳写花，健康提示排序与落盘合并全错账）
+            if (e.Session.CurrentChannel is { } failCh)
+                _precheck.ReportSourceResult(failCh, false, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), playback: true);
+            // 失败终态驻留空态（方案书 v77，白屏镜红②）：重连耗尽转空态文案，不再用瞬时 Toast；
+            // 键位引导按树内真实键位：OK 重试（退避账管节奏）· 菜单键选台（呼列表）。
+            // 真机反馈批#11 修 2026-11-15：失败终态此前只撤遮罩露旧台冻结帧（TextureView 停帧后
+            // 保留最后渲染内容），「新台没切过来一直挂着上个台画面」实锤——终态改铺全屏不透明
+            // 水墨深底盖旧画，空态文案叠其上（BuildRoot z 序：_emptyState 在 _loadingPanel 之上）。
+            // _loadingSeq 作废亮牌延迟（原 HideLoading 语义保留，只不清遮罩底）。
+            _loadingSeq++;
+            ShowSwitchVeil();
+            _veilAwaitingReveal = false; // 失败终态遮罩由空态文案管，不归帧节拍撤
+            ShowEmptyState("信号中断，全线路不可达\n按 OK 重试 · 菜单键选台");
+        }
+        else if (e.State == PlaybackState.Buffering)
+        {
+            HideEmptyState();
+            // 断流自救（FailoverCount>0）零提示（方案书「热切断流自救全程零提示」，四镜·黑屏镜 11-15 修）：
+            // 不铺遮罩不弹 OSD，画面保持最后一帧直到新流就绪；换台过渡（FailoverCount=0）才走 SwitchRevealPolicy。
+            // 真机反馈批#2/#8 修 2026-11-15：铺遮罩=立即盖上不透明水墨深底（vc53 L588-605 口径），
+            // 不再藏画面——SurfaceView/TextureView 让出即露根布局暖白底，就是「换台白屏」本身。
+            if (e.Session.FailoverCount == 0 && SwitchRevealPolicy.ShouldVeilOnSwitch(_textureSurface is not null))
+            {
+                ShowSwitchVeil();
+                ShowToast(TaoLive.Session.SwitchHud.Connecting);
+            }
+        }
+        else if (e.State == PlaybackState.Playing)
+        {
+            HideEmptyState();
+            // 真机反馈批#16 修 2026-11-15：此前此处 HideLoading()——Playing=内核 Ready 但首帧未真渲染，
+            // 提示先于画面消失（老板令：文字要亮到真出画）。改由 VeilFrameTick 真出画一并撤字撤底。
+            // 真机反馈批#11 续修 2026-11-15：Playing=内核 Ready（音视频齐），但新流首帧尚未真渲染，
+            // 此刻撤遮罩会露旧台冻结帧几秒（老板真机实锤「台已切过来但画面一直挂着上个台」）。
+            // 遮罩改挂待撤旗：本台第一帧真出画（OnFrameTick）才撤（WireVeilReveal）；
+            // 3 秒安全网兜底（纯音频流/帧监听缺失），防遮罩长挂死屏。
+            _veilAwaitingReveal = true;
+            int revealSeq = _veilSeq;
+            _main.PostDelayed(() =>
+            {
+                if (!_veilAwaitingReveal || revealSeq != _veilSeq) return;
+                _veilAwaitingReveal = false;
+                HideSwitchVeil();
+            }, 3000);
+            // 换源黑屏埋点（黑屏镜黄④ 11-15）：换源起点到出画恢复的时长落运行台账（含 ≤500ms 快切段）
+            if (_failoverAtMs is { } from)
+            {
+                _failoverAtMs = null;
+                CrashNet.Record($"[换源黑屏] 恢复出画 {System.Environment.TickCount64 - from}ms（{e.Session.CurrentChannel?.Name ?? ""}）");
+            }
+            // 断点台落盘（方案书 v24，黑屏镜黄⑤ 11-15）：每次换台成功即同步写档，恢复读最近成功台
+            if (e.Session.CurrentChannel is { } playingChannel)
+            {
+                _prefs.Edit()!.PutString("last_channel", playingChannel.Id)!.Apply();
+                // 播放实测回写（真机反馈批#4 修 2026-11-15）：首帧真出画=强证据直接点亮圆点——
+                // 此前播放正常的台健康账零回写，圆点只能等预检慢慢滚（真机「看过的台也不绿」实锤）；
+                // 时间戳=Unix 毫秒（真机日志镜修：时基契约同上）
+                _precheck.ReportSourceResult(playingChannel, true, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), playback: true);
+            }
+            // 首帧撤遮罩由 HideSwitchVeil 承担（真机反馈批#2 修），载体不再显隐切换
+        }
+        else
+        {
+            HideEmptyState();
+        }
+    }
+
+    /// <summary>帧节拍遮罩撤除（真机反馈批#11 续修；#15 起内核跨壳存活，帧节拍经 Shell 打到当前壳）：
+    /// 只有「当前会话本台」的真渲染帧有资格撤——热备攒流/自救尾帧不掺；遮罩代数防快速连切串代。
+    /// 真机反馈批#16：真出画耗时进进程级指数均值，下一次「约还需X秒出画」倒计时拿它当基准。</summary>
+    private void VeilFrameTick(ExoPlayerPlayer player)
+    {
+        if (!_veilAwaitingReveal) return;
+        if (!string.Equals(player.CurrentChannelKey, _manager.Current?.CurrentChannel?.Id, StringComparison.Ordinal)) return;
+        _veilAwaitingReveal = false;
+        var elapsedMs = System.Environment.TickCount64 - _switchAtMs;
+        if (elapsedMs is > 200 and < 60_000)
+            RevealEtaMs = RevealEtaMs * 0.7 + elapsedMs * 0.3; // 指数均值自校准（首启基线 3 秒，逐次逼近真值）
+        int seq = _veilSeq;
+        _main.Post(() => { if (seq == _veilSeq) HideSwitchVeil(); });
+    }
+
+
 
     /// <summary>
     /// 开机链路（方案书收口批②⑤⑥）：等网就绪再进默认台——轻量 TCP 连通探测（非 Wi-Fi 状态位，防假在线），
@@ -393,17 +456,13 @@ public partial class MainActivity : Activity
         }
     }
 
-    /// <summary>默认台来源（老板令 2026-11-15 回归 vc53 口径：断点台回看，不再有设置项指定台）——
-    /// 断点台（v24：最近成功台落盘，每次换台成功即写档）→ 列表首位。</summary>
+    /// <summary>默认台来源（老板令 2026-11-15 #17）：开机进收藏第一个（按频道表顺序取最先收藏的台）；
+    /// 无收藏=全表第一个。断点台口径废止。</summary>
     private int DefaultChannelIndex()
     {
-        var last = _prefs.GetString("last_channel", null); // 断点台（v24）：恢复读最近成功台
-        if (!string.IsNullOrEmpty(last))
-        {
-            var j = _channels.ToList().FindIndex(c => c.Id == last);
-            if (j >= 0) return j;
-        }
-        return 0; // 无断点=列表首位
+        for (int i = 0; i < _channels.Count; i++)
+            if (_favorites.Contains(_channels[i].Id)) return i;
+        return 0; // 无收藏=列表首位
     }
 
     // 生命周期打点（埋点补充 2026-11-15）：电视 ROM 杀后台/回前台黑屏排查锚点——
@@ -420,16 +479,39 @@ public partial class MainActivity : Activity
         CrashNet.Record($"[生命周期] OnPause 失去前台（{_manager?.Current?.CurrentChannel?.Name ?? "无会话"}）");
     }
 
+    /// <summary>
+    /// 内存压力缩编钩子（老板令 #25：低配机不等系统来杀，先自瘦身）：系统内存告警
+    /// （RunningLow 及更重）即清让位会话释放内核，当前台/热备不动——
+    /// 旧台缓存主动让路，防低配档被 ROM 直接整进程杀掉（预防于被杀之前）。
+    /// </summary>
+    public override void OnTrimMemory([GeneratedEnum] Android.Content.TrimMemory trimLevel)
+    {
+        base.OnTrimMemory(trimLevel);
+        if (trimLevel >= Android.Content.TrimMemory.RunningLow)
+        {
+            var shrunk = _manager?.ShrinkForMemoryPressure() ?? 0;
+            if (shrunk > 0)
+            {
+                CrashNet.Record($"[生命周期] OnTrimMemory({trimLevel}) 内存告警，缩编清让位会话 {shrunk} 个");
+            }
+        }
+    }
+
     protected override void OnDestroy()
     {
-        // 生命周期收尾（闪退镜黄⑦⑧⑨ 11-15）：停看门狗泵、清数字提交回调、停预检循环、
-        // 让位当前台与热备（停内核解码）；内核实例随进程回收，不持 Activity 泄漏
+        // 生命周期收尾（闪退镜黄⑦⑧⑨ 11-15）：停看门狗泵、清数字提交回调、停预检循环
         _watchdogStopped = true;
         _main.RemoveCallbacks(_digitCommit!);
         _digitCommit?.Dispose();
         StopPrecheckLoop();
-        _manager.Current?.Supersede();
-        _manager.Standby?.Supersede();
+        StopVeilCountdown(); // #16：换壳必停倒计时（新壳起自己的）
+        if (IsFinishing)
+        {
+            // 真机退场才让位会话（停内核解码）；#15 换尺寸 Recreate（IsFinishing=false）会话跨壳存活，绝不打断播放
+            _manager.Current?.Supersede();
+            _manager.Standby?.Supersede();
+            Shell = null;
+        }
         base.OnDestroy();
     }
 
@@ -461,7 +543,7 @@ public partial class MainActivity : Activity
         _loadingText = new TextView(this)
         {
             Gravity = GravityFlags.Center,
-            TextSize = 24,
+            TextSize = UiScale.Sp(24),
         };
         _loadingText.SetTextColor(InkTranslucency.TextPrimary(this));
         InkTranslucency.ApplyReadabilityShadow(_loadingText);
@@ -476,10 +558,10 @@ public partial class MainActivity : Activity
         // 样式照 vc53 水墨口径：固定加深水墨底（不跟亮度，失败文案必须醒目）+ 可读性投影
         _emptyState = new TextView(this) { Gravity = GravityFlags.Center };
         _emptyState.SetTextColor(InkTranslucency.TextPrimary(this));
-        _emptyState.TextSize = 30;
+        _emptyState.TextSize = UiScale.Sp(30);
         _emptyState.SetBackgroundColor(InkTranslucency.PanelColorDeep(this));
         InkTranslucency.ApplyReadabilityShadow(_emptyState);
-        _emptyState.SetPadding(40, 24, 40, 24);
+        _emptyState.SetPadding(UiScale.Px(40), UiScale.Px(24), UiScale.Px(40), UiScale.Px(24)); // #15 尺寸令：随档缩放
         _emptyState.Visibility = ViewStates.Invisible;
         _playerPage.AddView(_emptyState, new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WrapContent, ViewGroup.LayoutParams.WrapContent)
@@ -497,24 +579,24 @@ public partial class MainActivity : Activity
         _toast.SetTextColor(InkTranslucency.TextPrimary(this));
         _toast.SetBackgroundColor(InkTranslucency.InfoColor(this));
         InkTranslucency.ApplyReadabilityShadow(_toast);
-        _toast.SetPadding(36, 16, 36, 16);
-        _toast.TextSize = 22;
+        _toast.SetPadding(UiScale.Px(36), UiScale.Px(16), UiScale.Px(36), UiScale.Px(16)); // #15 尺寸令
+        _toast.TextSize = UiScale.Sp(22);
         _root.AddView(_toast, new FrameLayout.LayoutParams(-2, -2)
         {
             Gravity = GravityFlags.Top | GravityFlags.CenterHorizontal,
-            TopMargin = 48,
+            TopMargin = UiScale.Px(48),
         });
 
         // 3. 底部节目单（vc53：官方接口有数据才显示，没数据不硬造；
         // v22 第 13 项·z 序修正：节目单条先入根布局，抽屉盖板永远压在其上，绝不叠字）
         _epgPanel = new LinearLayout(this) { Orientation = Orientation.Vertical };
         _epgPanel.SetBackgroundColor(InkTranslucency.PanelColor(this));
-        _epgPanel.SetPadding(36, 18, 36, 22);
+        _epgPanel.SetPadding(UiScale.Px(36), UiScale.Px(18), UiScale.Px(36), UiScale.Px(22)); // #15 尺寸令
         _epgPanel.Visibility = ViewStates.Gone;
-        _epgNow = new TextView(this) { TextSize = 18 };
+        _epgNow = new TextView(this) { TextSize = UiScale.Sp(18) };
         _epgNow.SetTextColor(InkTranslucency.TextPrimary(this));
         InkTranslucency.ApplyReadabilityShadow(_epgNow);
-        _epgNext = new TextView(this) { TextSize = 15 };
+        _epgNext = new TextView(this) { TextSize = UiScale.Sp(15) };
         _epgNext.SetTextColor(Color.ParseColor(InkTranslucency.TextSecondary));
         InkTranslucency.ApplyReadabilityShadow(_epgNext);
         _epgPanel.AddView(_epgNow);
@@ -532,12 +614,12 @@ public partial class MainActivity : Activity
 
         // 抽屉页头（vc53：标题 + 台数，同一水平基准）
         var header = new LinearLayout(this) { Orientation = Orientation.Horizontal };
-        header.SetPadding(48, 40, 48, 8);
-        var title = new TextView(this) { Text = "TaoLive 频道", TextSize = 24 };
+        header.SetPadding(UiScale.Px(48), UiScale.Px(40), UiScale.Px(48), UiScale.Px(8)); // #15 尺寸令
+        var title = new TextView(this) { Text = "TaoLive 频道", TextSize = UiScale.Sp(24) };
         title.SetTextColor(InkTranslucency.TextPrimary(this));
         InkTranslucency.ApplyReadabilityShadow(title);
         header.AddView(title);
-        var count = new TextView(this) { Text = $"  共 {_channels.Count} 路", TextSize = 15 };
+        var count = new TextView(this) { Text = $"  共 {_channels.Count} 路", TextSize = UiScale.Sp(15) };
         count.SetTextColor(Color.ParseColor(InkTranslucency.TextSecondary));
         InkTranslucency.ApplyReadabilityShadow(count);
         header.AddView(count);
@@ -547,15 +629,15 @@ public partial class MainActivity : Activity
         // 当前标签朱砂底高亮，点击/左右键切换）
         _tabViews.Clear();
         var tabRow = new LinearLayout(this) { Orientation = Orientation.Horizontal };
-        tabRow.SetPadding(48, 24, 48, 12);
+        tabRow.SetPadding(UiScale.Px(48), UiScale.Px(24), UiScale.Px(48), UiScale.Px(12)); // #15 尺寸令
         int tabIndex = 0;
         foreach (ListTabs.Tab t in Enum.GetValues(typeof(ListTabs.Tab)))
         {
-            var tv = new TextView(this) { Text = ListTabs.Label(t), TextSize = 16 };
-            tv.SetPadding(12, 10, 12, 10);
+            var tv = new TextView(this) { Text = ListTabs.Label(t), TextSize = UiScale.Sp(16) };
+            tv.SetPadding(UiScale.Px(12), UiScale.Px(10), UiScale.Px(12), UiScale.Px(10));
             InkTranslucency.ApplyReadabilityShadow(tv);
             tv.Click += (_, _) => SelectTab(t);
-            tabRow.AddView(tv, new LinearLayout.LayoutParams(-2, -2) { LeftMargin = tabIndex == 0 ? 0 : 8 });
+            tabRow.AddView(tv, new LinearLayout.LayoutParams(-2, -2) { LeftMargin = tabIndex == 0 ? 0 : UiScale.Px(8) });
             _tabViews.Add(tv);
             tabIndex++;
         }
@@ -792,10 +874,13 @@ public partial class MainActivity : Activity
         RefreshEpg(ch);     // 底部节目单：换台先清场再拉，有数据才亮
     }
 
-    /// <summary>亮牌（雷二·延迟亮）：换台后 0.8 秒内没出首帧才亮，明确反馈「没死机」；首帧/失败即撤。</summary>
+    /// <summary>亮牌（雷二·延迟亮）：换台后 0.8 秒内没出首帧才亮，明确反馈「没死机」；
+    /// 真机反馈批#16：文字亮到本台第一帧真出画才撤，期间带「约还需X秒出画」倒计时。</summary>
     private void ShowLoading(Channel ch)
     {
         int seq = ++_loadingSeq;
+        _veilChannelName = ch.Name;                       // #16：倒计时文案台名
+        _switchAtMs = System.Environment.TickCount64;     // #16：出画耗时账起点（进指数均值）
         _loadingText.Text = $"正在连接 {ch.Name}";
         _main.PostDelayed(() =>
         {
@@ -804,6 +889,7 @@ public partial class MainActivity : Activity
             {
                 ShowSwitchVeil(); // 文字带底亮（真机反馈批#2 修：遮罩底即时不透明水墨深底）
                 _loadingText.Visibility = ViewStates.Visible;
+                StartVeilCountdown(ch.Name); // #16：倒计时起跑，每秒刷新到真出画
             }
         }, 800);
     }
@@ -813,17 +899,40 @@ public partial class MainActivity : Activity
     private void ShowSwitchVeil()
     {
         _veilSeq++; // 遮罩换代：旧代迟到的撤牌/安全网全部作废（快速连切防串）
+        StopVeilCountdown(); // #16：换代即停旧倒计时
         _loadingText.Visibility = ViewStates.Gone;
         _loadingPanel.Visibility = ViewStates.Visible;
     }
 
-    private void HideSwitchVeil() => _loadingPanel.Visibility = ViewStates.Gone;
-
-    private void HideLoading()
+    private void HideSwitchVeil()
     {
-        _loadingSeq++;
-        _loadingText.Visibility = ViewStates.Gone;
+        StopVeilCountdown(); // #16：出画/兜底即停倒计时（真出画=VeilFrameTick 走这里，字与底一并撤）
         _loadingPanel.Visibility = ViewStates.Gone;
+    }
+
+    /// <summary>出画倒计时（真机反馈批#16）：亮牌文字不因内核 Ready 提前消失，亮到本台第一帧真出画；
+    /// 「约还需X秒」按进程级出画耗时指数均值倒着算，每秒刷新，下限 1 秒——不吹精确，给得住预期。</summary>
+    private void StartVeilCountdown(string channelName)
+    {
+        StopVeilCountdown();
+        var runnable = new Java.Lang.Runnable(() =>
+        {
+            if (!_veilAwaitingReveal || _loadingPanel.Visibility != ViewStates.Visible) return;
+            var remainMs = RevealEtaMs - (System.Environment.TickCount64 - _switchAtMs);
+            int remain = Math.Max(1, (int)Math.Round(remainMs / 1000.0));
+            _loadingText.Text = $"正在连接 {channelName}\n约还需 {remain} 秒出画";
+            _main.PostDelayed(_veilCountdown!, 1000);
+        });
+        _veilCountdown = runnable;
+        _main.PostDelayed(runnable, 1000);
+    }
+
+    private void StopVeilCountdown()
+    {
+        if (_veilCountdown is null) return;
+        _main.RemoveCallbacks(_veilCountdown); // 先摘再释放（闪退镜黄⑨同款）：窗口内换台不提前触发
+        _veilCountdown.Dispose();
+        _veilCountdown = null;
     }
 
     // —— 底部节目单（vc53 B 包第 14 项：官方接口，没数据不硬造） ———
@@ -960,11 +1069,10 @@ public partial class MainActivity : Activity
 
     public override bool OnKeyDown([GeneratedEnum] Keycode keyCode, KeyEvent? e)
     {
-        // TCL 设置键厂商码（真机实测 4077）：单击呼出软件设置面板、长按跳系统设置（v1.0.8 拍板口径）。
-        // 单击/长按在 KeyUp / OnKeyLongPress 分流，这里只消费按键并复位长按标记。
+        // TCL 设置键厂商码（真机实测 4077）：单击呼出软件设置面板（老板令 2026-11-15 #18：长按直达系统设置已删）。
+        // 单击在 KeyUp 分流，这里只消费按键。
         if ((int)keyCode == 4077)
         {
-            _settingsLongFired = false;
             return true;
         }
 
@@ -1172,17 +1280,14 @@ public partial class MainActivity : Activity
 
     public override bool OnKeyUp([GeneratedEnum] Keycode keyCode, KeyEvent? e)
     {
-        // 设置键单击在 KeyUp 分流（KeyDown 只复位长按标记）
+        // 设置键单击在 KeyUp 分流（KeyDown 只消费键值；长按直达系统设置已删，真机反馈批#18）
         if ((int)keyCode == 4077)
         {
-            if (!_settingsLongFired)
-            {
-                // 铁律：任何时刻最多一个层——设置面板开着才允许收起；列表/弹窗/其他面板开着时设置键不生效
-                if (_settingsPanelOpen) ToggleSettingsPanel();
-                else if (_exitDialog == null && !_listOpen && _advOverlay == null && _diagOverlay == null
-                         && _crashOverlay == null && _licenseOverlay == null)
-                    ToggleSettingsPanel();
-            }
+            // 铁律：任何时刻最多一个层——设置面板开着才允许收起；列表/弹窗/其他面板开着时设置键不生效
+            if (_settingsPanelOpen) ToggleSettingsPanel();
+            else if (_exitDialog == null && !_listOpen && _advOverlay == null && _diagOverlay == null
+                     && _crashOverlay == null && _licenseOverlay == null)
+                ToggleSettingsPanel();
             return true;
         }
         return base.OnKeyUp(keyCode, e);
@@ -1190,16 +1295,7 @@ public partial class MainActivity : Activity
 
     public override bool OnKeyLongPress([GeneratedEnum] Keycode keyCode, KeyEvent? e)
     {
-        // 设置键长按直达系统设置（三级降级：对口设置页→系统总入口→文字指引）
-        if ((int)keyCode == 4077)
-        {
-            _settingsLongFired = true;
-            // 铁律同上：任何层开着时长按设置键不跳系统设置，防叠层
-            if (_exitDialog == null && !_listOpen && _advOverlay == null && _diagOverlay == null
-                && _crashOverlay == null && _licenseOverlay == null)
-                OpenSystemSettings();
-            return true;
-        }
+        // 老板令 2026-11-15 #18：设置键长按直达系统设置已删（整键位移除，单击呼设置不受影响）
         if (keyCode is Keycode.DpadCenter or Keycode.Enter)
         {
             if (!_onPlayerPage)
@@ -1232,12 +1328,12 @@ public partial class MainActivity : Activity
         box.SetBackgroundColor(InkTranslucency.PanelColor(this)); // 半透明水墨底，与抽屉面板同源同号
         box.SetMinimumWidth(Dp(480)); // 居中浮层不因文案缩成窄条
 
-        var msg = new TextView(this) { Text = "确认退出 TaoLive？", TextSize = 20 };
+        var msg = new TextView(this) { Text = "确认退出 TaoLive？", TextSize = UiScale.Sp(20) };
         msg.SetTextColor(InkTranslucency.TextPrimary(this)); // 统一 Token，暗屏自动提白
         InkTranslucency.ApplyReadabilityShadow(msg);
         box.AddView(msg);
 
-        var note = new TextView(this) { Text = "退出后开机自启仍可用，随时回来看", TextSize = 13 };
+        var note = new TextView(this) { Text = "退出后开机自启仍可用，随时回来看", TextSize = UiScale.Sp(13) };
         note.SetTextColor(Color.ParseColor(InkTranslucency.TextSecondary));
         InkTranslucency.ApplyReadabilityShadow(note);
         box.AddView(note, new LinearLayout.LayoutParams(-2, -2) { TopMargin = Dp(8) });
@@ -1479,13 +1575,15 @@ public partial class MainActivity : Activity
         }
     }
 
-    /// <summary>列表宽度随内容（vc53 ApplyListWidth + ListMetrics v1.0.8 口径）：越小越好，下限 360dp、上限半屏。</summary>
+    /// <summary>列表宽度随内容（vc53 ApplyListWidth + ListMetrics v1.0.8 口径）：越小越好，下限 360dp、上限半屏。
+    /// #15 尺寸令：估宽基准与下限全部随档缩放——「小」档行字缩了，抽屉宽度跟着收，不留大片空白。</summary>
     private void ApplyListWidth(IReadOnlyList<Row> rows)
     {
         float density = Resources!.DisplayMetrics!.Density;
+        float scale = UiScale.Factor;
         float Estimate(string s, float sizeDp)
         {
-            float px = sizeDp * density;
+            float px = sizeDp * density * scale; // #15 尺寸令：字号随档，估宽同步
             float w = 0;
             foreach (var c in s) w += c > 127 ? px : px * 0.55f;
             return w;
@@ -1498,15 +1596,15 @@ public partial class MainActivity : Activity
             else if (r.Channel != null)
             {
                 // 行宽 = 左右 padding(48×2) + 号(3字符) + 间距(32) + 星(1字符) + 间距(24) + 台名 + 状态标识
-                var w = 96 + Estimate(new string('0', 3), 20) + 32
-                        + Estimate("★", 20) + 24 + Estimate(r.Channel.Name, 22)
-                        + Estimate("●", 20) + 24;
+                var w = 96 * scale + Estimate(new string('0', 3), 20) + 32 * scale
+                        + Estimate("★", 20) + 24 * scale + Estimate(r.Channel.Name, 22)
+                        + Estimate("●", 20) + 24 * scale;
                 max = Math.Max(max, w);
             }
         }
         // ListMetrics（vc53 v1.0.8）：行内容 + 48px 留白，下限 360dp，上限半屏
-        float total = max + 48 * density;
-        float lo = 360f * density;
+        float total = max + 48 * density * scale;
+        float lo = 360f * density * scale;
         float hi = Resources.DisplayMetrics.WidthPixels / 2f;
         int width = (int)Math.Clamp(total, Math.Min(lo, hi), Math.Max(lo, hi));
         _listPage.LayoutParameters = new FrameLayout.LayoutParams(width, FrameLayout.LayoutParams.MatchParent, GravityFlags.Left);
@@ -1723,7 +1821,7 @@ public partial class MainActivity : Activity
             var ctx = _ctx;
             var line = convertView as LinearLayout ?? new LinearLayout(ctx) { Orientation = Orientation.Horizontal };
             line.RemoveAllViews();
-            line.SetPadding(48, 20, 48, 20);
+            line.SetPadding(UiScale.Px(48), UiScale.Px(20), UiScale.Px(48), UiScale.Px(20)); // #15 尺寸令：行高随档
 
             void Style(TextView tv, string color, float size)
             {
@@ -1735,7 +1833,7 @@ public partial class MainActivity : Activity
             {
                 var h = new TextView(ctx) { Text = row.Header };
                 bool isNote = row.IsNote; // vc53 v22 第 15 项：空态行次色平铺，不作分组标题渲染
-                Style(h, isNote ? InkTranslucency.TextSecondary : "#A9CFEC", isNote ? 15 : 18);
+                Style(h, isNote ? InkTranslucency.TextSecondary : "#A9CFEC", UiScale.Sp(isNote ? 15 : 18));
                 InkTranslucency.ApplyReadabilityShadow(h);
                 line.AddView(h);
                 line.SetBackgroundColor(Color.Transparent);
@@ -1756,10 +1854,10 @@ public partial class MainActivity : Activity
                     {
                         var img = new ImageView(ctx);
                         img.SetAdjustViewBounds(true);
-                        img.SetMaxHeight((int)(28 * density));
+                        img.SetMaxHeight((int)(28 * density * UiScale.Factor)); // #15 尺寸令
                         img.SetImageResource(resId);
                         line.AddView(img, new LinearLayout.LayoutParams(-2, (int)(28 * density))
-                        { RightMargin = 16, Gravity = GravityFlags.CenterVertical });
+                        { RightMargin = UiScale.Px(16), Gravity = GravityFlags.CenterVertical });
                     }
                 }
                 catch { /* 台标渲染失败不碍选台 */ }
@@ -1767,32 +1865,32 @@ public partial class MainActivity : Activity
             if (!row.DeadOnly && logoRes == null)
             {
                 var ph = new TextView(ctx) { Text = ch.Name.Substring(0, 1) };
-                Style(ph, InkTranslucency.TextSecondary, 14);
+                Style(ph, InkTranslucency.TextSecondary, UiScale.Sp(14));
                 ph.Gravity = GravityFlags.Center;
                 ph.SetBackgroundColor(Color.ParseColor("#3A4750"));
-                line.AddView(ph, new LinearLayout.LayoutParams((int)(40 * density), (int)(28 * density))
-                { RightMargin = 16, Gravity = GravityFlags.CenterVertical });
+                line.AddView(ph, new LinearLayout.LayoutParams((int)(40 * density * UiScale.Factor), (int)(28 * density * UiScale.Factor)) // #15 尺寸令
+                { RightMargin = UiScale.Px(16), Gravity = GravityFlags.CenterVertical });
             }
             if (row.DeadOnly)
             {
-                line.AddView(new View(ctx), new LinearLayout.LayoutParams(0, 1) { RightMargin = 16 }); // 无信号行行首不放台标（v4 定稿状态2）
+                line.AddView(new View(ctx), new LinearLayout.LayoutParams(0, 1) { RightMargin = UiScale.Px(16) }); // 无信号行行首不放台标（v4 定稿状态2）
             }
 
             var num = new TextView(ctx) { Text = $"{IndexInTable(ch),3}", Gravity = GravityFlags.Right };
-            Style(num, InkTranslucency.TextSecondary, 20);
+            Style(num, InkTranslucency.TextSecondary, UiScale.Sp(20));
             InkTranslucency.ApplyReadabilityShadow(num);
-            num.SetPadding(0, 0, 32, 0);
+            num.SetPadding(0, 0, UiScale.Px(32), 0);
             line.AddView(num);
 
             var star = new TextView(ctx) { Text = _favorites.Contains(ch.Id) ? "★" : " " };
-            Style(star, "#F0C563", 20);
+            Style(star, "#F0C563", UiScale.Sp(20));
             InkTranslucency.ApplyReadabilityShadow(star);
-            star.SetPadding(0, 0, 24, 0);
+            star.SetPadding(0, 0, UiScale.Px(24), 0);
             line.AddView(star);
 
             var name = new TextView(ctx) { Text = ch.Name };
             var isCur = _currentId() == ch.Id;
-            Style(name, isCur ? "#FFFFFF" : InkTranslucency.TextSecondary, 22);
+            Style(name, isCur ? "#FFFFFF" : InkTranslucency.TextSecondary, UiScale.Sp(22));
             InkTranslucency.ApplyReadabilityShadow(name);
             if (isCur)
             {
@@ -1814,9 +1912,9 @@ public partial class MainActivity : Activity
                 _ => ("●", "#8894A0"),
             };
             var dot = new TextView(ctx) { Text = mark };
-            Style(dot, color, 18);
+            Style(dot, color, UiScale.Sp(18));
             InkTranslucency.ApplyReadabilityShadow(dot);
-            dot.SetPadding(24, 0, 0, 0);
+            dot.SetPadding(UiScale.Px(24), 0, 0, 0);
             line.AddView(dot);
             return line;
         }
