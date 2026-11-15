@@ -24,8 +24,8 @@ public static class InkTranslucency
     /// <summary>面板/列表底色透明度：v1.0.9 第③项调深（56→76），亮画面上文字仍清晰可读，保持半透明水墨质感。</summary>
     public const int PanelAlpha = 76;
 
-    /// <summary>进阶调优页底色：加深一档，不跟画面亮度走（vc41 口径）。</summary>
-    public const int PanelDeepAlpha = 130;
+    /// <summary>进阶调优页底色：加深一档，不跟画面亮度走（vc41 口径；vc53 真值 120，11-15 对基线校正 130→120）。</summary>
+    public const int PanelDeepAlpha = 120;
 
     /// <summary>焦点/确认效果层底色透明度：v1.0.9 第③项加深（40→64），高亮更醒目。</summary>
     public const int FocusFillAlpha = 64;

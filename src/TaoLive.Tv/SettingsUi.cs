@@ -90,7 +90,14 @@ public partial class MainActivity
         // 从底部滑入（透明底，尽量少遮挡画面）
         var slide = new TranslateAnimation(0f, 0f, 420f, 0f) { Duration = 220 };
         _settingsPanel.StartAnimation(slide);
-        _settingsPanel.RequestFocus();
+        // 焦点必须看得见：弹出后下一帧把焦点直接放到面板第一个可选行
+        //（容器 RequestFocus 落空时焦点会留在底下的层里——真机「设置页光标选不中」根因）
+        _settingsPanel.Post(() =>
+        {
+            if (_settingsList is null) return;
+            for (int i = 0; i < _settingsList.ChildCount; i++)
+                if (_settingsList.GetChildAt(i) is View row && row.Focusable) { row.RequestFocus(); break; }
+        });
     }
 
     private void CloseSettingsPanel()
