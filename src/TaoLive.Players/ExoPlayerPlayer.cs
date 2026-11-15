@@ -47,15 +47,20 @@ public sealed class ExoPlayerPlayer : IPlayer
         playerBuilder.SetLoadControl(BuildLoadControl(context));
         // #76 锁画质防抖（2026-11-15 老板令，治「放 1 秒卡半秒」循环）：默认 ABR 在估速贴档位线抖动时
         // 逐秒重选流——每次切换渲染器拆建一遍（真机「视频渲染器停用」实锤），画面停半秒再续。
-        // 改黏性自适应：升档要缓冲满 30 秒、降档判据放宽到 60 秒、估速按五折取档——宁稳勿抖，
+        // 改黏性自适应：升档要缓冲满 30 秒、降档判据放宽到 60 秒、估速按折扣取档——宁稳勿抖，
         // 起播按当前带宽选一档合理画质放住，不再随估速逐秒换挡。
+        // vc71（2026-11-16）：折扣 0.5→0.15 限档验证包。2.0.13 真机「画面停半秒再续」复发疑回旧病：
+        // 五折取档把估速 6.7~14.6Mbps 锁在最高 fhd 档，若盒子解 fhd 只有 ~2fps，症状同款；
+        // 且 OnDroppedVideoFrames 的 ≥5 帧过滤把慢解的零星丢帧吞了（vc70「零丢帧行」有盲区）。
+        // 压到一五折迫使选档落到低档（当年 799kbps 估速选低档跑得动=「之前都没抖」）：
+        // 低档不抖即坐实「最高档盒子跑不动」，下一版按解码能力定档上限（疑点先降档、降不动再换线）。
         playerBuilder.SetTrackSelector(new AndroidX.Media3.ExoPlayer.TrackSelection.DefaultTrackSelector(
             context,
             new AndroidX.Media3.ExoPlayer.TrackSelection.AdaptiveTrackSelection.Factory(
                 /* minDurationForQualityIncreaseMs */ 30_000,
                 /* maxDurationForQualityDecreaseMs */ 60_000,
                 /* minDurationToRetainAfterDiscardMs */ 25_000,
-                /* bandwidthFraction */ 0.5f)));
+                /* bandwidthFraction */ 0.15f)));
         _player = playerBuilder.Build()!;
         _player.AddListener(_forwarder);
         _frameForwarder = new FrameTickForwarder(this); // 帧回调（v76：10Hz 节流）随内核装配一次，Play 全程复用
@@ -374,6 +379,8 @@ public sealed class ExoPlayerPlayer : IPlayer
 
         private long _lastBwLogMs = -1;
         private long _lastBwBitrate = -1;
+        private int _droppedAccum; // vc71：丢帧 10 秒累积落账（≥5 帧过滤会吞掉慢解的零星丢帧，vc70「零丢帧行」盲区）
+        private long _lastDropLogMs = -1;
 
         private string Ch() => _owner.CurrentChannelName ?? _owner.CurrentChannelKey ?? "?";
 
@@ -393,8 +400,15 @@ public sealed class ExoPlayerPlayer : IPlayer
         public void OnDroppedVideoFrames(AndroidX.Media3.ExoPlayer.Analytics.AnalyticsListenerEventTime? eventTime,
             int droppedFrames, long elapsedMs)
         {
-            if (droppedFrames < 5) return; // 偶发零星丢帧不刷屏：成批（≥5 帧/账期）才算卡帧证据
-            Report($"[解码] 视频丢帧 {droppedFrames} 帧/{elapsedMs}ms（{Ch()}，卡帧证据）");
+            // vc71：不再按单次 ≥5 帧过滤（慢解瓶颈每账期只丢 1~2 帧会被吞，2.0.13 真机复发旧病时证据缺位）。
+            // 改 10 秒累积窗口落账：攒到的帧全量上报，解码慢无处可藏。
+            _droppedAccum += Math.Max(0, droppedFrames);
+            var now = Android.OS.SystemClock.ElapsedRealtime();
+            if (_lastDropLogMs >= 0 && now - _lastDropLogMs < 10_000) return;
+            _lastDropLogMs = now;
+            if (_droppedAccum > 0)
+                Report($"[解码] 视频丢帧累计 {_droppedAccum} 帧/10s（{Ch()}，>0 即解码跟不上或渲染欠载，慢帧证据）");
+            _droppedAccum = 0;
         }
 
         public void OnVideoDisabled(AndroidX.Media3.ExoPlayer.Analytics.AnalyticsListenerEventTime? eventTime,
