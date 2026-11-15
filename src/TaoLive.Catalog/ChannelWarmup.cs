@@ -1,4 +1,4 @@
-﻿using System.Collections.Concurrent;
+using System.Collections.Concurrent;
 using TaoLive.Model;
 
 namespace TaoLive.Catalog;
@@ -114,87 +114,6 @@ public enum ChannelWarmupHealth
     Dead,
 }
 
-/// <summary>
-/// 频道预检·W8 简版状态机（v1.0.8/v1.0.9 口径移植，2.0 W8）：
-/// - 按台单顺序逐台轻量探测（只取票，不建视频传输），限速执行防被判异常流量；
-/// - 同名频道各来源变体逐一探测，任一来源可达即整台可用，全源不可达才进失效组；
-/// - 失效台可复测（Requeue），票据/网络恢复即转回可用。
-/// probe 由装配层注入（生产=取票器轻探，测试=可脚本假探针），纯状态机可测。
-/// </summary>
-public class ChannelWarmupPrecheck
-{
-    private readonly Func<Channel, Task<bool>> _probe;
-    private readonly int _intervalMs;
-    private readonly ConcurrentDictionary<string, ChannelWarmupHealth> _states = new();
-
-    /// <summary>状态变化事件：(频道 Id, 新状态)。壳层订阅后刷新列表。</summary>
-    public event Action<string, ChannelWarmupHealth>? StateChanged;
-
-    public ChannelWarmupPrecheck(Func<Channel, Task<bool>> probe, int intervalMs = 600)
-    {
-        _probe = probe ?? throw new ArgumentNullException(nameof(probe));
-        _intervalMs = Math.Max(0, intervalMs);
-    }
-
-    private static string GroupKey(Channel ch) => NormalizeName(ch.Name);
-
-    /// <summary>同频道各来源归并键：台名去空格后一致视为同一频道（一期 NormalizeName 口径；与 Session 版 ChannelPrecheck.NormalizeName 同源）。</summary>
-    internal static string NormalizeName(string name)
-    {
-        var trimmed = (name ?? "").Replace(" ", "").Replace("　", "");
-        return string.IsNullOrEmpty(trimmed) ? (name ?? "") : trimmed;
-    }
-
-    /// <summary>查询某台当前状态（未探测=Unknown）。同频道任一来源可达=可用。</summary>
-    public ChannelWarmupHealth Of(Channel ch) =>
-        _states.TryGetValue(ch.Id, out var s) ? s : ChannelWarmupHealth.Unknown;
-
-    /// <summary>直接标记状态（播放实测/预检覆盖写）。仅在状态真正变化时发事件，防重复刷列表。</summary>
-    public void MarkState(Channel ch, ChannelWarmupHealth state)
-    {
-        var prev = Of(ch);
-        if (prev == state) return;
-        _states[ch.Id] = state;
-        StateChanged?.Invoke(ch.Id, state);
-    }
-
-    /// <summary>失效台复测入口：置回探测中，探测轮次走完自动更新。</summary>
-    public void Requeue(Channel ch) => MarkState(ch, ChannelWarmupHealth.Checking);
-
-    /// <summary>
-    /// 按台单顺序逐台探测，每台之间限速间隔。不阻塞调用方播放流程。
-    /// 探测抛异常按失效处理——预检不吞播放在途状态，只记录结论。
-    /// 同频道（台名归并）的多个来源变体逐一探测，任一来源通=整台可用。
-    /// keepKnownState（循环预检轮次用）：true 时已知状态的台不先置「检测中」，列表不闪烁。
-    /// </summary>
-    public async Task RunAsync(IEnumerable<Channel> channels, CancellationToken ct = default, bool keepKnownState = false)
-    {
-        foreach (var group in channels.GroupBy(GroupKey))
-        {
-            if (ct.IsCancellationRequested) return;
-            var variants = group.ToList();
-            var lead = variants[0];
-            if (!keepKnownState || Of(lead) == ChannelWarmupHealth.Unknown)
-                MarkState(lead, ChannelWarmupHealth.Checking);
-            var anyOk = false;
-            foreach (var ch in variants)
-            {
-                if (ct.IsCancellationRequested) return;
-                bool ok;
-                try { ok = await _probe(ch).ConfigureAwait(false); }
-                catch { ok = false; }
-                anyOk |= ok;
-                if (_intervalMs > 0)
-                {
-                    try { await Task.Delay(_intervalMs, ct).ConfigureAwait(false); }
-                    catch (OperationCanceledException) { return; }
-                }
-            }
-            foreach (var ch in variants)
-                MarkState(ch, anyOk ? ChannelWarmupHealth.Alive : ChannelWarmupHealth.Dead);
-        }
-    }
-}
 
 /// <summary>
 /// 频道预热器（2.0 W8，对接一期预热细案与 TicketResolver 5 分钟换票缓存）：
