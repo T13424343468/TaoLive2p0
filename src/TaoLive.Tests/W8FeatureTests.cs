@@ -120,7 +120,7 @@ public class W8FeatureTests
     {
         Assert.Equal("5  CCTV-5", SwitchHud.ChannelChanged(5, "CCTV-5"));
         Assert.Equal("地方体育", SwitchHud.ChannelChanged(0, "地方体育"));
-        Assert.Equal("正在连接…", SwitchHud.Connecting);
+        Assert.Equal("正在换信号", SwitchHud.Connecting);
         Assert.Equal("切换到线路 2", SwitchHud.LineSwitching(1));
         Assert.Equal("信号中断，按 OK 重试", SwitchHud.AllLinesFailed);
     }

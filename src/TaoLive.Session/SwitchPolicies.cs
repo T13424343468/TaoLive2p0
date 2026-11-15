@@ -107,8 +107,8 @@ public static class SwitchHud
     public static string ChannelChanged(int channelNumber, string channelName) =>
         channelNumber > 0 ? $"{channelNumber}  {channelName}" : channelName;
 
-    /// <summary>起播中 OSD：换台后到首帧之间。</summary>
-    public const string Connecting = "正在连接…";
+    /// <summary>起播中 OSD：换台后到首帧之间。文案=1.x 特征关口径（坑40 老板可见特征「正在换信号」，方案书 v11/v65 定谳随素材沿用令进包，Toast/OSD 自动消隐 ≤2 秒语义同致）。</summary>
+    public const string Connecting = "正在换信号";
 
     /// <summary>手动换线路 OSD：线路序号从 1 计。</summary>
     public static string LineSwitching(int lineIndex) => $"切换到线路 {lineIndex + 1}";
