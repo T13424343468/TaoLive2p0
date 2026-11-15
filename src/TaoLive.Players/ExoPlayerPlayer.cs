@@ -66,8 +66,8 @@ public sealed class ExoPlayerPlayer : IPlayer
         int watermarkMs = BufferPolicy.MaxWatermarkSeconds(totalMem) * 1000;
         int startupGateMs = (int)PrefetchCurve.StartupThreshold.TotalMilliseconds;
         return new AndroidX.Media3.ExoPlayer.DefaultLoadControl.Builder()
-            // 绑定参数名与 Java 源有差：按位传参（min,max,起播门槛,重缓门槛,回退缓冲,回退重定位,时间优先）
-            .SetBufferDurationsMs(watermarkMs, watermarkMs, startupGateMs, startupGateMs, 0, true, true)
+            // 绑定只挂 4 参重载（min,max,起播门槛,重缓门槛）；回退缓冲等走默认（0/不保留）
+            .SetBufferDurationsMs(watermarkMs, watermarkMs, startupGateMs, startupGateMs)
             .Build();
     }
 
