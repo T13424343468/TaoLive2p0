@@ -106,6 +106,9 @@ public partial class MainActivity : Activity
         _manager.FallbackSourceProvider = TaoLive.Session.FallbackQueueSource.FromRegistry;
         _manager.PrimaryAliveConfirmed = ch =>
             _precheck.SourceHealthOf(ch) is { State: ChannelHealth.Alive, ConsecutiveOks: >= PlaybackSessionManager.ReturnToPrimaryMinConsecutiveOks };
+        // 收口批③：会话 LRU 按内存分档（memoryClass≤128MB 低配档 4、高配 8；定标后只调常量）；取不到按低配保守
+        var activityManager = (ActivityManager?)GetSystemService(ActivityService);
+        _manager.RetainedCapacity = PlaybackSessionManager.CapacityFor(activityManager?.MemoryClass ?? 0);
         _favorites = GetSharedPreferences("favorites", FileCreationMode.Private)!
             .GetStringSet("ids", new List<string>())!.ToHashSet();
         // 备源耗尽提示（一期口径：全源不可达时明确提示，不静默装死；OK 键重试）
@@ -460,8 +463,14 @@ public partial class MainActivity : Activity
                 DebouncedSwitch(Neighbor(+1));
                 return true;
             case Keycode.DpadCenter or Keycode.Enter when _onPlayerPage:
-                // 备源耗尽（Failed）时 OK=原地重试；播放中暂无动作
-                if (_manager.Current?.State == PlaybackState.Failed) PlayAt(_currentIndex);
+                // 备源耗尽（Failed）时 OK=原地重试，接退避账（收口批③）：指数退避管重试节奏
+                if (_manager.Current?.State == PlaybackState.Failed)
+                {
+                    if (_manager.TryManualRetry(_manager.Current.CurrentChannel?.Id ?? string.Empty, out var waitMs))
+                        PlayAt(_currentIndex);
+                    else
+                        ShowToast(SwitchHud.RetryBackoff((int)Math.Ceiling(waitMs / 1000.0)));
+                }
                 return true;
             case Keycode.Back or Keycode.Escape when _onPlayerPage:
                 ShowList();

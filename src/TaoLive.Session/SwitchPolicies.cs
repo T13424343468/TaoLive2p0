@@ -113,6 +113,9 @@ public static class SwitchHud
     /// <summary>手动换线路 OSD：线路序号从 1 计。</summary>
     public static string LineSwitching(int lineIndex) => $"切换到线路 {lineIndex + 1}";
 
+    /// <summary>重试退避中 OSD（收口批③）：距下次放行重试还差的秒数（向上取整）。</summary>
+    public static string RetryBackoff(int seconds) => $"重试太频繁，约 {seconds} 秒后再试";
+
     /// <summary>全部线路耗尽 OSD（与壳层 Failed 提示同一口径）。</summary>
     public const string AllLinesFailed = "信号中断，按 OK 重试";
 }

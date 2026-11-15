@@ -18,7 +18,7 @@ namespace TaoLive.Session;
 /// </summary>
 public sealed class PlaybackSessionManager
 {
-    /// <summary>会话表容量上限（LRU 淘汰已让位会话；Current/Standby 永不淘汰）。</summary>
+    /// <summary>会话表容量上限（LRU 淘汰已让位会话；Current/Standby 永不淘汰）。收口批③后=高配档默认值，实际容量经 RetainedCapacity 分档。</summary>
     public const int MaxRetainedSessions = 8;
 
     /// <summary>回主源稳定窗口（方案书收口批①·迟滞判据初值）：断流自救后播放无断流满此时长才回；终值随真机定标。</summary>
@@ -26,6 +26,19 @@ public sealed class PlaybackSessionManager
 
     /// <summary>回主源健康账门槛：主源预检轮次连续命中 OK 至少此次数（复用预检结果，不另起独立探测）。</summary>
     public const int ReturnToPrimaryMinConsecutiveOks = 3;
+
+    /// <summary>会话表容量（收口批③·LRU 按内存分档）：高配 8（兼作既有常量默认）；低配 4。</summary>
+    public const int HighMemorySessions = 8;
+
+    /// <summary>低配档容量：低配 4-5 取下限（低配档内单会话预算更紧），终值随真机定标。</summary>
+    public const int LowMemorySessions = 4;
+
+    /// <summary>分档界线初值：memoryClass ≤128MB 低配档、&gt;128MB 高配档；定标后只调常量不改逻辑。</summary>
+    public const int LowMemoryClassThresholdMb = 128;
+
+    /// <summary>按设备内存分档（方案书收口批③）：界线改动只动常量。</summary>
+    public static int CapacityFor(int memoryClassMb) =>
+        memoryClassMb <= LowMemoryClassThresholdMb ? LowMemorySessions : HighMemorySessions;
 
     private readonly Func<PlaybackSession> _sessionFactory;
     private readonly IMainThreadDispatcher _dispatcher;
@@ -35,6 +48,7 @@ public sealed class PlaybackSessionManager
     private readonly Dictionary<string, long> _lastUsed = new(StringComparer.Ordinal);
     private readonly object _returnGate = new();
     private readonly Func<long> _monotonicMs;
+    private readonly RetryBackoffAccount _retryBackoff;
     private Func<Channel, IReadOnlyList<SourceEndpoint>>? _fallbackProvider;
     private Func<Channel, bool>? _primaryAliveConfirmed;
     private PlaybackSession? _returnStableSession;
@@ -51,7 +65,18 @@ public sealed class PlaybackSessionManager
         _hotStandbyEnabled = hotStandbyEnabled;
         _primaryAliveConfirmed = primaryAliveConfirmed;
         _monotonicMs = monotonicMs ?? (() => Environment.TickCount64); // 单调时钟（方案书 v12：计时账一律按单调钟）
+        _retryBackoff = new RetryBackoffAccount(_monotonicMs);
     }
+
+    /// <summary>会话表容量上限（收口批③·LRU 按内存分档）：壳层按设备 memoryClass 经 CapacityFor 设定。</summary>
+    public int RetainedCapacity { get; set; } = HighMemorySessions;
+
+    /// <summary>
+    /// OK 重试接退避账（收口批③）：Failed 态手动重试放行判定；退避窗未满返回 false 并带出
+    /// 还须等待的毫秒数（壳层提示节奏）。播放成功起播即清账（StateChanged Playing）。
+    /// </summary>
+    public bool TryManualRetry(string channelId, out long retryAfterMs) =>
+        _retryBackoff.TryAcquire(channelId ?? string.Empty, out retryAfterMs);
 
     /// <summary>
     /// 备源队列吃内置表（方案书收口批①）：新会话与既有会话统一挂供给；未设=不吃内置表。
@@ -246,7 +271,7 @@ public sealed class PlaybackSessionManager
     /// <summary>资源闸：超容即淘汰最久未用的已让位会话并释放内核；Current/Standby 永不淘汰。</summary>
     private void EvictIfOverCapacity()
     {
-        while (_sessions.Count > MaxRetainedSessions)
+        while (_sessions.Count > RetainedCapacity)
         {
             string? victimId = null;
             long oldest = long.MaxValue;
@@ -287,6 +312,10 @@ public sealed class PlaybackSessionManager
         session.StateChanged += (_, state) =>
         {
             TrackReturnStability(session, state);
+            if (state == PlaybackState.Playing && session.CurrentChannel is { } playingChannel)
+            {
+                _retryBackoff.Clear(playingChannel.Id); // 播放成功起播即清退避账（共账不共判据：换源断路器另有判据）
+            }
             _dispatcher.Post(() => SessionStateChanged?.Invoke(this, new SessionStateEventArgs(session, state)));
         };
     }
