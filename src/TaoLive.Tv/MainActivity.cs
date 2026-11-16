@@ -758,19 +758,22 @@ public partial class MainActivity : Activity
         _listPage.Visibility = ViewStates.Gone;
         _root.AddView(_listPage, new FrameLayout.LayoutParams(-1, -1)); // 宽度在 ApplyListWidth 钳制
 
-        // 抽屉页头（vc53：标题 + 台数，同一水平基准）
-        var header = new LinearLayout(this) { Orientation = Orientation.Horizontal };
+        // 抽屉页头（vc85 施工包5：横排三段挤一行改上下两排——第一行大标题「TaoLive 频道 共N路」，
+        // 第二行小字「实时水位：XX秒 · 画面时刻：XX:XX:XX」；横向一个像素不动，外层宽度仍由 ApplyListWidth 钳制）
+        var header = new LinearLayout(this) { Orientation = Orientation.Vertical };
         header.SetPadding(UiScale.Px(48), UiScale.Px(40), UiScale.Px(48), UiScale.Px(8)); // #15 尺寸令
+        var titleRow = new LinearLayout(this) { Orientation = Orientation.Horizontal };
         var title = new TextView(this) { Text = "TaoLive 频道", TextSize = UiScale.Title };
         title.SetTextColor(InkTranslucency.TextPrimary(this));
         InkTranslucency.ApplyReadabilityShadow(title);
-        header.AddView(title);
+        titleRow.AddView(title);
         var count = new TextView(this) { Text = $"  共 {_channels.Count} 路", TextSize = UiScale.Caption };
         count.SetTextColor(Color.ParseColor(InkTranslucency.TextSecondary));
         InkTranslucency.ApplyReadabilityShadow(count);
-        header.AddView(count);
-        // 老板令 2026-11-16：共N路后面挂「实时水位:XX秒」——内核当前攒着还没播的库存（BufferedMs 实时读数），
-        // 随看门狗泵 3 秒一拍跟刷，抽屉开着数字一直新鲜
+        titleRow.AddView(count);
+        header.AddView(titleRow);
+        // 老板令 2026-11-16：共N路后面挂「实时水位」——内核当前攒着还没播的库存（BufferedMs 实时读数），
+        // 1 秒独立泵跟刷，抽屉开着数字一直新鲜；vc85 施工包5 同行并入「画面时刻」（现在−水位换算，源头延迟可标定）
         _waterLevelText = new TextView(this) { TextSize = UiScale.Caption };
         _waterLevelText.SetTextColor(Color.ParseColor(InkTranslucency.TextSecondary));
         InkTranslucency.ApplyReadabilityShadow(_waterLevelText);
@@ -1159,6 +1162,8 @@ public partial class MainActivity : Activity
             _epgNext!.Text = "";
             _epgPanel.Visibility = ViewStates.Gone;
         }
+        _epgNowTitle = null;
+        _lastEpgClock = "";
         _ = Task.Run(() =>
         {
             (CntvEpgClient.Entry Now, List<CntvEpgClient.Entry> Next)? result = null;
@@ -1169,14 +1174,19 @@ public partial class MainActivity : Activity
                 if (seq != _epgSeq || _epgPanel is null) return; // 换台后旧节目单作废
                 if (result is null)
                 {
-                    _epgPanel.Visibility = ViewStates.Gone; // 官方无数据不出卡（不硬造）
-                    _epgHasData = false;
+                    // 老板令 2026-11-17 EPG 播放页联动：官方缺表降级出卡只显画面时刻（不再整条隐藏）；
+                    // _epgHasData 维持 false——缺表卡是一次性提示，抽屉收起后不复活
+                    _epgNowTitle = null;
+                    UpdateEpgClock();
+                    ShowEpgBar();
                     return;
                 }
                 var (now, next) = result.Value;
                 string Clock(DateTime t) => t.ToString("HH:mm", System.Globalization.CultureInfo.InvariantCulture);
-                _epgNow!.Text = $"{ch.Name} · {Clock(now.Start)} – {Clock(now.End)}  {now.Title}"
-                    + $"  ·  还剩 {Math.Max(0, (int)Math.Round((now.End - DateTime.Now).TotalMinutes))} 分钟";
+                // 老板令 2026-11-17 EPG 播放页联动：节目单条改显「当前节目名 + 画面时刻」，画面时刻随水位秒泵跟刷
+                _epgNowTitle = now.Title;
+                _epgHasData = true;
+                UpdateEpgClock();
                 var upcoming = next.Take(2).ToList();
                 _epgNext!.Text = upcoming.Count > 0
                     ? string.Join("   ", upcoming.Select(p => $"{Clock(p.Start)} {p.Title}"))
@@ -1191,7 +1201,6 @@ public partial class MainActivity : Activity
     private void ShowEpgBar()
     {
         if (_epgPanel is null) return;
-        _epgHasData = true;
         _epgPanel.Visibility = ViewStates.Visible;
         CancelEpgAutoHide();
         _epgHidePending = () =>
@@ -1302,30 +1311,58 @@ public partial class MainActivity : Activity
         }
     }
 
-    private string _lastWaterText = ""; // 上一拍水位文案：读数不可靠期间保持显示，不闪归零（vc85 水位跟手令）
+    private string _lastWaterText = ""; // 上一拍页头第二行文案（水位+画面时刻）：读数不可靠期间保持显示，不闪归零（vc85 水位跟手令）
+    private string _lastEpgClock = "";  // 上一拍节目单条画面时刻：读数不可靠期间保持显示（老板令 2026-11-17 EPG 播放页联动）
+    private string? _epgNowTitle;       // 当前节目名：null=官方缺表降级（节目单条只显画面时刻）
 
-    /// <summary>列表页头实时水位（老板令 2026-11-16）：当前会话内核攒着还没播的量（BufferedMs 实时读数），
-    /// 无会话按 0 秒计；vc85 水位跟手令改 1 秒独立节拍跟刷（原 3 秒泵撤出），呼出抽屉即刷不等下一拍。
+    /// <summary>当前画面水位读数单点：无会话按 0 计；读数不可靠（重接/换票/准备期）返回 null，各显示点自行保持上一拍。</summary>
+    private long? BufferedMsNow()
+    {
+        var session = _manager.Current;
+        if (session is null) return 0;
+        return session.Kernel.BufferedMsKnown ? session.Kernel.BufferedMs : (long?)null;
+    }
+
+    /// <summary>画面绝对时刻单点：现在−水位换算（源头延迟可标定），HH:mm:ss。</summary>
+    private static string PictureClock(long bufferedMs) => DateTime.Now.AddMilliseconds(-bufferedMs).ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>列表页头第二行（vc85 施工包5）：「实时水位：XX秒 · 画面时刻：XX:XX:XX」。
+    /// 实时水位=当前会话内核攒着还没播的量（BufferedMs 实时读数），无会话按 0 秒计；
+    /// 画面时刻=现在−水位换算的绝对时刻（源头延迟可标定），同一拍一并跟刷，两读数同源不错位。
     /// 读数不可靠（重接/换票/准备期）保持上一拍显示，只有真没货才显 0。</summary>
     private void UpdateWaterLevel()
     {
         if (_waterLevelText is null) return;
-        var session = _manager.Current;
-        if (session is null)
-        {
-            _lastWaterText = "  实时水位:0秒";
-            _waterLevelText.Text = _lastWaterText;
-            return;
-        }
-        if (!session.Kernel.BufferedMsKnown)
+        long? bufferedMs = BufferedMsNow();
+        if (bufferedMs is null)
         {
             if (_lastWaterText.Length > 0) _waterLevelText.Text = _lastWaterText; // 读不出≠没货：保持上一拍
             return;
         }
-        long bufferedMs = session.Kernel.BufferedMs;
-        _lastWaterText = $"  实时水位:{(int)Math.Round(bufferedMs / 1000.0)}秒";
+        _lastWaterText = HeadlineLine(bufferedMs.Value);
         _waterLevelText.Text = _lastWaterText;
     }
+
+    /// <summary>页头第二行文案单点：实时水位（整秒）+ 画面时刻（现在−水位，HH:mm:ss）。</summary>
+    private static string HeadlineLine(long bufferedMs) =>
+        $"实时水位：{(int)Math.Round(bufferedMs / 1000.0)}秒 · 画面时刻：{PictureClock(bufferedMs)}";
+
+    /// <summary>播放页节目单条跟刷（老板令 2026-11-17 EPG 播放页联动）：当前节目名+画面时刻，
+    /// 官方缺表降级只显时刻；两读数与抽屉页头同源同拍，不错位。</summary>
+    private void UpdateEpgClock()
+    {
+        if (_epgNow is null) return;
+        long? bufferedMs = BufferedMsNow();
+        if (bufferedMs is null)
+        {
+            if (_lastEpgClock.Length > 0) _epgNow.Text = EpgNowLine(_lastEpgClock); // 读不出：保持上一拍
+            return;
+        }
+        _lastEpgClock = PictureClock(bufferedMs.Value);
+        _epgNow.Text = EpgNowLine(_lastEpgClock);
+    }
+
+    private string EpgNowLine(string clock) => (_epgNowTitle is { } title ? $"{title}  ·  " : "") + $"画面时刻：{clock}";
 
     private bool _waterPumpRunning;
 
@@ -1343,6 +1380,7 @@ public partial class MainActivity : Activity
             {
                 if (_watchdogStopped) return; // OnDestroy 后停泵：不泄漏 Activity
                 if (_listOpen) UpdateWaterLevel();
+                else UpdateEpgClock(); // EPG 播放页联动令：抽屉关着时节目单条画面时刻秒级跟刷（抽屉开着节目单条已收起，无需刷）
                 PumpWater();
             }, 1000);
         }
