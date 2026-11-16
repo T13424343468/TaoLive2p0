@@ -1,6 +1,7 @@
 ﻿using System.Collections.Concurrent;
 using System.Text;
 using System.Text.RegularExpressions;
+using TaoLive.Foundation;
 using TaoLive.Model;
 
 namespace TaoLive.Catalog;
@@ -290,7 +291,11 @@ public sealed class TicketResolver
     // 时间戳改落网后取（旧版取前，实际新鲜窗被拉网时长吃掉，整表提前过期）。
     private readonly Dictionary<string, (string Json, long FetchedAt)> _tableCache = new();
     private readonly Dictionary<string, Task<string?>> _tableInflight = new();
-    private static readonly TimeSpan TableTtl = TimeSpan.FromSeconds(60);
+
+    /// <summary>整表清单留手时长（nmtv/gxtv 频道→流清单表 TTL）：接通「清单缓存」旋钮
+    /// （老板 2026-11-17 拍板，假旋钮接通第 3 位）。出厂 60 秒=原常量口径，改档即时生效；
+    /// 上限 10 分钟即蓝图 v2.5「清单缓存上限 10min」钳制（Apply 内统一钳）。</summary>
+    internal static TimeSpan TableTtl => TimeSpan.FromSeconds(AdvancedTuning.ListCacheSec);
 
     internal async Task<string?> FetchTableCachedAsync(string sourceKey, Func<Task<string?>> fetch)
     {

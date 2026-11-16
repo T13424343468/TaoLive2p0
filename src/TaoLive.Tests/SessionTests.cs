@@ -162,6 +162,59 @@ public class SessionTests
     }
 
     [Fact]
+    public void Throttle_cap_reads_failover_knob_cap1_freezes_after_single_failover()
+    {
+        // 防快切闸第 7 旋钮接通（老板 2026-11-17 拍板）：封顶次数读「防快切闸」旋钮——
+        // 调到 1 次/分钟，窗内第 1 次换源后第 2 次即冻结（出厂 3 档口径由既有断言覆盖）。
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer();
+        AdvancedTuning.Apply(AdvancedTuning.DefaultFailGate, AdvancedTuning.DefaultReprobeMs,
+            AdvancedTuning.DefaultListCacheSec, AdvancedTuning.DefaultRetryBaseMs,
+            AdvancedTuning.DefaultRetryMaxMs, AdvancedTuning.DefaultPrefetchWindowSec,
+            AdvancedTuning.DefaultLiveLagSec, failoverCapPerMin: 1);
+        try
+        {
+            var session = new PlaybackSession(player, clock);
+            var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8", "https://s/c.m3u8");
+            session.ChangeChannel(ch);
+
+            player.RaiseError("E1"); // →b（1/1，已满额）
+            Assert.Equal(PlaybackState.Buffering, session.State);
+            Assert.Equal("https://s/b.m3u8", session.CurrentEndpoint?.Url);
+            player.RaiseError("E2"); // 窗内满 1 次：冻结不切 c
+            Assert.Equal(PlaybackState.Failed, session.State);
+            Assert.Equal(1, session.FailoverCount); // 没有第 2 次快切
+        }
+        finally
+        {
+            AdvancedTuning.ResetToDefaults(); // 全局旋钮还原，不污染其他测试
+        }
+    }
+
+    [Fact]
+    public void Failover_cap_knob_clamps_floor_one_per_minute()
+    {
+        // 蓝图 v2.5 全局钳制：下限 1 次/分钟调不灭，上限 10；坏调整只退化到保守行为。
+        try
+        {
+            AdvancedTuning.Apply(AdvancedTuning.DefaultFailGate, AdvancedTuning.DefaultReprobeMs,
+                AdvancedTuning.DefaultListCacheSec, AdvancedTuning.DefaultRetryBaseMs,
+                AdvancedTuning.DefaultRetryMaxMs, AdvancedTuning.DefaultPrefetchWindowSec,
+                AdvancedTuning.DefaultLiveLagSec, failoverCapPerMin: 0);
+            Assert.Equal(1, AdvancedTuning.FailoverCapPerMin);
+            AdvancedTuning.Apply(AdvancedTuning.DefaultFailGate, AdvancedTuning.DefaultReprobeMs,
+                AdvancedTuning.DefaultListCacheSec, AdvancedTuning.DefaultRetryBaseMs,
+                AdvancedTuning.DefaultRetryMaxMs, AdvancedTuning.DefaultPrefetchWindowSec,
+                AdvancedTuning.DefaultLiveLagSec, failoverCapPerMin: 100);
+            Assert.Equal(10, AdvancedTuning.FailoverCapPerMin);
+        }
+        finally
+        {
+            AdvancedTuning.ResetToDefaults();
+        }
+    }
+
+    [Fact]
     public void Throttled_freeze_schedules_self_heal_slow_retry()
     {
         // vc82 冻结不装死：限速冻结后按自愈退避节奏自动慢试，不静默挂起

@@ -72,6 +72,36 @@ public class LedgerProfileTests
         Assert.Equal(1, Volatile.Read(ref calls)); // TTL 内同源只发 1 次（原口径不变）
     }
 
+    [Fact]
+    public void Table_ttl_follows_list_cache_knob()
+    {
+        // 清单缓存旋钮接通（老板 2026-11-17 拍板，假旋钮接通第 3 位）：整表 TTL 读「清单缓存」旋钮，
+        // 出厂 60 秒=原常量口径；上限 10 分钟即蓝图 v2.5「清单缓存上限 10min」钳制。
+        try
+        {
+            AdvancedTuning.Apply(AdvancedTuning.DefaultFailGate, AdvancedTuning.DefaultReprobeMs,
+                60, AdvancedTuning.DefaultRetryBaseMs, AdvancedTuning.DefaultRetryMaxMs,
+                AdvancedTuning.DefaultPrefetchWindowSec, AdvancedTuning.DefaultLiveLagSec);
+            Assert.Equal(TimeSpan.FromSeconds(60), TicketResolver.TableTtl); // 出厂=原常量口径
+            AdvancedTuning.Apply(AdvancedTuning.DefaultFailGate, AdvancedTuning.DefaultReprobeMs,
+                300, AdvancedTuning.DefaultRetryBaseMs, AdvancedTuning.DefaultRetryMaxMs,
+                AdvancedTuning.DefaultPrefetchWindowSec, AdvancedTuning.DefaultLiveLagSec);
+            Assert.Equal(TimeSpan.FromMinutes(5), TicketResolver.TableTtl); // 改档即时生效
+            AdvancedTuning.Apply(AdvancedTuning.DefaultFailGate, AdvancedTuning.DefaultReprobeMs,
+                600, AdvancedTuning.DefaultRetryBaseMs, AdvancedTuning.DefaultRetryMaxMs,
+                AdvancedTuning.DefaultPrefetchWindowSec, AdvancedTuning.DefaultLiveLagSec);
+            Assert.Equal(TimeSpan.FromMinutes(10), TicketResolver.TableTtl); // 上限=10min 钳制
+            AdvancedTuning.Apply(AdvancedTuning.DefaultFailGate, AdvancedTuning.DefaultReprobeMs,
+                2, AdvancedTuning.DefaultRetryBaseMs, AdvancedTuning.DefaultRetryMaxMs,
+                AdvancedTuning.DefaultPrefetchWindowSec, AdvancedTuning.DefaultLiveLagSec);
+            Assert.Equal(TimeSpan.FromSeconds(5), TicketResolver.TableTtl); // 下限 5 秒钳制
+        }
+        finally
+        {
+            AdvancedTuning.ResetToDefaults();
+        }
+    }
+
     // ---- ④ WatchTimeLedger ----
 
     private static Dictionary<string, long> ReadLedger(string dir) =>

@@ -788,6 +788,7 @@ public partial class MainActivity
     private static readonly int[] AdvWindowSecSteps = { 30, 45, 60 }; // #67 库存档三档位（老板令 2026-11-15）
     private static readonly int[] AdvLagSecSteps = { 0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60 }; // 落后目标 5 秒一档（老板令 2026-11-16）
     private static readonly int[] AdvRetrySecSteps = { 30, 60, 120, 300, 600 }; // 起步；封顶 16 分钟（AdvancedTuning.DefaultRetryMaxMs 口径）
+    private static readonly int[] AdvFailoverCapSteps = { 1, 2, 3, 4, 5, 6, 8, 10 }; // 防快切闸：下限 1 次/分钟全局钳死（蓝图 v2.5），上限 10
 
     private static int NextStep(int[] steps, int current)
     {
@@ -903,6 +904,11 @@ public partial class MainActivity
                 () => $"播放落后：{AdvancedTuning.LiveLagSec} 秒",
                 v => AdvancedTuning.Apply(AdvancedTuning.SelfHealFailGate, AdvancedTuning.SelfHealReprobeMs, AdvancedTuning.ListCacheSec, AdvancedTuning.RetryBaseMs, AdvancedTuning.RetryMaxMs, AdvancedTuning.PrefetchWindowSec, v),
                 () => AdvancedTuning.LiveLagSec);
+            AddKnob("一分钟内自动换源的次数上限——到顶冻结转慢恢复，防连环快切烧线：调低更稳但坏线恢复慢，调高坏线切得快；下限保底 1 次/分钟调不灭（默认 3）",
+                AdvFailoverCapSteps,
+                () => $"防快切闸：{AdvancedTuning.FailoverCapPerMin} 次/分钟",
+                v => AdvancedTuning.Apply(AdvancedTuning.SelfHealFailGate, AdvancedTuning.SelfHealReprobeMs, AdvancedTuning.ListCacheSec, AdvancedTuning.RetryBaseMs, AdvancedTuning.RetryMaxMs, AdvancedTuning.PrefetchWindowSec, AdvancedTuning.LiveLagSec, v),
+                () => AdvancedTuning.FailoverCapPerMin);
 
             var tip = new TextView(this)
             {
@@ -974,6 +980,7 @@ public partial class MainActivity
             ?.PutInt("adv_retry_max_min", (int)(AdvancedTuning.RetryMaxMs / 60_000))
             ?.PutInt("adv_prefetch_sec", AdvancedTuning.PrefetchWindowSec) // #67 库存档旋钮
             ?.PutInt("adv_live_lag_sec", AdvancedTuning.LiveLagSec) // 落后目标旋钮（老板令 2026-11-16）
+            ?.PutInt("adv_failover_cap", AdvancedTuning.FailoverCapPerMin) // 防快切闸第 7 旋钮（老板 2026-11-17 拍板接通）
             ?.Apply();
     }
 }

@@ -64,6 +64,10 @@ public partial class MainActivity : Activity
     private int _stallRebuildCount;     // #75：同源快速重建连续计数（有帧即清账，2 次封顶切线路）
     private long? _failoverAtMs; // 换源黑屏埋点账（黑屏镜黄④）：换源起点 → Playing 出画恢复时长落运行台账
     private Java.Lang.Runnable _toastHide = default!;
+    // 文案矩阵单点（方案书 v2.4 §25）：失败终态空态文案常量 + 长播无源退级提示账
+    private const string EmptyStateText = "信号中断，正在自动重试\n按 OK 重试 · 菜单键选台";
+    private Java.Lang.Runnable _emptyHintTick = default!; // 退级提示节拍（ShowEmptyState 起、HideEmptyState 撤）
+    private long _emptyStateAtMs;               // 空态起点（单调钟，分钟级即可）
     private readonly CntvEpgClient _epg = new();
     private HashSet<string> _favorites = new();
     // 收藏账跨线程快照（vc84 首轮交叉审查修）：PrecheckQueue 在调度泵线程读收藏，
@@ -141,7 +145,8 @@ public partial class MainActivity : Activity
             _prefs.GetInt("adv_retry_base_sec", 120) * 1000L,
             _prefs.GetInt("adv_retry_max_min", 120) * 60_000L,
             _prefs.GetInt("adv_prefetch_sec", AdvancedTuning.DefaultPrefetchWindowSec), // #67 库存档旋钮
-            _prefs.GetInt("adv_live_lag_sec", AdvancedTuning.DefaultLiveLagSec)); // 落后目标旋钮（老板令 2026-11-16）
+            _prefs.GetInt("adv_live_lag_sec", AdvancedTuning.DefaultLiveLagSec), // 落后目标旋钮（老板令 2026-11-16）
+            _prefs.GetInt("adv_failover_cap", AdvancedTuning.DefaultFailoverCapPerMin)); // 防快切闸第 7 旋钮（老板 2026-11-17 拍板接通）
         CrashNet.Install(); // 未捕获异常先落日志再放行（崩溃日志页可查可清）
 
         // 真机反馈批#15：进程级壳引用先立（内核/会话回调经它路由到当前实例）
@@ -460,7 +465,7 @@ public partial class MainActivity : Activity
             _veilChannelName = null; // #73 修：失败终态清台名——ShowSwitchVeil 不再带「正在连接」字样，空态文案接管
             ShowSwitchVeil();
             _veilAwaitingReveal = false; // 失败终态遮罩由空态文案管，不归帧节拍撤
-            ShowEmptyState("信号中断，全线路不可达\n按 OK 重试 · 菜单键选台");
+            ShowEmptyState();
         }
         else if (e.State == PlaybackState.Buffering)
         {
@@ -653,6 +658,18 @@ public partial class MainActivity : Activity
 
         _toastHide = new Java.Lang.Runnable(() =>
             _toast.Visibility = ViewStates.Invisible);
+
+        // 长播无源退级提示（老板 2026-11-17 拍板）：空态满 5 分钟起每分钟如实报已等时长并建议
+        // 检查网络；自愈慢轮+重探仍在后台自动复活，提示只是让等待有交代。可见性判定兼停表：
+        // 离开空态（HideEmptyState 撤回调）或空态已被复用改写即自然停摆。
+        _emptyHintTick = new Java.Lang.Runnable(() =>
+        {
+            if (_emptyState.Visibility != ViewStates.Visible) return;
+            var waitedMin = (int)((System.Environment.TickCount64 - _emptyStateAtMs) / 60_000);
+            if (waitedMin >= 5)
+                _emptyState.Text = $"{EmptyStateText}\n已 {waitedMin} 分钟未恢复，建议检查网络";
+            _main.PostDelayed(_emptyHintTick, 60_000);
+        });
 
         // 1. 全屏视频层（vc53：垫底；抽屉/信息条/节目单全盖其上）
         // 载体改 TextureView（真机反馈批#6 修 2026-11-15）：SurfaceView 独立窗口层被列表盖住即整层
@@ -1993,17 +2010,23 @@ public partial class MainActivity : Activity
         _main.PostDelayed(_toastHide, 2200);
     }
 
-    /// <summary>失败终态驻留空态（v77）：显示至离开失败态；样式照 vc53 水墨面板口径。</summary>
-    private void ShowEmptyState(string text)
+    /// <summary>失败终态驻留空态（v77）：显示至离开失败态；样式照 vc53 水墨面板口径。
+    /// 文案矩阵（方案书 v2.4 §25）单点：空态文案=常量，退级提示按等待时长叠加，不另开文案源。</summary>
+    private void ShowEmptyState(string text = EmptyStateText)
     {
         _emptyState.Text = text;
         _emptyState.Visibility = ViewStates.Visible;
+        // 长播无源退级提示（老板 2026-11-17 拍板，归文案项一并落）：空态满 5 分钟起如实报已等
+        // 时长并建议检查网络——自愈慢轮+重探在后台自动复活，不用用户盯屏干等；离开空态即停表撤字。
+        _emptyStateAtMs = System.Environment.TickCount64;
+        _main.PostDelayed(_emptyHintTick, 30_000);
     }
 
     private void HideEmptyState()
     {
         if (_emptyState.Visibility != ViewStates.Visible) return;
         _emptyState.Visibility = ViewStates.Invisible;
+        _main.RemoveCallbacks(_emptyHintTick);
     }
 
     // —— 列表适配器（vc53 ChannelAdapter 皮整套搬运）：

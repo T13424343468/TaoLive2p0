@@ -607,9 +607,6 @@ public sealed class PlaybackSession
     /// <summary>连环限速滚动窗：窗内自动换源（真断/坏票/预防介终路）次数封顶，防连环快切烧线。</summary>
     public static readonly TimeSpan FailoverThrottleWindow = TimeSpan.FromSeconds(60);
 
-    /// <summary>连环限速封顶：滚动窗内自动换源满 3 次即冻结，转自愈慢轮（把连环快切变定点慢试）。</summary>
-    public const int FailoverThrottleCap = 3;
-
     /// <summary>自愈首档退避：全断后 5 秒起慢轮重试。</summary>
     public static readonly TimeSpan SelfHealFirstDelay = TimeSpan.FromSeconds(5);
 
@@ -828,13 +825,16 @@ public sealed class PlaybackSession
             AllSourcesFailed?.Invoke(this, new AllSourcesFailedEventArgs(_channel?.Id ?? string.Empty, reason));
             return;
         }
-        // vc82 第二刀（老板令「连环限速」）：滚动窗内自动换源满 3 次即冻结——不再继续烧线，
+        // vc82 第二刀（老板令「连环限速」）：滚动窗内自动换源满额即冻结——不再继续烧线，
         // 转空态排自愈慢轮（退避节奏定点慢试），把「连环快切」变成「慢试不烧线」。
+        // 第 7 旋钮接通（老板 2026-11-17 拍板）：封顶次数读「防快切闸」旋钮，全局钳制下限 1 次/分钟调不灭；
+        // 吃闸的只有故障硬切，对齐软切豁免（四原则 3），冻结后转自愈慢轮不空转。
         var nowMs = _clock.NowMs;
         _autoFailoverTimes.RemoveAll(t => nowMs - t >= FailoverThrottleWindow.TotalMilliseconds);
-        if (_autoFailoverTimes.Count >= FailoverThrottleCap)
+        var throttleCap = AdvancedTuning.FailoverCapPerMin;
+        if (_autoFailoverTimes.Count >= throttleCap)
         {
-            SessionTrace.Emit($"[限速] {DescribeChannel()} {FailoverThrottleWindow.TotalSeconds:0} 秒内自动换源已满 {FailoverThrottleCap} 次，冻结不切（{reason}），转自愈慢轮");
+            SessionTrace.Emit($"[限速] {DescribeChannel()} {FailoverThrottleWindow.TotalSeconds:0} 秒内自动换源已满 {throttleCap} 次，冻结不切（{reason}），转自愈慢轮");
             _player.Stop();
             ScheduleSelfHeal();
             AllSourcesFailed?.Invoke(this, new AllSourcesFailedEventArgs(_channel.Id, $"throttled: {reason}"));
