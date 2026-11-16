@@ -27,7 +27,7 @@ public sealed class ExoPlayerPlayer : IPlayer
     private Func<TaoLive.Model.SourceEndpoint, Task<string?>>? _streamResolver;
     private bool _firstFrameRaisedThisPlay;
     private int _playGeneration; // 播放代次（闪退镜红② 11-15）：迟到 resolver 回调对不上代次即弃，不碰已释放内核
-    private volatile bool _released; // vc74 P3⑧：释放旗——Dispose 摘听→Release 窗口期在途回调即弃
+    private volatile bool _released; // vc74 P3⑧：释放旗——Dispose 摘听→Release 窗口期在途回调查旗即弃（收窄窗口口径，vc75 定案）
     private IntPtr _surfaceHandle;
     private bool _hasSurface;
     private readonly Android.Content.Context _context;
@@ -316,7 +316,7 @@ public sealed class ExoPlayerPlayer : IPlayer
     public void Dispose()
     {
         _playGeneration++; // 释放后作废一切在途回调（闪退镜红②）
-        _released = true;  // vc74 P3⑧：监听摘除→Release 与内核/渲染线程在途回调有窗口，三个回调桥入口先查旗即弃
+        _released = true;  // vc74 P3⑧：监听摘除→Release 与内核/渲染线程在途回调有窗口，回调桥入口查旗收窄窗口（vc75 定案：查旗到执行间非原子，Dispose 可在窗内完成——诊断噪声由 Reporter 有界队列与会话守卫兜底，口径是收窄非消除）
         ReleaseWarmupSink();
         _player.RemoveListener(_forwarder);
         _player.RemoveAnalyticsListener(_diagForwarder);
@@ -396,7 +396,8 @@ public sealed class ExoPlayerPlayer : IPlayer
         private void Report(string message) => ExoPlayerPlayer.Reporter?.Invoke(message);
 
         // vc74 P3⑧：释放旗——Dispose 摘听→Release 与内核/渲染线程在途回调有窗口，
-        // 各回调入口先查旗即弃，不再向已释放会话层递进（诊断账/故障递进均属旧实例噪声）。
+        // 各回调入口查旗收窄窗口（查旗到执行间非原子，vc75 定案：诊断账噪声由
+        // Reporter 有界队列兜底、故障递进由会话 _active/状态守卫兜底，不再向已释放会话层递进）。
         private bool Alive => !_owner._released;
 
         public void OnVideoCodecError(AndroidX.Media3.ExoPlayer.Analytics.AnalyticsListenerEventTime? eventTime,
