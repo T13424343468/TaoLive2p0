@@ -23,6 +23,7 @@ public class W8FeatureTests
     {
         BackgroundLane.SetPlaying(false);
         BackgroundLane.SetFirstFrameLanded(true); // 首帧门控放行：测试环境无真实首帧，置 true 防车道无限等
+        BackgroundLane.IdleGapOverrideMs = 0; // 预热过车道削峰后，空闲档间隔压 0 防全表预热用例被硬等待拖慢
     }
 
     // ---- 换台去抖（SwitchDebouncer） ------------------------------------------
@@ -440,6 +441,45 @@ public class W8FeatureTests
             // 第二轮：成功源命中 5 分钟缓存、失败源被退避账挂起——零新增请求（预热不烧重复请求）
             await warmer.WarmAllAsync(catalog);
             Assert.Equal(callsAfterFirstPass, fake.Calls);
+        }
+        finally
+        {
+            TicketResolver.Http = previous;
+        }
+    }
+
+    [Fact]
+    public async Task Warmer_enters_background_lane_and_waits_turn()
+    {
+        // 削峰锚（老板令 2026-11-16 19:40「一个通道排队削峰」）：预热取票进全局后台单车道排队，
+        // 车道被占（预检轮/邻台预取在飞）时预热不得插队，释放后才继续——三路合流不抢网。
+        var previous = TicketResolver.Http;
+        try
+        {
+            var fake = new FakeHttp(JsonBody("{\"url\":\"https://stream.example.com/live.m3u8\"}"));
+            TicketResolver.Http = new HttpClient(fake);
+            var ch = new Channel("gz1", "贵州卫视", "省台", new[]
+            {
+                new SourceEndpoint("https://api.gzstv.com/v1/tv/1", SourceKind.Web, 1),
+            });
+
+            var occupierStarted = new TaskCompletionSource();
+            var releaseOccupier = new TaskCompletionSource();
+            var occupier = BackgroundLane.RunAsync(async () =>
+            {
+                occupierStarted.SetResult(); // 占住车道执行权（模拟预检轮在飞）
+                await releaseOccupier.Task;
+            });
+            await occupierStarted.Task;
+
+            var warmer = new ChannelWarmer(new TicketResolver()) { MinGapOverrideMs = 0 };
+            var warmTask = warmer.WarmChannelAsync(ch); // 车道被占：预热必须排队
+            await Task.Delay(50);
+            Assert.False(warmTask.IsCompleted, "车道被占时预热插队=削峰失效（三路合流回归锚）");
+
+            releaseOccupier.SetResult();
+            await occupier;
+            Assert.True(await warmTask); // 车道释放后预热照常完成
         }
         finally
         {

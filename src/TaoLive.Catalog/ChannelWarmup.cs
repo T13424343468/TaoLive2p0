@@ -1,5 +1,6 @@
 ﻿using System.Collections.Concurrent;
 using TaoLive.Model;
+using TaoLive.Session;
 
 namespace TaoLive.Catalog;
 
@@ -152,8 +153,11 @@ public sealed class ChannelWarmer
     /// 单台预热：对频道全部取票口端点预取真实流。返回频道是否就绪（有取票口端点时=至少一路预取成功；
     /// 纯直连频道原样可播，视为就绪）。
     /// 退避期内该源直接跳过（挂起不烧请求）；解析失败回写退避账，成功全额恢复。
+    /// 三路合流削峰（老板令 2026-11-16 19:40「一个通道排队削峰」）：预热取票默认过全局后台单车道
+    /// （首帧门控+间隔让路+全局串行），与预检轮/邻台预取同车道排队，不再各跑各的抢网；
+    /// 调用方已持车道执行权时传 throughLane:false（车道内再排队=自己等自己死锁）。
     /// </summary>
-    public async Task<bool> WarmChannelAsync(Channel ch, CancellationToken ct = default)
+    public async Task<bool> WarmChannelAsync(Channel ch, CancellationToken ct = default, bool throughLane = true)
     {
         ArgumentNullException.ThrowIfNull(ch);
         var nowMs = _nowMs();
@@ -166,7 +170,15 @@ public sealed class ChannelWarmer
             var sourceKey = SourceKeyOf(endpoint);
             if (_backoff.IsFrozen(sourceKey, nowMs)) continue; // 退避期挂起
             string? resolved;
-            try { resolved = await _resolver.ResolveAsync(endpoint, ch.Id, ch.Name).ConfigureAwait(false); }
+            try
+            {
+                resolved = throughLane
+                    ? await BackgroundLane.RunAsync(
+                        () => _resolver.ResolveAsync(endpoint, ch.Id, ch.Name),
+                        ct, BackgroundLane.LaneTier.Standard).ConfigureAwait(false)
+                    : await _resolver.ResolveAsync(endpoint, ch.Id, ch.Name).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) { throw; }
             catch { resolved = null; }
             if (resolved is null)
             {

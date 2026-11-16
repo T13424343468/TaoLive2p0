@@ -47,6 +47,9 @@ public static class BackgroundLane
     /// <summary>空闲档后台单请求最小间隔（毫秒）：至少给 600ms——防极端调用方零节拍打穿车道。</summary>
     public const int IdleGapMs = 600;
 
+    /// <summary>空闲档间隔覆盖（测试口径）：默认=IdleGapMs；测试环境压小防车道硬等待拖慢全测。负值按 0 计。</summary>
+    public static int IdleGapOverrideMs { get; set; } = IdleGapMs;
+
     private static long _lastRunMs; // Environment.TickCount64 口径
     private static readonly object GateLock = new();
 
@@ -57,7 +60,7 @@ public static class BackgroundLane
     public static int PendingWaitMs()
     {
         if (!FirstFrameLanded) return int.MaxValue; // 首帧未落地：无限等（直到 UI 置位）
-        int gap = Playing ? PlayingGapMs : IdleGapMs;
+        int gap = Playing ? PlayingGapMs : Math.Max(0, IdleGapOverrideMs);
         long elapsed = Now() - Volatile.Read(ref _lastRunMs);
         return elapsed >= gap ? 0 : gap - (int)elapsed;
     }

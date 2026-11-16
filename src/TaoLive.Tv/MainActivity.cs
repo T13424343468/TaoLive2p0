@@ -253,7 +253,7 @@ public partial class MainActivity : Activity
         var prefetcher = new ChannelPrefetcher(
             async ch =>
             {
-                try { return await new ChannelWarmer(resolver).WarmChannelAsync(ch) ? new ResolvedStream { Channel = ch } : null; }
+                try { return await new ChannelWarmer(resolver).WarmChannelAsync(ch, throughLane: false) ? new ResolvedStream { Channel = ch } : null; } // 邻台预取外层已持车道执行权，预热内不再排队（嵌套等自己=死锁）
                 catch { return null; }
             },
             async host => { try { await System.Net.Dns.GetHostAddressesAsync(host); } catch { /* 预解析失败不挡预取 */ } });
