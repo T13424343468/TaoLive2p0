@@ -1,4 +1,5 @@
-﻿using TaoLive.Model;
+﻿using TaoLive.Foundation;
+using TaoLive.Model;
 
 namespace TaoLive.Session;
 
@@ -12,8 +13,10 @@ public class NetGuard
 {
     private int _failStreak;
 
-    /// <summary>连续失败多少次判为断网（预检/取票各自回灌，避免单次抖动误判）。</summary>
-    public const int OfflineAfterFails = 4;
+    /// <summary>连续失败多少次判为断网：接通自愈门槛旋钮（老板 2026-11-17 拍板，假旋钮接通第 1 位）——
+    /// 判别现读 AdvancedTuning.SelfHealFailGate（出厂 3，原常量 4 为改动前口径），每拍现取，改档即时生效。
+    /// 预检/取票各自回灌，避免单次抖动误判。</summary>
+    public static int OfflineAfterFails => AdvancedTuning.SelfHealFailGate;
 
     public bool Offline { get; private set; }
 
