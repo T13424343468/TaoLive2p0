@@ -72,7 +72,7 @@ public partial class MainActivity
                 StartActivity(new Intent(action));
                 return;
             }
-            catch (Exception ex) { CrashNet.Record($"[MemoryLevel] 内存分级调不动降级下一级：{ex.Message}"); }
+            catch (Exception ex) { CrashNet.Record($"[设置跳转] 打开系统设置失败降级下一级：{ex.Message}"); } // 第11轮 P3修：原标签「[MemoryLevel] 内存分级调不动…」系复制粘贴残留，跳系统设置失败被记成内存分级账，台账误导诊断
         }
         ShowToast("请按遥控器「设置/菜单」键进入电视系统设置"); // ③文字指引
     }
