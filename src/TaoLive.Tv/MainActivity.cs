@@ -633,6 +633,7 @@ public partial class MainActivity : Activity
         _watchdogStopped = true;
         _main.RemoveCallbacks(_digitCommit!);
         _digitCommit?.Dispose();
+        _main.RemoveCallbacks(_emptyHintTick); // R1 审查红项修（闪退镜黄⑦同族）：Recreate 后旧壳退级提示节拍不得自续
         StopPrecheckLoop();
         StopVeilCountdown(); // #16：换壳必停倒计时（新壳起自己的）
         if (IsFinishing)
