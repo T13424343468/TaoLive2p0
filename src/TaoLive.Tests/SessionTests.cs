@@ -206,9 +206,49 @@ public class SessionTests
         }
         Assert.Equal(PlaybackSession.SelfHealMaxAttempts + 1, player.PlayedUrls.Count); // 初播 1 + 自愈 6
         clock.Advance(TimeSpan.FromSeconds(delays[^1]));
-        Assert.False(session.CheckWatchdog()); // 满额收摊：不再自动重试
+        Assert.True(session.CheckWatchdog()); // 满额后改重探间隔轻试探活（老板 2026-11-17 假旋钮接通第 2 位）
+        Assert.Equal(PlaybackState.Buffering, session.State);
+        Assert.Equal(plays + 1, player.PlayedUrls.Count); // 轻试一次，播放账 +1
+        player.RaiseError("E-reprobe"); // 轻试又耗尽（单线台，回 Failed）
         Assert.Equal(PlaybackState.Failed, session.State);
-        Assert.Equal(plays, player.PlayedUrls.Count);
+    }
+
+    [Fact]
+    public void Self_heal_reprobe_interval_couples_to_knob()
+    {
+        // 老板 2026-11-17 拍板（假旋钮接通第 2 位）：满额后轻试节拍读「自救重探间隔」旋钮
+        // （范围 60s~30min）。默认 5 分钟——间隔内不轻试，过线即轻试。
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer();
+        AdvancedTuning.Apply(AdvancedTuning.DefaultFailGate, 120_000, // 重探 2 分钟
+            AdvancedTuning.DefaultListCacheSec, AdvancedTuning.DefaultRetryBaseMs,
+            AdvancedTuning.DefaultRetryMaxMs, AdvancedTuning.DefaultPrefetchWindowSec,
+            AdvancedTuning.DefaultLiveLagSec);
+        try
+        {
+            var session = new PlaybackSession(player, clock);
+            var ch = MakeChannel("cctv1", "https://s/a.m3u8");
+            session.ChangeChannel(ch);
+            player.RaiseError("E1"); // 耗尽 → 自愈
+            var delays = new[] { 5, 5, 10, 20, 40, 60, 60 };
+            for (int i = 0; i < PlaybackSession.SelfHealMaxAttempts; i++)
+            {
+                clock.Advance(TimeSpan.FromSeconds(delays[i]));
+                session.CheckWatchdog();
+                player.RaiseError("E-again");
+            }
+            clock.Advance(TimeSpan.FromSeconds(delays[^1]));
+            // 满额后：重探间隔 2 分钟——1 分钟内不轻试，过线才轻试
+            clock.Advance(TimeSpan.FromMinutes(1));
+            Assert.Equal(PlaybackSession.SelfHealMaxAttempts + 1, player.PlayedUrls.Count);
+            clock.Advance(TimeSpan.FromMinutes(2));
+            Assert.True(session.CheckWatchdog());
+            Assert.Equal(PlaybackSession.SelfHealMaxAttempts + 2, player.PlayedUrls.Count); // 轻试 +1
+        }
+        finally
+        {
+            AdvancedTuning.ResetToDefaults();
+        }
     }
 
     [Fact]

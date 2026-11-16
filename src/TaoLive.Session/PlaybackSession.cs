@@ -488,8 +488,20 @@ public sealed class PlaybackSession
         {
             if (_selfHealAttempts >= SelfHealMaxAttempts)
             {
-                _selfHealDueAtMs = null; // 满额收摊：保持空态等按键，不无限烧
-                return false;
+                // 满额收摊（vc82 口径不变：保持空态等按键，不无限烧）→ 改接「自救重探间隔」旋钮
+                // （老板 2026-11-17 拍板，假旋钮接通第 2 位）：满额后按重探间隔周期性轻试一次探活，
+                // 缓过来就自动复活；比空态死等快，比重试烧线省。重试账不重开，探活复用既有播放重试路径。
+                // 注意：重试账已满，此处轻试不清账不重开，探活成功（内核回报 Playing/错误回调触发换线）按既有路径走。
+                _selfHealDueAtMs = nowMs + (long)SelfHealReprobeInterval.TotalMilliseconds;
+                _selfHealAttempts = SelfHealMaxAttempts; // 账面钉住满额：轻试不消耗也不重置重试次数
+                if (_channel is { } probeChannel && _queue.Count > 0)
+                {
+                    // 轻试探活：只重放队首一拍（既有播放重试路径），不重开限速账不重记坏票账
+                    Transition(PlaybackState.Buffering, "self-heal reprobe");
+                    _player.Play(new PlaybackParams(probeChannel, _queue[0], _preferLowLatency));
+                    ReattachSurface();
+                }
+                return true;
             }
             _selfHealAttempts++;
             var nextDelay = SelfHealDelay(_selfHealAttempts);
@@ -606,6 +618,13 @@ public sealed class PlaybackSession
 
     /// <summary>自愈重试封顶次数：退避重试满 6 次仍全断即停止自动重试，保持空态等按键（不无限烧）。</summary>
     public const int SelfHealMaxAttempts = 6;
+
+    /// <summary>自愈慢轮落定后的重探间隔（断网/断源态的探活回看节拍）：接通「自救重探间隔」旋钮
+    /// （老板 2026-11-17 拍板，假旋钮接通第 2 位）。</summary>
+    /// <remarks>语义映射（实现前已核对）：退避节奏（SelfHealDelay 5/10/20/40/60，重试节拍）与重探间隔
+    /// （探活回看节拍）是两件事，不硬套——慢轮重试期间节拍仍走退避函数；慢轮落定（满额收摊/断网静默态）
+    /// 后的周期性探活用本旋钮，每拍现取，改档下一轮生效。</remarks>
+    public static TimeSpan SelfHealReprobeInterval => TimeSpan.FromMilliseconds(AdvancedTuning.SelfHealReprobeMs);
 
     private readonly List<long> _autoFailoverTimes = new();
     private long? _selfHealDueAtMs;
