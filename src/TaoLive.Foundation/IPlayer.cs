@@ -50,6 +50,10 @@ public interface IPlayer : IDisposable
     /// 仅盲区/贴边源触发（赛跑病根所在）；默认空实现=该内核不支持回退，调用方无害。</summary>
     void SeekBack(long backMs) { }
 
+    /// <summary>分片级码率自适应（六项优化④）：内核按链路健康裕度钳制选轨视频码率上限（fhd/hd 档内降片），
+    /// null=解除钳制（估速自由选档）。DIM 空默认：无档位概念的内核（直流盲区）静默不钳。</summary>
+    void ApplyBitrateCeiling(long? maxVideoBitrate) { }
+
     // —— 事件时序语义（契约，两内核必须一致；次序即文档）——
 
     /// <summary>

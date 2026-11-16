@@ -64,6 +64,10 @@ public sealed class ExoPlayerPlayer : IPlayer
         // 已播保留档只进 TrackSelector（minDurationToRetainAfterDiscardMs，微卡修法①）：
         // LoadControl 水位（存货上限）原样不动——盲区档只多留已播，不多占存货上限
         playerBuilder.SetLoadControl(BuildLoadControl(context));
+        // 六项优化⑤慢分片竞速：内核数据源整面包竞速壳——分片首字节慢出均值（×2，下限 1 秒）
+        // 即对同源发第二请求赛跑先到先用；清单/快链路不赛。HTTP 头纪律与默认工厂原样不动。
+        playerBuilder.SetMediaSourceFactory(new AndroidX.Media3.ExoPlayer.Source.DefaultMediaSourceFactory(
+            new RacingDataSourceFactory()));
         // #76 锁画质防抖（2026-11-15 老板令，治「放 1 秒卡半秒」循环）：默认 ABR 在估速贴档位线抖动时
         // 逐秒重选流——每次切换渲染器拆建一遍（真机「视频渲染器停用」实锤），画面停半秒再续。
         // 改黏性自适应：升档要缓冲满 30 秒、降档判据放宽到 60 秒、估速按折扣取档——宁稳勿抖，
@@ -416,6 +420,32 @@ public sealed class ExoPlayerPlayer : IPlayer
                 Reporter?.Invoke($"[内核] 回退跳 {backMs}ms：{pos}→{target}（贴边赛跑断链，微卡修法）");
             }
             catch { /* 内核重建/释放等边界：回退失败无害，交既有卡流自救路径 */ }
+        });
+    }
+
+    /// <summary>分片级码率自适应（六项优化④，vc85 蓝本 v2.5）：链路健康裕度钳制选轨视频码率上限——
+    /// 主线程进（TrackSelectionParameters 内核线程契约）；int.MaxValue=解除钳制。直流盲区源无多档清单，
+    /// 内核对单档流钳制无害（选轨无变体可选=原样）；已释放静默弃。</summary>
+    public void ApplyBitrateCeiling(long? maxVideoBitrate)
+    {
+        if (_released) return;
+        _main.Post(() =>
+        {
+            if (_released) return; // 在途队列回调对上释放即弃（vc74 P3⑧ 同口径）
+            try
+            {
+                var builder = _player.TrackSelectionParameters?.BuildUpon();
+                if (builder is null) return; // 绑定面空读数（未就绪）：静默弃
+                builder.SetMaxVideoBitrate(maxVideoBitrate is { } cap
+                    ? (int)Math.Min(cap, int.MaxValue)
+                    : int.MaxValue);
+                var built = builder.Build();
+                if (built is not null) _player.TrackSelectionParameters = built;
+            }
+            catch (Exception ex)
+            {
+                Reporter?.Invoke($"[码率自适应] 钳制下发失败忽略：{ex.Message}");
+            }
         });
     }
 

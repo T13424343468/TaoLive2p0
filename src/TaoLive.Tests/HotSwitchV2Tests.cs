@@ -348,4 +348,36 @@ public class HotSwitchV2Tests
         Assert.True(blindScore > cleanScore); // 盲区天然贴边：不给头名
         Assert.Equal(10_000, QualityHealthStore.SortScore(null, probeDead: true)); // 死账沉底量级
     }
+
+    // ---- 分片级码率自适应（六项优化④）：迟滞闸转移表 ----
+
+    [Fact]
+    public void Bitrate_governor_starts_unclamped_and_downgrades_one_tier_per_interval()
+    {
+        var gov = new BitrateGovernor();
+        long t0 = 1_000_000;
+        Assert.Null(gov.Update(0.5, t0)); // 起播满档：不钳（内核估速自由选档）
+        Assert.Equal(BitrateGovernor.TierHd, gov.Update(-0.5, t0 + 1_000)); // 链路负账：降一档
+        Assert.Equal(BitrateGovernor.TierHd, gov.Update(-0.5, t0 + 5_000)); // 换档间隔内：不连降（迟滞防抖）
+        Assert.Equal(BitrateGovernor.TierSd, gov.Update(-0.5, t0 + 11_000)); // 间隔够：再降一档
+        Assert.Equal(BitrateGovernor.TierSd, gov.Update(-0.5, t0 + 22_000)); // 已到 sd 底档：封底
+        Assert.Equal(BitrateGovernor.TierSd, gov.Update(0, t0 + 23_000));   // margin=0 无账：不降不升
+    }
+
+    [Fact]
+    public void Bitrate_governor_upgrade_requires_sustained_margin_and_steps_back_one_tier()
+    {
+        var gov = new BitrateGovernor();
+        long t0 = 2_000_000;
+        gov.Update(-0.5, t0); // 落到 hd 档
+        Assert.Equal(BitrateGovernor.TierSd, gov.Update(-0.5, t0 + 10_000));
+        // 裕度达标起窗但未站满 30 秒：不升
+        Assert.Equal(BitrateGovernor.TierSd, gov.Update(0.7, t0 + 15_000));
+        // 中途裕度平庸：升档窗清零重记
+        Assert.Equal(BitrateGovernor.TierSd, gov.Update(0.3, t0 + 20_000));
+        Assert.Equal(BitrateGovernor.TierSd, gov.Update(0.7, t0 + 25_000)); // 重新起窗
+        Assert.Equal(BitrateGovernor.TierSd, gov.Update(0.7, t0 + 50_000)); // 窗内未满：不升
+        Assert.Equal(BitrateGovernor.TierHd, gov.Update(0.7, t0 + 55_000)); // 站满 30 秒：回一档
+        Assert.Null(gov.Update(0.7, t0 + 85_000)); // 再站满：回顶档=解除钳制
+    }
 }

@@ -66,6 +66,8 @@ public sealed class PlaybackSessionManager
     // 全部可空注入：未接=null=旧硬切口径（既有测试与未升级壳层契约不变）；壳层建齐后软着陆/对齐切/逃生口生效。
     private StealthPipeline? _pipeline;             // 偷拉管道（SegmentLoader 注入后懒建）
     private long _stealthHealthLastMs = long.MinValue; // 链路健康线掉速观察上一拍
+    private BitrateGovernor? _bitrateGovernor;      // 分片级码率自适应（六项优化④，健康线接线后懒建）
+    private long? _lastBitrateCeiling;              // 上拍下发内核的码率上限（比对换档才下发，防抖）
     private long _stealthHealthLastStockMs;            // 同上（两拍差算掉速）
     private long? _alignEpisodeAtMs;                // 升档对齐切在途账（逃生口结果回账用；只记升往 0 路的对齐切）
     private bool _raceInFlight;                     // 握手竞速单飞旗（同一切换回合只赛一场）
@@ -415,6 +417,15 @@ public sealed class PlaybackSessionManager
         _stealthHealthLastMs = nowMs;
         _stealthHealthLastStockMs = buffered;
         pipe.UpdateGates(buffered, HealthLine.AllowFactor());
+        // 分片级码率自适应（六项优化④）：健康裕度快照喂迟滞闸，换档才经 IPlayer 契约下发内核
+        // （一细一粗与整路降档互补：整路管撑不撑得住，档内管带宽变薄）。LoggingPlayer 等 DIM 内核=无害空转。
+        _bitrateGovernor ??= new BitrateGovernor();
+        var ceiling = _bitrateGovernor.Update(HealthLine.Margin(), nowMs);
+        if (!Nullable.Equals(ceiling, _lastBitrateCeiling))
+        {
+            _lastBitrateCeiling = ceiling;
+            current.Kernel.ApplyBitrateCeiling(ceiling);
+        }
         // 单管道换向：朝正在播一路的反方向（换向即作废在途清池，代次防串在管道内）
         var channel = current.CurrentChannel;
         SourceEndpoint? desired = null;
