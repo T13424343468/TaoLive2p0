@@ -226,6 +226,11 @@ public sealed class PlaybackSessionManager
     public PlaybackSession SwitchTo(Channel channel)
     {
         ArgumentNullException.ThrowIfNull(channel);
+        // vc76 审查清零 P2 前置校验：无效频道在 Current 易主前抛出，会话表状态不被半途污染
+        if (!channel.IsValid)
+        {
+            throw new ArgumentException($"Channel {channel.Id} has no valid sources", nameof(channel));
+        }
         _onSwitchingChannel?.Invoke(channel); // 换台即触发邻台预取（ChannelPrefetcher，单车道让路口径）
 
         // 热切：热备就是目标台且已达 Playing（起播门槛线已过）→ 接管
@@ -276,10 +281,13 @@ public sealed class PlaybackSessionManager
         if (ReferenceEquals(Standby, session)) Standby = null;
         Touch(channel.Id);
         _supersededAtMs.Remove(channel.Id); // 目标台接管前台，超龄账清零
-        session.ChangeChannel(channel);
         Current = session;
-        session.IsForeground = true; // vc69 让道修：接管前台，门控归当前会话（旧台已在 Supersede 清旗）
+        // vc76 审查清零 P2（车道门控冷切窗回归）：先接管前台再 ChangeChannel——vc69 让道修后
+        // 门控只认前台会话，旧会话让位不翻门、新会话若在 ChangeChannel 的 Transition(Buffering)
+        // 之后才接管，起播期零后台网络门全程关不上（预检探针抢道换台带宽）。次序换位即闭合。
+        session.IsForeground = true;
         EvictIfOverCapacity();
+        session.ChangeChannel(channel);
         RaiseCurrentChanged(session);
         return session;
     }
