@@ -315,8 +315,8 @@ public class W8FeatureTests
 
         precheck.MarkState(ch, ChannelHealth.Alive);
         precheck.MarkState(ch, ChannelHealth.Alive); // 重复标记不发事件
-        await precheck.RunAsync(new[] { ch }, keepKnownState: true); // 复测保持已知状态，探后仍 Alive，无事件
-        Assert.Equal(new[] { ("cctv4", ChannelHealth.Alive) }, events);
+        await precheck.RunAsync(new[] { ch }, keepKnownState: true); // 复测保持已知状态：首探成功跨绿门槛（1 轮即绿）补发事件，重复标记仍不发
+        Assert.Equal(new[] { ("cctv4", ChannelHealth.Alive), ("cctv4", ChannelHealth.Alive) }, events);
     }
 
     [Fact]

@@ -139,12 +139,13 @@ public class ChannelPrecheck
         return IsStale(e) ? null : e;
     }
 
-    /// <summary>列表健康点门槛：连续探活成功达此次数才亮绿（方案书收口批②：近 3 轮探活全通=绿）。</summary>
-    public const int MarkGreenMinConsecutiveOks = 3;
+    /// <summary>列表健康点门槛（老板 2026-11-16 深夜拍板降门槛：最近 1 轮通过即绿，变绿快 3 倍，判定略糙可接受；
+    /// 原口径=连续 3 轮全通才绿）。失败即回红（死账 TTL/连挂淘汰口径不变）。</summary>
+    public const int MarkGreenMinConsecutiveOks = 1;
 
     /// <summary>
     /// 列表健康点三态（方案书收口批②；绿门槛频道级语义 2026-11-16 老板拍板）：
-    /// 近 3 轮探活全通=绿（Alive）、部分通/检测中/未探=灰（Checking）、全败=红（Dead）。
+    /// 最近 1 轮探活通过=绿（Alive）、检测中/未探=灰（Checking）、全败=红（Dead）。
     /// 绿判据改频道级：同台组（同 EPG 键）内任一来源连续探活达标即整台绿——播放只给正在播的
     /// 来源记活账，列表行绑定的可能是同台另一变体，按行内单源判绿会漏亮（断点一修复）。
     /// 只读健康账展示，不写账（v33 条款）。

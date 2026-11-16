@@ -806,6 +806,7 @@ public partial class MainActivity : Activity
     {
         EnforceSingleWindow(); // #64 窗口唯一令：开新先关旧（抽屉与设置/弹窗/子页面板互斥）
         _listOpen = true;
+        BackgroundLane.PlayingGapOverrideMs = 5000; // 老板令 2026-11-16 让路间隔：抽屉开着正盯绿点，压到 5 秒快变绿
         _playerPage.Visibility = ViewStates.Visible;
         _listPage.Visibility = ViewStates.Visible;
         _onPlayerPage = false;
@@ -827,6 +828,7 @@ public partial class MainActivity : Activity
     private void ShowPlayer()
     {
         _listOpen = false;
+        BackgroundLane.PlayingGapOverrideMs = 0; // 抽屉收起回默认 10 秒：没人盯绿点，画面平稳优先
         _listPage.Visibility = ViewStates.Gone;
         _playerPage.Visibility = ViewStates.Visible;
         _onPlayerPage = true;

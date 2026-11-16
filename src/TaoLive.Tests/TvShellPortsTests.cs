@@ -103,13 +103,12 @@ public class TvShellPortsTests
     }
 
     [Fact]
-    public async Task Health_mark_green_only_after_three_consecutive_oks()
+    public async Task Health_mark_green_after_one_ok()
     {
+        // 老板 2026-11-16 深夜降门槛令：最近 1 轮通过即绿（原连续 3 轮口径作废），变绿快 3 倍
         var ch = Ch("a", "CCTV-1", ChannelCategory.Cctv);
-        var two = await PrecheckAfterRoundsAsync(2, ch);
-        Assert.Equal(ChannelHealth.Checking, two.MarkOf(ch)); // 通但未满 3 轮=灰
-        var three = await PrecheckAfterRoundsAsync(3, ch);
-        Assert.Equal(ChannelHealth.Alive, three.MarkOf(ch));  // 近 3 轮全通=绿
+        var one = await PrecheckAfterRoundsAsync(1, ch);
+        Assert.Equal(ChannelHealth.Alive, one.MarkOf(ch)); // 1 轮通过=绿
     }
 
     [Fact]
@@ -147,11 +146,10 @@ public class TvShellPortsTests
         var events = new List<string>();
         precheck.StateChanged += (epgKey, state) => events.Add($"{epgKey}:{state}");
         long baseMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        precheck.ReportSourceResult(ch, ok: true, nowMs: baseMs);      // 首通：频道 Unknown→Alive 翻转发事件
-        precheck.ReportSourceResult(ch, ok: true, nowMs: baseMs + 1);  // 第 2 轮：无翻转无跨越，不发
-        precheck.ReportSourceResult(ch, ok: true, nowMs: baseMs + 2);  // 第 3 轮：跨绿门槛，补发事件
+        precheck.ReportSourceResult(ch, ok: true, nowMs: baseMs);      // 首通：频道翻转事件 + 跨绿事件（门槛 1，探活账 0→1=真实变化）各发一次
+        precheck.ReportSourceResult(ch, ok: true, nowMs: baseMs + 1);  // 第 2 轮：已绿无翻转无跨越，不发
         Assert.Equal(2, events.Count);
-        Assert.Equal($"{ch.EpgKey}:{ChannelHealth.Alive}", events[1]);
+        Assert.Equal(new[] { $"{ch.EpgKey}:{ChannelHealth.Alive}", $"{ch.EpgKey}:{ChannelHealth.Alive}" }, events);
     }
 
     // ---- 健康账重启续账（2026-11-16 老板批第①条：账本落盘+重启不清灰）----
@@ -188,9 +186,9 @@ public class TvShellPortsTests
     }
 
     [Fact]
-    public async Task Health_ledger_reload_partial_oks_stays_grey_until_threshold()
+    public async Task Health_ledger_reload_one_ok_shows_green()
     {
-        // 只攒了 1 轮的台：重启后按老账回显「可用」，但绿点门槛不虚标——继续凑满 3 轮才绿
+        // 老板降门槛令（2026-11-16 深夜）：1 轮即绿后，重启续账的老账 1 轮也直接回显绿，不虚标不闪灰
         var ch = Ch("a", "CCTV-1", ChannelCategory.Cctv);
         var dir = TempLedgerDir();
         try
@@ -204,10 +202,9 @@ public class TvShellPortsTests
             var p2 = new ChannelPrecheck(_ => Task.FromResult(true), intervalMs: 0);
             p2.AttachHealthStore(new SourceHealthStore(dir));
             Assert.Equal(ChannelHealth.Alive, p2.Of(ch)); // 台级回显老账（不闪灰）
-            Assert.Equal(ChannelHealth.Checking, p2.MarkOf(ch)); // 绿门槛未满=照旧灰
-            p2.ReportSourceResult(ch, ok: true, nowMs: baseMs + 100);
-            p2.ReportSourceResult(ch, ok: true, nowMs: baseMs + 101); // 续到 3
-            Assert.Equal(ChannelHealth.Alive, p2.MarkOf(ch));
+            Assert.Equal(ChannelHealth.Alive, p2.MarkOf(ch)); // 绿点门槛 1 轮：老账直接回绿
+            p2.ReportSourceResult(ch, ok: true, nowMs: baseMs + 100); // 连续成功账继续累加不清零
+            Assert.Equal(2, p2.SourceHealthOf(ch)!.ConsecutiveOks);
         }
         finally { Directory.Delete(dir, recursive: true); }
     }

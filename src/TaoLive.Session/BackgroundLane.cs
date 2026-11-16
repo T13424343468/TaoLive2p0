@@ -44,6 +44,10 @@ public static class BackgroundLane
     /// <summary>播放中后台单请求最小间隔（毫秒）：83 路 × 10s ≈ 14 分钟一轮，符合「整轮 10 分钟级」令。</summary>
     public const int PlayingGapMs = 10_000;
 
+    /// <summary>播放中间隔覆盖（老板 2026-11-16 深夜拍板·主班裁量口径）：>0 时播放间隔用它，
+    /// 列表抽屉开着压 5 秒（正盯绿点等变绿，快最有价值）、收着列表 0=回 10 秒护画面平稳；0/负值按默认计。</summary>
+    public static int PlayingGapOverrideMs { get; set; } = 0;
+
     /// <summary>空闲档后台单请求最小间隔（毫秒）：至少给 600ms——防极端调用方零节拍打穿车道。</summary>
     public const int IdleGapMs = 600;
 
@@ -60,7 +64,9 @@ public static class BackgroundLane
     public static int PendingWaitMs()
     {
         if (!FirstFrameLanded) return int.MaxValue; // 首帧未落地：无限等（直到 UI 置位）
-        int gap = Playing ? PlayingGapMs : Math.Max(0, IdleGapOverrideMs);
+        int gap = Playing
+            ? (PlayingGapOverrideMs > 0 ? PlayingGapOverrideMs : PlayingGapMs)
+            : Math.Max(0, IdleGapOverrideMs);
         long elapsed = Now() - Volatile.Read(ref _lastRunMs);
         return elapsed >= gap ? 0 : gap - (int)elapsed;
     }
