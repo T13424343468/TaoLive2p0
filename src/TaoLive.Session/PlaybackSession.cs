@@ -131,6 +131,45 @@ public sealed class PlaybackSession
     /// <summary>当前线路序号（0 基）；未起播为 -1。</summary>
     public int CurrentLineIndex => _endpointIndex;
 
+    /// <summary>播放点存货读数（vc85 偷拉管道让路闸用）：内核缓冲水位毫秒；未就绪=0（无数≠见底口径）。</summary>
+    public long BufferedStockMs => _player.BufferedMs;
+
+    /// <summary>窥视备援队列指定路（vc85 偷拉单管道换向用）：越界返回 null，不改排队序。</summary>
+    public SourceEndpoint? PeekQueueEndpoint(int index) =>
+        index >= 0 && index < _queue.Count ? _queue[index] : null;
+
+    /// <summary>竞速回填（vc85 六项优化①）：把先握手成功的路提到队头（余者稳定保序）。
+    /// 只影响后续快照（切换申请时取队列快照，重排不追溯）；在播线路身份按端点对象保持，
+    /// 索引账随重排校正。越界/0 号本就是头名=无害空操作。</summary>
+    public void ReorderQueueWinnerFirst(int winnerIndex)
+    {
+        if (winnerIndex <= 0 || winnerIndex >= _queue.Count) return;
+        var winner = _queue[winnerIndex];
+        _queue.RemoveAt(winnerIndex);
+        _queue.Insert(0, winner);
+        if (_endpointIndex >= 0 && _endpointIndex < winnerIndex) _endpointIndex++; // 在播路在胜者之前：右移一位保身份
+    }
+
+    /// <summary>链路健康线（vc85 两增强①）：坏帧/掉速观察统一喂账；未接=null 静默。</summary>
+    public LinkHealthLine? HealthLine { get; set; }
+
+    /// <summary>降档软着陆开关（vc85 蓝本 v2.5，预防性硬切退役）：true=预防判据命中走对齐切原语；
+    /// false=旧硬切口径（未接仲裁器的壳层/既有测试契约不变）。管理器接线时随仲裁器一并置位。</summary>
+    public bool SoftLandingEnabled { get; set; }
+
+    /// <summary>内核视频故障喂账（vc85 两增强①⑥：坏帧信号进健康线）：实测账坏帧降权+链路裕度负项，
+    /// 只记不判（判别归既有守卫与看门狗）。shell 层 OnVideoFault 信号转发至此。</summary>
+    public void NotifyVideoFault(string detail)
+    {
+        if (!_active) return;
+        if (QualityBook is { } book && CurrentEndpoint is { } badEndpoint)
+        {
+            book.ReportBadFrames(_channel?.EpgKey ?? "", _channel?.SourceId ?? "", badEndpoint.Url, 1);
+        }
+        HealthLine?.ReportBadFrames(1);
+        SessionTrace.Emit($"[坏帧] {DescribeChannel()} 线路{CurrentLineIndex + 1} 视频故障入健康线（{detail}）");
+    }
+
     /// <summary>本会话累计断流自救切换次数；换台归零。</summary>
     public int FailoverCount { get; private set; }
 
@@ -143,6 +182,10 @@ public sealed class PlaybackSession
     /// <summary>#74 源队列健康排序（2026-11-15 老板令）：建队（含备源追加后）整体重排——本台源死账时
     /// 死源沉底、健康候选补位。壳层接健康账（账空=原表序不猜）；未设=按原表序（既有契约与测试不变）。</summary>
     public Func<Channel, IEnumerable<SourceEndpoint>, IEnumerable<SourceEndpoint>>? QueueOrderer { get; set; }
+
+    /// <summary>源实测账（vc85 蓝本 v2.1 健康账两本之二，管「好不好」）：微卡上账/盲区标记/实测成功，
+    /// 管理器装配后随会话注入；null=账本未接（择路只吃探活账），不挡播放。</summary>
+    public QualityHealthStore? QualityBook { get; set; }
 
     /// <summary>当前输出面句柄（管理器热切换移交用）；未接面为 IntPtr.Zero。</summary>
     public IntPtr SurfaceHandle => _surfaceHandle;
@@ -270,7 +313,9 @@ public sealed class PlaybackSession
         _smoothnessTimes.Clear();
         _freshTicketRetried = false; // vc69：新一轮起播重记坏票重试机会
         _ticketRetrySinceMs = null;
+        _microlagSeekAtMs = null; // 微卡回退防振铃账随新起播清零（同欠载账口径）
         Transition(PlaybackState.Buffering, "start requested");
+        MarkBlindZoneIfAny(p.Endpoint); // 盲区标记（微卡修法三条③）：非 .m3u8 直流源天然贴边，实测账降权不给头名
         _player.Play(p);
         ReattachSurface();
     }
@@ -314,9 +359,22 @@ public sealed class PlaybackSession
         _proactiveCount = 0; // vc67：换台重给预防介入预算
         _stallTimes.Clear(); // 欠载趋势账随换台清零（老板令 #26）：账只记本台画质，不跟人走
         _smoothnessTimes.Clear(); // vc70：平稳疑点账同口径，换台清零不跟人走
+        _microlagSeekAtMs = null; // 微卡回退防振铃账随换台清零（同口径）
         Transition(PlaybackState.Buffering, "change channel");
+        MarkBlindZoneIfAny(_queue[0]); // 盲区标记（微卡修法三条③）：同口径，换台起播首路即标
         _player.Play(new PlaybackParams(channel, _queue[0], _preferLowLatency));
         ReattachSurface();
+    }
+
+    /// <summary>盲区标记单点：URL 不含 .m3u8 即直流盲区（内核 ExoPlayerPlayer 只对 .m3u8 挂落后留水，
+    /// 直流源播放点贴边赛跑无落点——天然贴边标记进实测账，健康线降权、排序不给头名）。账本未接静默。</summary>
+    private void MarkBlindZoneIfAny(SourceEndpoint endpoint)
+    {
+        if (QualityBook is null) return;
+        if (QualityHealthStore.IsBlindZoneUrl(endpoint.Url))
+        {
+            QualityBook.MarkBlindZone(_channel?.EpgKey ?? "", _channel?.SourceId ?? "", endpoint.Url);
+        }
     }
 
     /// <summary>
@@ -338,10 +396,43 @@ public sealed class PlaybackSession
         {
             return; // 同线无操作：不打断在播画面
         }
+        SwitchLineCore(endpointIndex, "line switch", "manual line switch");
+    }
+
+    /// <summary>对齐切原语（vc85 蓝本三原语之「对齐切」）：升降档/回主源统一落点。
+    /// 不吃故障限速闸（四原则3），与手动换线同一动作核（停旧流→Idle→起新线→重挂面）；
+    /// 切完发 <see cref="AlignedSwitched"/> 供管理器做升档结果回账（逃生口/休眠）。
+    /// 与 <see cref="SwitchLine"/> 同样的参数契约与同线无操作语义。</summary>
+    public void AlignedSwitchTo(int endpointIndex, string reason)
+    {
+        if (_channel is null)
+        {
+            throw new InvalidOperationException("AlignedSwitchTo requires a started channel");
+        }
+        if (endpointIndex < 0 || endpointIndex >= _queue.Count)
+        {
+            throw new ArgumentOutOfRangeException(nameof(endpointIndex));
+        }
+        if (endpointIndex == _endpointIndex && _state == PlaybackState.Playing)
+        {
+            return; // 同线无操作：不打断在播画面
+        }
+        SwitchLineCore(endpointIndex, "line switch", $"aligned switch: {reason}");
+        AlignedSwitched?.Invoke(this, reason);
+    }
+
+    /// <summary>对齐切完成（vc85 仲裁器接线）：管理器据此记升档账（逃生口失败/站住复位）。</summary>
+    public event EventHandler<string>? AlignedSwitched;
+
+    /// <summary>换线动作核（SwitchLine/AlignedSwitchTo 共用）：状态清账与起播的单一实现点。</summary>
+    private void SwitchLineCore(int endpointIndex, string idleTag, string bufferingTag)
+    {
+        // 两个入口（SwitchLine/AlignedSwitchTo）已各自行首校验非空；核内再断言一次供编译器收窄
+        var startedChannel = _channel ?? throw new InvalidOperationException("SwitchLineCore requires a started channel");
         if (_state is not PlaybackState.Idle)
         {
             _player.Stop(); // vc68：含 Failed 态一律停（同 Supersede 口径），旧台音画必死
-            Transition(PlaybackState.Idle, "line switch");
+            Transition(PlaybackState.Idle, idleTag);
         }
         _endpointIndex = endpointIndex;
         FailoverCount = 0;
@@ -350,8 +441,9 @@ public sealed class PlaybackSession
         _proactiveCount = 0; // vc67：手动换线=老板意图，重给预防介入预算
         _stallTimes.Clear(); // 手动换线：欠载账随线清零
         _smoothnessTimes.Clear(); // vc70：平稳账随线清零
-        Transition(PlaybackState.Buffering, "manual line switch");
-        _player.Play(new PlaybackParams(_channel, _queue[endpointIndex], _preferLowLatency));
+        _microlagSeekAtMs = null; // 微卡回退防振铃账随线清零（同口径）
+        Transition(PlaybackState.Buffering, bufferingTag);
+        _player.Play(new PlaybackParams(startedChannel, _queue[endpointIndex], _preferLowLatency));
         ReattachSurface();
     }
 
@@ -387,6 +479,11 @@ public sealed class PlaybackSession
         if (_state == PlaybackState.Buffering)
         {
             Transition(PlaybackState.Playing, "first frame");
+            // 播放实测成功记账（实测账）：首帧落地=切换结果侧记 Good（蓝本 v2.1 第 12 条），择路提权依据
+            if (CurrentEndpoint is { } goodEndpoint)
+            {
+                QualityBook?.ReportGood(_channel?.EpgKey ?? "", _channel?.SourceId ?? "", goodEndpoint.Url);
+            }
         }
     }
 
@@ -416,10 +513,42 @@ public sealed class PlaybackSession
     {
         if (_state == PlaybackState.Playing)
         {
+            // 微卡上账（微卡修法三条②）：进缓冲即试探，实测账窗口内反复才坐实——瞬时断流不记坏账（四原则①）
+            if (CurrentEndpoint is { } trippedEndpoint)
+            {
+                QualityBook?.ReportBufferingTrip(_channel?.EpgKey ?? "", _channel?.SourceId ?? "", trippedEndpoint.Url);
+            }
+            // 微卡回退（微卡修法①，vc85 蓝本 v2.1 10 秒口径，老板拍板「全采纳」）：
+            // 盲区直流源天然贴边赛跑——进缓冲时播放点已追到边缘、零存货，换线自救治标不治本。
+            // 回退 10 秒落回已缓存存量接着播，断掉赛跑链条；仅盲区源触发，30 秒防振铃账内最多一次
+            // （连环回退=原地打转，第二拍起照旧走 Reconnecting→看门狗→换线既有自救）。
+            if (TryMicrolagSeekBack()) return;
             Transition(PlaybackState.Reconnecting, "watchdog stall");
             _reconnectingSinceMs = _clock.NowMs;
             RecordStall(_clock.NowMs); // 欠载趋势账（老板令 #26）：反复短卡流也是主动介入依据
         }
+    }
+
+    /// <summary>微卡回退回退量（蓝本口径 10 秒）。</summary>
+    public const int MicrolagSeekBackMs = 10_000;
+
+    /// <summary>微卡回退防振铃窗（毫秒）：窗内最多回退一次，第二拍进缓冲照旧走换线自救。</summary>
+    public const int MicrolagSeekBackoffMs = 30_000;
+
+    private long? _microlagSeekAtMs; // 最近一次微卡回退记账（单调钟，null=从未回退）
+
+    /// <summary>微卡回退尝试：仅盲区直流源（URL 不含 .m3u8，与内核盲区档同判据）且不在防振铃窗内时
+    /// 向内核回退 <see cref="MicrolagSeekBackMs"/> 并保持 Playing（内核存量续播，不进 Reconnecting）；
+    /// 返回 false=不回退（非盲区/窗内重复），调用方照旧升级自救。</summary>
+    private bool TryMicrolagSeekBack()
+    {
+        if (CurrentEndpoint is not { } endpoint) return false;
+        if (!QualityHealthStore.IsBlindZoneUrl(endpoint.Url)) return false;
+        long nowMs = _clock.NowMs;
+        if (_microlagSeekAtMs is { } last && nowMs - last < MicrolagSeekBackoffMs) return false;
+        _microlagSeekAtMs = nowMs;
+        _player.SeekBack(MicrolagSeekBackMs);
+        return true;
     }
 
     /// <summary>持续欠载判据（老板令 #26）：滚动窗内短卡流满此次数即预防性换线，
@@ -713,6 +842,14 @@ public sealed class PlaybackSession
         SessionTrace.Emit($"[预防] {DescribeChannel()} {basis}，预防性换源（原线路 {CurrentLineIndex + 1}/{LineCount}，不等卡流超时）");
         _stallTimes.Clear(); // 介入一次清一次账：新线重新起账，老账不跟去新线
         _smoothnessTimes.Clear();
+        if (SoftLandingEnabled)
+        {
+            // 降档软着陆（vc85 蓝本 v2.5，预防性硬切退役）：对齐切原语落点，不吃故障限速闸（四原则3）；
+            // 预防冷却窗与介入封顶在入口已过闸保留。备源全挂仍由看门狗/报错保命路径兜底。
+            SessionTrace.Emit($"[软着陆] {DescribeChannel()} 预防判据命中改走对齐切（硬切退役）：切下一路（原线路 {CurrentLineIndex + 1}/{LineCount}）");
+            AlignedSwitchTo(_endpointIndex + 1, "proactive soft landing");
+            return true;
+        }
         // 走既有自救口径：先归 Failed 再切线（状态机矩阵 Playing 不直跳 Buffering，与看门狗/报错同路）
         Transition(PlaybackState.Failed, "proactive switch");
         TryFailover(churnTripped ? "stall churn proactive"

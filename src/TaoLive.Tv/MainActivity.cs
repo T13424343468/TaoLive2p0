@@ -83,6 +83,7 @@ public partial class MainActivity : Activity
     private const int BootWarmAllGraceMs = 3 * 60 * 1000;
     // #15 改静态：进程级 once-block 里的换台预取闭包读它，不能钉在首个壳上
     private ChannelPrecheck _precheck = default!;
+    private QualityHealthStore _qualityBook = default!; // 实测账（vc85 两本账之二）：排序合成与微卡/盲区记账同源
     private TicketResolver _resolver = default!;
     private System.Threading.CancellationTokenSource? _precheckCts;
 
@@ -203,6 +204,7 @@ public partial class MainActivity : Activity
                 }
                 CrashNet.Record($"[只出声兜底] 内核视频故障：{detail}——零帧账判过期，守卫下一拍递进");
                 _lastVideoFrameAtMs = System.Environment.TickCount64 - 60_000;
+                c.NotifyVideoFault(detail); // vc85 两增强①⑥：坏帧信号进健康线（实测账降权+链路裕度负项）
             });
         }
 
@@ -397,17 +399,34 @@ public partial class MainActivity : Activity
         _precheck = new ChannelPrecheck(ProbeChannelAsync, 600);
         try { _precheck.AttachHealthStore(new SourceHealthStore(FilesDir!.AbsolutePath)); }
         catch { /* 账本初始化失败按账空跑，预检不挡启动 */ }
-        // #74 源队列健康排序（2026-11-15 老板令）：本台源死账（健康账 Dead）时本台端点垫底、
-        // 内置表健康候选补位——此前死源排队首撞满看门狗才是切台黑屏主账。
-        // 账空/活账=保持既有序（本台优先、备援吃 FromRegistry 健康轻排序），不猜。
+        // 实测账（vc85 蓝本 v2.1 健康账两本之二）：微卡上账/盲区标记/实测成功，管「好不好」；
+        // 与探活账（管「通不通」）在排序里合成，管理器与会话记账共用同一实例
+        _qualityBook = new QualityHealthStore();
+        _manager.QualityBook = _qualityBook;
+        // vc85 双向无缝切换四件套（蓝本 v2.5）：仲裁器三原语/偷拉管道/链路健康线/握手竞速，
+        // 接上即软着陆+对齐回主源+逃生口生效；偷拉管道池粮做「主源有粮」实测凭据
+        _manager.Arbiter = new SwitchArbiter();
+        _manager.HealthLine = new LinkHealthLine();
+        _manager.SegmentLoader = new HttpSegmentLoader();
+        _manager.RaceProber = new HttpHandshakeProber();
+        _manager.MainDispatcher = action => _main.Post(action);
+        // #74 源队列健康排序（2026-11-15 老板令）+ 健康度排序升级（蓝本 v2.1）：合成两本账打分——
+        // 探活账 Dead 沉底（原口径保留）；实测账微卡降权、盲区（天然贴边）降权、最近实测成功提权；
+        // 全空账=保持既有序（本台优先、备援吃 FromRegistry 健康轻排序），不猜。稳定序兜底。
         _manager.QueueOrderer = (ch, endpoints) =>
         {
-            if (_precheck.SourceHealthOf(ch) is not { State: ChannelHealth.Dead }) return endpoints;
+            bool ownDead = _precheck.SourceHealthOf(ch) is { State: ChannelHealth.Dead };
             var ownUrls = new HashSet<string>(ch.Sources.Select(s => s.Url), StringComparer.Ordinal);
             return endpoints
                 .Select((e, i) => (e, i, own: ownUrls.Contains(e.Url) ? 1 : 0))
-                .OrderBy(t => t.own) // 本台（死账）沉底；内置表健康候选补位
-                .ThenBy(t => t.i)    // 稳定序：组内保既有纪律序
+                .OrderBy(t =>
+                {
+                    long score = QualityHealthStore.SortScore(
+                        _qualityBook.Peek(ch.EpgKey, ch.SourceId, t.e.Url), probeDead: false);
+                    if (ownDead && t.own == 1) score += 10_000; // 本台源死账：整组沉底（原 #74 口径并入）
+                    return score;
+                })
+                .ThenBy(t => t.i)    // 稳定序：同分保既有纪律序
                 .Select(t => t.e);
         };
         if (_precheckEnabled) StartPrecheckLoop();

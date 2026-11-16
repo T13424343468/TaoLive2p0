@@ -903,4 +903,13 @@ internal sealed class LoggingPlayer : IPlayer
     public void DetachSurface() => Log.Add("Detach");
 
     public void Dispose() => Log.Add("Dispose");
+
+    /// <summary>回退跳记录（vc85 微卡修法①断言用）：DIM 原语覆写记账。</summary>
+    public List<long> SeekBackCalls { get; } = new();
+
+    public void SeekBack(long backMs)
+    {
+        SeekBackCalls.Add(backMs);
+        Log.Add($"SeekBack:{backMs}");
+    }
 }

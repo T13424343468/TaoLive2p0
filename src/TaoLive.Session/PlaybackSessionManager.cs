@@ -62,6 +62,29 @@ public sealed class PlaybackSessionManager
     private long _standbySinceMs;
     private long _stamp;
 
+    // ---- vc85 双向无缝切换接线（蓝本 v2.5：仲裁器/偷拉管道/链路健康线/握手竞速）----
+    // 全部可空注入：未接=null=旧硬切口径（既有测试与未升级壳层契约不变）；壳层建齐后软着陆/对齐切/逃生口生效。
+    private StealthPipeline? _pipeline;             // 偷拉管道（SegmentLoader 注入后懒建）
+    private long _stealthHealthLastMs = long.MinValue; // 链路健康线掉速观察上一拍
+    private long _stealthHealthLastStockMs;            // 同上（两拍差算掉速）
+    private long? _alignEpisodeAtMs;                // 升档对齐切在途账（逃生口结果回账用；只记升往 0 路的对齐切）
+    private bool _raceInFlight;                     // 握手竞速单飞旗（同一切换回合只赛一场）
+
+    /// <summary>切换仲裁器（vc85 蓝本三原语）：未接=null=预防硬切与回主源硬切旧口径；接上后软着陆/对齐回主源/逃生口生效。</summary>
+    public SwitchArbiter? Arbiter { get; set; }
+
+    /// <summary>链路健康线（vc85 两增强①）：水位掉速+分片间隔+吞吐+坏帧合成裕度，偷拉闸门与坏帧喂账共用。</summary>
+    public LinkHealthLine? HealthLine { get; set; }
+
+    /// <summary>偷拉装载器（vc85 ②偷拉管道）：注入后管理器泵内懒建 <see cref="StealthPipeline"/>；未接=不偷拉。</summary>
+    public ISegmentLoader? SegmentLoader { get; set; }
+
+    /// <summary>握手竞速探测（vc85 六项优化①）：自救回合内对队列前几路并发握手，先成者优；未接=串行盲等旧口径。</summary>
+    public IHandshakeProber? RaceProber { get; set; }
+
+    /// <summary>主线程投递器（vc85 竞速回填用）：竞速回调在后台线程，重排队须经此回主线程；未接=竞速只记账不回填。</summary>
+    public Action<Action>? MainDispatcher { get; set; }
+
     public PlaybackSessionManager(Func<PlaybackSession> sessionFactory, IMainThreadDispatcher? dispatcher = null,
         Action<Channel>? onSwitchingChannel = null, bool hotStandbyEnabled = false,
         Func<Channel, bool>? primaryAliveConfirmed = null, Func<long>? monotonicMs = null)
@@ -125,6 +148,10 @@ public sealed class PlaybackSessionManager
         }
     }
     private Func<Channel, IEnumerable<SourceEndpoint>, IEnumerable<SourceEndpoint>>? _queueOrderer;
+
+    /// <summary>源实测账（vc85 蓝本 v2.1 健康账两本之二）：管理器统一持有，建会话/后建会话经 WireSession 同挂；
+    /// 壳层 QueueOrderer 与会话记账共用同一实例，两读数同源不错位。</summary>
+    public QualityHealthStore? QualityBook { get; set; }
 
     /// <summary>当前前台会话；尚未切换过为空。</summary>
     public PlaybackSession? Current { get; private set; }
@@ -339,7 +366,119 @@ public sealed class PlaybackSessionManager
         current.CheckWatchdog();
         current.CheckProactiveFailover();
         TryReturnToPrimary(current);
+        PumpStealth(current);
+        PumpAlignOutcome(current);
+        PumpRaceProbe(current);
+        Arbiter?.SweepPending();
         TryStandbyTimeout();
+    }
+
+    /// <summary>
+    /// 偷拉管道泵（vc85 ②偷拉管道+⑤两增强①，管理器 Tick 同拍驱动，不新增泵）：
+    /// - 让路闸：前台水位（<see cref="PlaybackSession.BufferedStockMs"/>）+ 链路裕度因子注入；
+    /// - 单管道换向：朝正在播一路的反方向——在播备源偷主源（焊死 0 路），在播主源偷下一备路；
+    /// - 拉片成功喂实测账（主源有粮凭据）；掉速观察喂链路健康线（两增强①）。
+    /// 未接 SegmentLoader/HealthLine=全链静默（管道不建）。
+    /// </summary>
+    private void PumpStealth(PlaybackSession current)
+    {
+        if (HealthLine is null || SegmentLoader is null) return;
+        if (_pipeline is null)
+        {
+            _pipeline = new StealthPipeline(SegmentLoader, _monotonicMs);
+            _pipeline.SegmentPulled += (ch, ep, pooled) =>
+            {
+                // 主源有粮实测凭据（蓝本八项落法：回主源判据加实测二次确认——分片真拉到才准切）
+                if (QualityBook is { } book)
+                {
+                    book.ReportGood(ch.EpgKey, ch.SourceId, ep.Url);
+                }
+            };
+            _pipeline.SupplyFrozen += ch => SessionTrace.Emit($"[偷拉] {ch.Name ?? ch.Id} 断供记档（清单冻结，交预检账）");
+            _pipeline.RetakeListNeeded += ch =>
+            {
+                SessionTrace.Emit($"[偷拉] {ch.Name ?? ch.Id} 清单需重取（连败，作废票据缓存换新清单）");
+                foreach (var ep in ch.Sources)
+                {
+                    PlaybackSession.TicketCacheInvalidator?.Invoke(ch.Id, ep); // 清单重取触发（蓝本八项落法）
+                }
+            };
+        }
+        var pipe = _pipeline;
+        // 掉速观察喂链路健康线（两增强①）：两拍水位差折每秒掉速，EMA 归并
+        long nowMs = _monotonicMs();
+        long buffered = current.BufferedStockMs;
+        if (_stealthHealthLastMs != long.MinValue && nowMs > _stealthHealthLastMs)
+        {
+            HealthLine.ReportStockDrop(buffered, _stealthHealthLastStockMs, nowMs - _stealthHealthLastMs);
+        }
+        _stealthHealthLastMs = nowMs;
+        _stealthHealthLastStockMs = buffered;
+        pipe.UpdateGates(buffered, HealthLine.AllowFactor());
+        // 单管道换向：朝正在播一路的反方向（换向即作废在途清池，代次防串在管道内）
+        var channel = current.CurrentChannel;
+        SourceEndpoint? desired = null;
+        if (channel is { } ch && current.State is PlaybackState.Playing or PlaybackState.Buffering)
+        {
+            desired = current.CurrentLineIndex > 0
+                ? ch.Sources.FirstOrDefault() // 在播备源→偷主源（主源身份焊死，运行期不漂移）
+                : current.PeekQueueEndpoint(1); // 在播主源→偷下一备路（降档有粮）
+        }
+        if (!string.Equals(desired?.Url, pipe.Target?.Url, StringComparison.Ordinal))
+        {
+            pipe.Retarget(channel, desired);
+        }
+        pipe.Tick();
+    }
+
+    /// <summary>升档结果回账泵（vc85 ④逃生口）：升往 0 路的对齐切站满 <see cref="SwitchArbiter.UpgradeFailWindow"/>
+    /// 且画面在播=站住，逃生口账清零；窗内再断由 WireSession 的 Failover 钩子记失败。</summary>
+    private void PumpAlignOutcome(PlaybackSession current)
+    {
+        if (Arbiter is null || _alignEpisodeAtMs is not { } started) return;
+        long nowMs = _monotonicMs();
+        if (nowMs - started < SwitchArbiter.UpgradeFailWindow.TotalMilliseconds) return;
+        if (current.CurrentLineIndex == 0 && current.State == PlaybackState.Playing)
+        {
+            Arbiter.ReportOutcome(true); // 站住：逃生口账清零
+        }
+        _alignEpisodeAtMs = null; // 一期一账：失败已由 Failover 钩子记账，站住已复位
+    }
+
+    /// <summary>握手竞速泵（vc85 六项优化①）：自救回合（Failed 态）对队列前 3 路并发握手，
+    /// 先成者回填队列头（下拍起播/换线按新序取路）；探测结果喂实测账（竞速喂健康账口径）。
+    /// 单飞旗防同回合连发；全败不动序（串行盲等旧口径兜底）。</summary>
+    private void PumpRaceProbe(PlaybackSession current)
+    {
+        if (RaceProber is null || _raceInFlight) return;
+        if (current.State != PlaybackState.Failed || current.LineCount < 2) return;
+        var channel = current.CurrentChannel;
+        if (channel is null) return;
+        var candidates = Enumerable.Range(0, Math.Min(3, current.LineCount))
+            .Select(i => current.PeekQueueEndpoint(i)?.Url).Where(u => !string.IsNullOrEmpty(u)).Cast<string>().ToList();
+        if (candidates.Count < 2) return;
+        _raceInFlight = true;
+        var episodeFailover = current.FailoverCount;
+        _ = RaceProber.RaceAsync(candidates).ContinueWith(t =>
+        {
+            try
+            {
+                int winner = t.Status == TaskStatus.RanToCompletion ? t.Result : -1;
+                MainDispatcher?.Invoke(() =>
+                {
+                    _raceInFlight = false;
+                    // 回合防串：竞速期间会话已切走/换台/新一轮自救=作废，不追溯（自救队列快照化纪律）
+                    if (winner < 0 || ReferenceEquals(Current, current) == false
+                        || current.State != PlaybackState.Failed || current.FailoverCount != episodeFailover) return;
+                    if (winner > 0)
+                    {
+                        SessionTrace.Emit($"[竞速] {channel.Name ?? channel.Id} 前 {candidates.Count} 路握手赛马，第 {winner + 1} 路先成，提到队头");
+                        current.ReorderQueueWinnerFirst(winner);
+                    }
+                });
+            }
+            catch { _raceInFlight = false; }
+        });
     }
 
     /// <summary>
@@ -360,9 +499,12 @@ public sealed class PlaybackSessionManager
     }
 
     /// <summary>
-    /// 稳定后回主源（方案书收口批①·迟滞判据）：断流自救切到备源后——
-    /// 播放无断流满 5 分钟（回后若再断重新计时）且主源预检轮次连续命中 OK ≥3 次，
+    /// 稳定后回主源（方案书收口批①·迟滞判据；vc85 蓝本 v2.5 升级为对齐切）：
+    /// 播放无断流满 5 分钟（回后若再断重新计时）且主源预检连续 OK ≥3 次，
     /// 仅当前台前台稳定时触发，热备攒流中不触发（Tick 只泵 Current，防主备横跳）。
+    /// 仲裁器已接=对齐软切口径：休眠期拒绝（逃生口）、主源池粮不足 15s 不切（攒够才切）、
+    /// 同向冷却 5 分钟防横跳，切走 <see cref="PlaybackSession.AlignedSwitchTo"/> 原语；
+    /// 未接=旧硬切 SwitchLine(0) 契约不变（既有测试与降级口径）。
     /// </summary>
     private void TryReturnToPrimary(PlaybackSession current)
     {
@@ -384,9 +526,31 @@ public sealed class PlaybackSessionManager
             }
             _returnStableSession = null; // 回后若再断由 Failover 事件重新起窗计时
         }
-        // 回主源打点（埋点补充 2026-11-15）：稳定 5 分钟+主源连续 3 轮 OK 的双判据同时满足才触发，此账回答「怎么又切回原线路了」
-        SessionTrace.Emit($"[回主源] {current.CurrentChannel?.Name ?? current.CurrentChannel?.Id ?? "?"} 稳定 {ReturnToPrimaryStableFor.TotalMinutes}min 且主源预检连续 {ReturnToPrimaryMinConsecutiveOks} 轮 OK，切回主源");
-        current.SwitchLine(0);
+        if (Arbiter is not { } arbiter)
+        {
+            // 回主源打点（埋点补充 2026-11-15）：稳定 5 分钟+主源连续 3 轮 OK 的双判据同时满足才触发，此账回答「怎么又切回原线路了」
+            SessionTrace.Emit($"[回主源] {current.CurrentChannel?.Name ?? current.CurrentChannel?.Id ?? "?"} 稳定 {ReturnToPrimaryStableFor.TotalMinutes}min 且主源预检连续 {ReturnToPrimaryMinConsecutiveOks} 轮 OK，切回主源");
+            current.SwitchLine(0);
+            return;
+        }
+        // —— 对齐软切口径（蓝本 v2.5）：三道闸全过才切 ——
+        if (arbiter.IsPrimaryDormant)
+        {
+            SessionTrace.Emit($"[回主源] {current.CurrentChannel?.Name ?? "?"} 主源休眠中（逃生口已触发），期内不回；升档目标=实测账最优备路");
+            return;
+        }
+        if (_pipeline is not null && _pipeline.PooledStockMs < StealthPipeline.MaxPoolDepthMs)
+        {
+            // 切换条件=主源库存也攒够 15s（池内有粮=偷拉分片真拉到的实测凭据）；粮不足继续攒
+            return;
+        }
+        if (!arbiter.Submit(SwitchIntentKind.ReturnPrimary))
+        {
+            return; // 同向冷却 5 分钟：防横跳（对齐软切不吃故障限速闸，但吃自己的方向冷却）
+        }
+        SessionTrace.Emit($"[回主源] {current.CurrentChannel?.Name ?? "?"} 稳定 {ReturnToPrimaryStableFor.TotalMinutes}min+预检连续 OK+池粮足，对齐切回主源（软切）");
+        _alignEpisodeAtMs = _monotonicMs(); // 升档一期起账：站住复位/窗内再断记逃生口
+        current.AlignedSwitchTo(0, "return to primary");
     }
 
     private void Touch(string channelId)
@@ -460,6 +624,9 @@ public sealed class PlaybackSessionManager
     {
         session.FallbackSourceProvider = _fallbackProvider;
         session.QueueOrderer = _queueOrderer; // #74 健康排序：后建会话同挂
+        session.QualityBook = QualityBook;    // 实测账（vc85 两本账之二）：微卡/盲区/实测成功记账随会话走
+        session.HealthLine = HealthLine;      // 链路健康线（vc85 两增强①）：坏帧喂账随会话走
+        session.SoftLandingEnabled = Arbiter is not null; // 仲裁器接上=预防硬切退役走软着陆（蓝本 v2.5）
         session.Failover += (s, _) =>
         {
             // 回主源计时账（方案书 v12 单调钟）：每次断流自救切换重新起窗（回后若再断重新计时）
@@ -471,6 +638,23 @@ public sealed class PlaybackSessionManager
                     _returnStableSinceMs = _monotonicMs();
                 }
             }
+            // 升档失败入逃生口（vc85 ④）：对齐切回主源后 UpgradeFailWindow 内再断=升档失败，
+            // 窗内满 3 次→主源休眠 60 分钟（与升档无关的断流由仲裁器账内自辨不冤枉）
+            if (Arbiter is { } arb && _alignEpisodeAtMs is { } started
+                && _monotonicMs() - started <= SwitchArbiter.UpgradeFailWindow.TotalMilliseconds)
+            {
+                arb.ReportOutcome(false);
+                _alignEpisodeAtMs = null;
+            }
+        };
+        session.AlignedSwitched += (_, reason) =>
+        {
+            // 对齐切落点记账（vc85 蓝本三原语）：升往 0 路的才入逃生口结果账（降档软着陆不计）
+            if (ReferenceEquals(session, Current) && session.CurrentLineIndex == 0)
+            {
+                _alignEpisodeAtMs = _monotonicMs();
+            }
+            SessionTrace.Emit($"[对齐切] {session.CurrentChannel?.Name ?? "?"} 对齐切换完成（{reason}，现线路 {session.CurrentLineIndex + 1}/{session.LineCount}）");
         };
         session.StateChanged += (_, state) =>
         {

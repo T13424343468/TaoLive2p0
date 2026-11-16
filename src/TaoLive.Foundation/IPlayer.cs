@@ -45,6 +45,11 @@ public interface IPlayer : IDisposable
     /// 默认实现 true 兼容既有实现与测试替身；Android 内核按实况覆写。</summary>
     bool BufferedMsKnown => true;
 
+    /// <summary>回退跳原语（vc85 蓝本三原语之一，微卡修法 10 秒口径，老板 2026-11-17 拍板「10秒 全采纳」）：
+    /// 播放点自动回退 backMs 接着播，断掉直播边缘赛跑链条；内核钳制到缓冲窗口内、按分片边界对齐。
+    /// 仅盲区/贴边源触发（赛跑病根所在）；默认空实现=该内核不支持回退，调用方无害。</summary>
+    void SeekBack(long backMs) { }
+
     // —— 事件时序语义（契约，两内核必须一致；次序即文档）——
 
     /// <summary>

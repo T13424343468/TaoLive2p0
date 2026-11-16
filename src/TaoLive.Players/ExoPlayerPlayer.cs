@@ -23,7 +23,7 @@ public sealed class ExoPlayerPlayer : IPlayer
     private readonly Forwarder _forwarder;
     private readonly FrameTickForwarder _frameForwarder;
     private readonly DiagAnalyticsForwarder _diagForwarder;
-    private readonly AndroidX.Media3.ExoPlayer.IExoPlayer _player;
+    private AndroidX.Media3.ExoPlayer.IExoPlayer _player;
     private readonly Android.OS.Handler _main;
     private Func<TaoLive.Model.SourceEndpoint, Task<string?>>? _streamResolver;
     private bool _firstFrameRaisedThisPlay;
@@ -45,7 +45,24 @@ public sealed class ExoPlayerPlayer : IPlayer
         ArgumentNullException.ThrowIfNull(context);
         _forwarder = new Forwarder(this);
         _context = context;
+        _frameForwarder = new FrameTickForwarder(this); // 帧回调（v76：10Hz 节流）随内核装配一次，Play 全程复用
+        _main = new Android.OS.Handler(Android.OS.Looper.MainLooper!);
+        _diagForwarder = new DiagAnalyticsForwarder(this); // 内核诊断监听（埋点补充 2026-11-15：解码报错/丢帧/欠载/带宽账）
+        _player = BuildPlayer(context, blindZone: false); // 监听器装配统一走 BuildPlayer（盲区档重建同口径）
+        _streamResolver = streamResolver;
+    }
+
+    /// <summary>
+    /// 内核实例统一构建（vc85 微卡修法①）：盲区态决定「已播缓冲保留」档——
+    /// 盲区源（非 .m3u8 直流）已播保留 25s→60s（微卡修法①「贴边回退留水」），播放点前面常备存量，
+    /// 微卡回退 10 秒有地可落；HLS 源走原 25s（LiveConfiguration 留水已另行接管，不重复吃内存）。
+    /// 仅在 Play 前盲区态变化时重建（起播期画面本来黑着，重建零视觉代价）；监听器装配与构造同口径。
+    /// </summary>
+    private AndroidX.Media3.ExoPlayer.IExoPlayer BuildPlayer(Android.Content.Context context, bool blindZone)
+    {
         var playerBuilder = new AndroidX.Media3.ExoPlayer.ExoPlayerBuilder(context);
+        // 已播保留档只进 TrackSelector（minDurationToRetainAfterDiscardMs，微卡修法①）：
+        // LoadControl 水位（存货上限）原样不动——盲区档只多留已播，不多占存货上限
         playerBuilder.SetLoadControl(BuildLoadControl(context));
         // #76 锁画质防抖（2026-11-15 老板令，治「放 1 秒卡半秒」循环）：默认 ABR 在估速贴档位线抖动时
         // 逐秒重选流——每次切换渲染器拆建一遍（真机「视频渲染器停用」实锤），画面停半秒再续。
@@ -61,17 +78,41 @@ public sealed class ExoPlayerPlayer : IPlayer
             new AndroidX.Media3.ExoPlayer.TrackSelection.AdaptiveTrackSelection.Factory(
                 /* minDurationForQualityIncreaseMs */ 30_000,
                 /* maxDurationForQualityDecreaseMs */ 60_000,
-                /* minDurationToRetainAfterDiscardMs */ 25_000,
+                /* minDurationToRetainAfterDiscardMs */ blindZone ? 60_000 : 25_000,
                 /* bandwidthFraction */ 0.15f)));
-        _player = playerBuilder.Build()!;
-        _player.AddListener(_forwarder);
-        _frameForwarder = new FrameTickForwarder(this); // 帧回调（v76：10Hz 节流）随内核装配一次，Play 全程复用
-        _player.SetVideoFrameMetadataListener(_frameForwarder);
-        _main = new Android.OS.Handler(Android.OS.Looper.MainLooper!);
-        _diagForwarder = new DiagAnalyticsForwarder(this); // 内核诊断监听（埋点补充 2026-11-15：解码报错/丢帧/欠载/带宽账）
-        _player.AddAnalyticsListener(_diagForwarder); // 回调在内核播放线程：仅进 Reporter（CrashNet 有界队列线程安全），不碰 UI
-        _streamResolver = streamResolver;
+        var player = playerBuilder.Build()!;
+        player.AddListener(_forwarder);
+        player.SetVideoFrameMetadataListener(_frameForwarder!);
+        player.AddAnalyticsListener(_diagForwarder);
+        return player;
     }
+
+    /// <summary>盲区态切换（微卡修法①）：起播源盲区属性与当前内核保留档不符时重建内核实例。
+    /// 只在 Play 路径调（起播期，画面未出），旧实例 release 幂等；重建失败退回旧实例照播（保守退化）。</summary>
+    private void EnsurePlayerMode(bool blindZone)
+    {
+        if (_blindZone == blindZone || _released) return;
+        try
+        {
+            var old = _player;
+            _blindZone = blindZone;
+            _player = BuildPlayer(_context, blindZone);
+            if (_hasSurface)
+            {
+                // 真面重挂（同 AttachSurface 还原口径）：盲区档重建后真面继续归壳层所有，仅转移挂接
+                var surface = Java.Lang.Object.GetObject<Android.Views.Surface>(_surfaceHandle, JniHandleOwnership.DoNotTransfer);
+                if (surface is not null) _player.SetVideoSurface(surface);
+            }
+            old.Release();
+        }
+        catch (Exception ex)
+        {
+            Reporter?.Invoke($"[内核] 盲区档切换失败退回原实例：{ex.Message}");
+            _blindZone = !_blindZone; // 回滚标记与实例一致
+        }
+    }
+
+    private bool _blindZone; // 当前内核保留档：true=盲区（已播保留 60s）
 
     /// <summary>
     /// 缓冲深水接线（vc53 fix56 思路在 ExoPlayer 内核原生落位）：
@@ -178,13 +219,18 @@ public sealed class ExoPlayerPlayer : IPlayer
     {
         try
         {
+            var uri = Android.Net.Uri.Parse(url);
+            // 盲区档对齐（微卡修法①，Play 路径单点）：非 .m3u8 直流=盲区源（天然贴边赛跑），
+            // 已播保留档切 60s；HLS=25s。EnsurePlayerMode 只在档位变化时重建内核（起播期零视觉代价）。
+            // 同步与 resolver 异步两路都在主线程进入本方法（ExoPlayer 创建线程契约），重建合法。
+            bool blindZone = !IsHls(uri);
+            EnsurePlayerMode(blindZone);
             // 请求头纪律（vc53 同口径）：当前频道表与备源表全部无自定义 UA/Referer（11-15 清点=0 路），
             // 内核走 Media3 默认头即可；将来某路源带校验需补头时，改在 ExoPlayerBuilder 构造期注入工厂，
             // 不在每次 Play 动态挂（IExoPlayer 绑定无 SetMediaSourceFactory，云闸已实锤）。
             var builder = new AndroidX.Media3.Common.MediaItem.Builder();
-            var uri = Android.Net.Uri.Parse(url);
             builder.SetUri(uri);
-            if (IsHls(uri)) // vc73 审查清零 P2：按路径判 HLS，query 带 .m3u8 的非 HLS 不再误设 MIME
+            if (!blindZone) // vc73 审查清零 P2：按路径判 HLS，query 带 .m3u8 的非 HLS 不再误设 MIME
             {
                 builder.SetMimeType(AndroidX.Media3.Common.MimeTypes.ApplicationM3u8);
                 // 落后边缘留水（老板 2026-11-16 22:5x 拍板「能多久之前就多久之前」）：
@@ -348,6 +394,29 @@ public sealed class ExoPlayerPlayer : IPlayer
                 return false; // 内核已释放等边界：按不可靠，壳层保上一拍
             }
         }
+    }
+
+    /// <summary>
+    /// 回退跳原语（vc85 蓝本三原语之一，微卡修法 10 秒口径）：播放点退回 backMs 接着播，
+    /// 断掉盲区直流源「贴边赛跑」链条。SeekTo 须在内核创建线程（主线程）调用——_main.Post 走队列；
+    /// 位置钳 0（越界回退按起点续），内核已释放或位置未就绪静默弃（调用方回退失败即照旧走自救路径）。
+    /// </summary>
+    public void SeekBack(long backMs)
+    {
+        if (_released || backMs <= 0) return;
+        _main.Post(() =>
+        {
+            if (_released) return; // 在途队列回调对上释放即弃（vc74 P3⑧ 同口径）
+            try
+            {
+                long pos = _player.CurrentPosition;
+                if (pos <= 0) return; // 未就绪：无可退存量，交既有卡流自救
+                long target = Math.Max(0, pos - backMs);
+                _player.SeekTo(target);
+                Reporter?.Invoke($"[内核] 回退跳 {backMs}ms：{pos}→{target}（贴边赛跑断链，微卡修法）");
+            }
+            catch { /* 内核重建/释放等边界：回退失败无害，交既有卡流自救路径 */ }
+        });
     }
 
     public void Dispose()
