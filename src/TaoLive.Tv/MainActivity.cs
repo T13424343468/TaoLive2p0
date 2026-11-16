@@ -71,7 +71,10 @@ public partial class MainActivity : Activity
     private Channel? _sortChannel;
     private readonly List<int> _sortBackup = new();
     private static bool _precheckEnabled = true; // 预检握手开关（vc53 v1.0.8 用户拍板：设置面板可切，持久化）；
-                                                 // #15 改静态：进程级 once-block 里的换台预取闭包读它，不能钉在首个壳上
+
+    /// <summary>开机全表备货避让节拍（老板批 2026-11-16 第③条·避让）：先让预检探出默认台/收藏台首批绿点，备货再上路。</summary>
+    private const int BootWarmAllGraceMs = 3 * 60 * 1000;
+    // #15 改静态：进程级 once-block 里的换台预取闭包读它，不能钉在首个壳上
     private ChannelPrecheck _precheck = default!;
     private TicketResolver _resolver = default!;
     private System.Threading.CancellationTokenSource? _precheckCts;
@@ -361,7 +364,20 @@ public partial class MainActivity : Activity
                 Tier = TaoLive.Scheduler.BackgroundScheduler.ScheduleTier.Standard,
                 Work = async _ => { await new ChannelWarmer(resolver).WarmAllAsync(ChannelTable.Build()).ConfigureAwait(false); },
             });
-            _scheduler?.TriggerNow("boot-warm-all");
+            // 老板批 2026-11-16 第③条·避让（后半场）：备货延后 3 分钟再上路——备货取票与预检探活
+            // 共用全局单车道，且调度器整轮串行（先跑的整轮占泵），开机即跑会把默认台/收藏台的
+            // 首批绿点整个拖后。先让预检探出第一批绿点，备货随后补；取票缓存进程级共享，晚补无感。
+            // 延后经 TriggerNow 实现（不占调度泵：未触发前调度器照常跑预检）；#15 每壳重跑注册/触发
+            // 幂等（同名覆盖、TriggerNow 空操作），壳重建只重置计时，备货本就幂等。
+            _ = System.Threading.Tasks.Task.Run(async () =>
+            {
+                try
+                {
+                    await System.Threading.Tasks.Task.Delay(BootWarmAllGraceMs).ConfigureAwait(false);
+                    _scheduler?.TriggerNow("boot-warm-all");
+                }
+                catch { /* 触发失败不挡启动：壳重建重登再补 */ }
+            });
         }
 
         // 开机预检握手（vc53 v1.0.8 一比一，常驻后台轮）：全台按序轻探——Web 取票口换票成功=服务器可达
