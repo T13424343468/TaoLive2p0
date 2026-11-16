@@ -153,4 +153,82 @@ public class TvShellPortsTests
         Assert.Equal(2, events.Count);
         Assert.Equal($"{ch.EpgKey}:{ChannelHealth.Alive}", events[1]);
     }
+
+    // ---- 健康账重启续账（2026-11-16 老板批第①条：账本落盘+重启不清灰）----
+
+    private static string TempLedgerDir()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "taolive-ledger-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+    [Fact]
+    public async Task Health_ledger_reload_restores_green_and_oks_across_restart()
+    {
+        var ch = Ch("a", "CCTV-1", ChannelCategory.Cctv);
+        var dir = TempLedgerDir();
+        try
+        {
+            // 上一世：3 轮探通=绿，落盘
+            var p1 = new ChannelPrecheck(_ => Task.FromResult(true), intervalMs: 0);
+            p1.AttachHealthStore(new SourceHealthStore(dir));
+            long baseMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            for (int i = 0; i < 3; i++) p1.ReportSourceResult(ch, ok: true, nowMs: baseMs + i);
+            Assert.Equal(ChannelHealth.Alive, p1.MarkOf(ch));
+            p1.HealthStore!.FlushNow();
+
+            // 新一世：挂账即载入——绿点直接回显，连续成功账不清零
+            var p2 = new ChannelPrecheck(_ => Task.FromResult(true), intervalMs: 0);
+            p2.AttachHealthStore(new SourceHealthStore(dir));
+            Assert.Equal(3, p2.SourceHealthOf(ch)!.ConsecutiveOks);
+            Assert.Equal(ChannelHealth.Alive, p2.MarkOf(ch)); // 重启不清灰：老账即显示
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    [Fact]
+    public async Task Health_ledger_reload_partial_oks_stays_grey_until_threshold()
+    {
+        // 只攒了 1 轮的台：重启后按老账回显「可用」，但绿点门槛不虚标——继续凑满 3 轮才绿
+        var ch = Ch("a", "CCTV-1", ChannelCategory.Cctv);
+        var dir = TempLedgerDir();
+        try
+        {
+            var p1 = new ChannelPrecheck(_ => Task.FromResult(true), intervalMs: 0);
+            p1.AttachHealthStore(new SourceHealthStore(dir));
+            long baseMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            p1.ReportSourceResult(ch, ok: true, nowMs: baseMs);
+            p1.HealthStore!.FlushNow();
+
+            var p2 = new ChannelPrecheck(_ => Task.FromResult(true), intervalMs: 0);
+            p2.AttachHealthStore(new SourceHealthStore(dir));
+            Assert.Equal(ChannelHealth.Alive, p2.Of(ch)); // 台级回显老账（不闪灰）
+            Assert.Equal(ChannelHealth.Checking, p2.MarkOf(ch)); // 绿门槛未满=照旧灰
+            p2.ReportSourceResult(ch, ok: true, nowMs: baseMs + 100);
+            p2.ReportSourceResult(ch, ok: true, nowMs: baseMs + 101); // 续到 3
+            Assert.Equal(ChannelHealth.Alive, p2.MarkOf(ch));
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
+
+    [Fact]
+    public async Task Health_ledger_reload_dead_entry_shows_red_within_ttl()
+    {
+        // 上一世全败的台：重启后按死账回显红（DeadTtl 内），预检轮继续校准
+        var ch = Ch("a", "CCTV-1", ChannelCategory.Cctv);
+        var dir = TempLedgerDir();
+        try
+        {
+            var p1 = new ChannelPrecheck(_ => Task.FromResult(true), intervalMs: 0);
+            p1.AttachHealthStore(new SourceHealthStore(dir));
+            p1.ReportSourceResult(ch, ok: false, nowMs: DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            p1.HealthStore!.FlushNow();
+
+            var p2 = new ChannelPrecheck(_ => Task.FromResult(true), intervalMs: 0);
+            p2.AttachHealthStore(new SourceHealthStore(dir));
+            Assert.Equal(ChannelHealth.Dead, p2.MarkOf(ch));
+        }
+        finally { Directory.Delete(dir, recursive: true); }
+    }
 }

@@ -35,7 +35,7 @@ public class SourceHealthEntry
     }
 
     public int ConsecutiveFails { get; set; } // 连续失败计数（v1.0.10：达阈值自动淘汰交回重探）
-    public int ConsecutiveOks { get; set; }   // 连续探活成功计数（收口批①回主源判据：预检轮次连续命中 ≥3 次才回主源；不落盘，重启从严从零计）
+    public int ConsecutiveOks { get; set; }   // 连续探活成功计数（收口批①回主源判据；2026-11-16 老板批第①条：随健康账落盘，重启续账不清零）
 }
 
 /// <summary>
@@ -83,6 +83,7 @@ public class ChannelPrecheck
     public void AttachHealthStore(SourceHealthStore store)
     {
         HealthStore = store ?? throw new ArgumentNullException(nameof(store));
+        store.Load(); // 挂账即载入（2026-11-16 老板批第①条）：重启回显老账——此前挂了账却从没读过，落盘形同虚设
         // 会话内已有结论并入账本（不覆盖账本里更新的记录）
         foreach (var kv in _sourceHealth)
         {
@@ -109,9 +110,27 @@ public class ChannelPrecheck
         return string.IsNullOrEmpty(trimmed) ? (name ?? "") : trimmed;
     }
 
-    /// <summary>查询某台当前状态（未探测=Unknown）。同频道任一来源可达=可用。</summary>
-    public ChannelHealth Of(Channel ch) =>
-        _states.TryGetValue(ch.EpgKey, out var s) ? s : ChannelHealth.Unknown;
+    /// <summary>查询某台当前状态（未探测=Unknown）。
+    /// 重启回显（2026-11-16 老板批第①条）：频道级在播态只存内存，重启后按健康账回显上次结论，
+    /// 不再整表清灰干等——预检复测期间保持显示（keepKnownState 口径照旧），探测完才校准翻转。</summary>
+    public ChannelHealth Of(Channel ch)
+    {
+        if (_states.TryGetValue(ch.EpgKey, out var s)) return s;
+        return DeriveFromLedger(ch.EpgKey);
+    }
+
+    /// <summary>健康账回显判定：同台组内任一非陈旧活源=可用；仅死账（保质期内）=失效；无账=未探测。</summary>
+    private ChannelHealth DeriveFromLedger(string epgKey)
+    {
+        var hasDead = false;
+        foreach (var kv in _sourceHealth)
+        {
+            if (kv.Value.EpgKey != epgKey || IsStale(kv.Value)) continue;
+            if (kv.Value.State == ChannelHealth.Alive) return ChannelHealth.Alive;
+            hasDead = true;
+        }
+        return hasDead ? ChannelHealth.Dead : ChannelHealth.Unknown;
+    }
 
     /// <summary>查询某台某来源的健康记录（未探测返回 null；超 24 小时未核验=作废重探，老板令 2026-11-15）。</summary>
     public SourceHealthEntry? SourceHealthOf(Channel ch)
@@ -176,7 +195,9 @@ public class ChannelPrecheck
     /// （播放实测/自救换源线程），状态已落账但事件炸了等于白写；订阅方异常只落日志。</summary>
     public void MarkState(Channel ch, ChannelHealth state)
     {
-        var prev = Of(ch);
+        // 对照基准只看本会话在播态账（不读健康账回显）：探活回写先落健康账再 MarkState，
+        // 若 prev 读回显账，新写结论永远被误判「无变化」，首翻事件丢失（回归 2026-11-16）
+        var prev = _states.TryGetValue(ch.EpgKey, out var s) ? s : ChannelHealth.Unknown;
         if (prev == state) return;
         _states[ch.EpgKey] = state;
         try { StateChanged?.Invoke(ch.EpgKey, state); }

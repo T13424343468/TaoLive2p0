@@ -20,6 +20,10 @@ public class SourceHealthRecord
     public string EpgKey { get; set; } = "";
     public string State { get; set; } = "";   // Alive / Dead
     public long UtcMs { get; set; }           // 最近核验时间（Unix 毫秒）
+
+    // 连续探活成功计数（2026-11-16 老板批第①条：账本落盘——重启不清零，绿点不重新排队）。
+    // 只在 Alive 条目上有意义；Dead 条目恒 0。
+    public int Oks { get; set; }
 }
 
 /// <summary>
@@ -79,6 +83,7 @@ public class SourceHealthStore
                     EpgKey = r.EpgKey,
                     State = r.State == "Alive" ? ChannelHealth.Alive : ChannelHealth.Dead,
                     CheckedAtMs = r.UtcMs, // 统一 Unix 毫秒时间基，跨启动可比
+                    ConsecutiveOks = Math.Max(0, r.Oks), // 跨启动续账：绿门槛进度不因重启归零（2026-11-16）
                 });
             }
         }
@@ -126,6 +131,7 @@ public class SourceHealthStore
                     EpgKey = kv.Value.EpgKey,
                     State = kv.Value.State == ChannelHealth.Alive ? "Alive" : "Dead",
                     UtcMs = kv.Value.CheckedAtMs,
+                    Oks = kv.Value.ConsecutiveOks,
                 })
                 .Where(r => r.State == "Alive" ? now - r.UtcMs <= AliveTtlMs : now - r.UtcMs <= DeadTtlMs)
                 .ToArray();
