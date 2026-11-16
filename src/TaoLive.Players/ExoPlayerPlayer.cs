@@ -1,5 +1,6 @@
 ﻿using Android.Runtime;
 using Android.Views;
+using MediaItemLiveConfiguration = AndroidX.Media3.Common.MediaItem.LiveConfiguration;
 using TaoLive.Foundation;
 using TaoLive.Model;
 
@@ -186,6 +187,18 @@ public sealed class ExoPlayerPlayer : IPlayer
             if (IsHls(uri)) // vc73 审查清零 P2：按路径判 HLS，query 带 .m3u8 的非 HLS 不再误设 MIME
             {
                 builder.SetMimeType(AndroidX.Media3.Common.MimeTypes.ApplicationM3u8);
+                // 落后边缘留水（老板 2026-11-16 22:5x 拍板「能多久之前就多久之前」）：
+                // 目标落后=水位旋钮（默认 60 秒），实际落后由源清单窗口自然封顶——窗口给多深就落后多深，
+                // 播放点前面常备存量，治「贴边播→存货只剩一片→4 秒循环到卡死再拿」。
+                // 起播门槛不变（5 秒即出画），仅起播定位与直播追赶目标后移，首帧速度不受影响。
+                var lagMs = (long)TaoLive.Foundation.AdvancedTuning.PrefetchWindowSec * 1000;
+                // Builder 起、属性补口（绑定缺 fluent 设定器，5 参构造弃用走不了）：
+                // 目标落后=水位旋钮；min/max 留未设（内核按清单窗口自钳），起播定位=直播边缘-目标落后，
+                // 窗口给多深就落后多深。
+                var liveConfig = new MediaItemLiveConfiguration.Builder().Build()
+                    ?? throw new InvalidOperationException("LiveConfiguration build returned null");
+                liveConfig.TargetOffsetMs = lagMs;
+                builder.SetLiveConfiguration(liveConfig);
             }
             var mediaItem = builder.Build() ?? throw new InvalidOperationException("MediaItem build returned null");
             EnsureWarmVideoSink(); // vc66 哑面预热：无真面起播（热备攒流）也把视频解码器初始化到位，热切接管零解码器冷启
@@ -309,6 +322,25 @@ public sealed class ExoPlayerPlayer : IPlayer
             catch
             {
                 return 0; // 内核已释放等边界：按无读数，交既有卡流自救路径兜底
+            }
+        }
+    }
+
+    /// <summary>读数是否可靠（vc85 水位跟手令）：TIME_UNSET/位置异常/内核已释放=不可靠，
+    /// 壳层据此保持上一拍水位显示，不把「读不出」当 0 闪跳归零。</summary>
+    public bool BufferedMsKnown
+    {
+        get
+        {
+            try
+            {
+                long buffered = _player.BufferedPosition;
+                long position = _player.CurrentPosition;
+                return buffered >= 0 && position >= 0;
+            }
+            catch
+            {
+                return false; // 内核已释放等边界：按不可靠，壳层保上一拍
             }
         }
     }

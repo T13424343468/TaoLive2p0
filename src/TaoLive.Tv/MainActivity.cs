@@ -830,6 +830,7 @@ public partial class MainActivity : Activity
         _playerPage.Visibility = ViewStates.Visible;
         _onPlayerPage = true;
         EnsureWatchdog();
+        EnsureWaterPump(); // vc85 水位跟手令：1 秒独立秒泵（抽屉开着才刷数字）
         // 播放页已就绪而 Surface 就绪（返回再进场景）：补挂输出面
         if (_textureSurface is { } surface)
             _manager.Current?.AttachSurface(surface.Handle);
@@ -1280,13 +1281,50 @@ public partial class MainActivity : Activity
         }
     }
 
+    private string _lastWaterText = ""; // 上一拍水位文案：读数不可靠期间保持显示，不闪归零（vc85 水位跟手令）
+
     /// <summary>列表页头实时水位（老板令 2026-11-16）：当前会话内核攒着还没播的量（BufferedMs 实时读数），
-    /// 无会话按 0 秒计；随看门狗泵 3 秒一拍跟刷，呼出抽屉即刷不等下一拍。</summary>
+    /// 无会话按 0 秒计；vc85 水位跟手令改 1 秒独立节拍跟刷（原 3 秒泵撤出），呼出抽屉即刷不等下一拍。
+    /// 读数不可靠（重接/换票/准备期）保持上一拍显示，只有真没货才显 0。</summary>
     private void UpdateWaterLevel()
     {
         if (_waterLevelText is null) return;
-        long bufferedMs = _manager.Current?.Kernel.BufferedMs ?? 0;
-        _waterLevelText.Text = $"  实时水位:{(int)Math.Round(bufferedMs / 1000.0)}秒";
+        var session = _manager.Current;
+        if (session is null)
+        {
+            _lastWaterText = "  实时水位:0秒";
+            _waterLevelText.Text = _lastWaterText;
+            return;
+        }
+        if (!session.Kernel.BufferedMsKnown)
+        {
+            if (_lastWaterText.Length > 0) _waterLevelText.Text = _lastWaterText; // 读不出≠没货：保持上一拍
+            return;
+        }
+        long bufferedMs = session.Kernel.BufferedMs;
+        _lastWaterText = $"  实时水位:{(int)Math.Round(bufferedMs / 1000.0)}秒";
+        _waterLevelText.Text = _lastWaterText;
+    }
+
+    private bool _waterPumpRunning;
+
+    /// <summary>水位独立秒泵（vc85 水位跟手令，老板拍板「每秒都能看到最新变化」）：
+    /// 从 3 秒自救泵摘出，1 秒一拍跟刷水位；只在抽屉开着时干活，收抽屉空转一拍即歇。
+    /// 停泵跟自救泵同一旗（OnDestroy 后不泄漏）。</summary>
+    private void EnsureWaterPump()
+    {
+        if (_waterPumpRunning) return;
+        _waterPumpRunning = true;
+        PumpWater();
+        void PumpWater()
+        {
+            _main.PostDelayed(() =>
+            {
+                if (_watchdogStopped) return; // OnDestroy 后停泵：不泄漏 Activity
+                if (_listOpen) UpdateWaterLevel();
+                PumpWater();
+            }, 1000);
+        }
     }
 
     private void EnsureWatchdog()
@@ -1302,7 +1340,6 @@ public partial class MainActivity : Activity
                 if (_watchdogStopped) return; // OnDestroy 后停泵（闪退镜黄⑦）：不泄漏 Activity
                 // 抽屉开着画面也在播：自救泵跟会话走，不跟面板键位走（vc53 画面常驻口径）
                 if (_manager.Current is not null) _manager.Tick();
-                if (_listOpen) UpdateWaterLevel(); // 老板令 2026-11-16：抽屉开着实时水位跟刷，数字一直新鲜
                 PumpAudioOnlyGuard(); // #75 音画同出兜底：播放中 5 秒零视频帧即介入（内核 READY 态看门狗覆盖不到）
                 Pump();
             }, 3000);

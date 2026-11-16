@@ -40,6 +40,11 @@ public interface IPlayer : IDisposable
     /// </summary>
     long BufferedMs { get; }
 
+    /// <summary>读数是否可靠（vc85 水位跟手令，老板 2026-11-16 拍板）：内核在重接/换票/起播准备期
+    /// 给不出读数——false=壳层保持上一拍显示，不闪归零；true=按 BufferedMs 实读刷新。
+    /// 默认实现 true 兼容既有实现与测试替身；Android 内核按实况覆写。</summary>
+    bool BufferedMsKnown => true;
+
     // —— 事件时序语义（契约，两内核必须一致；次序即文档）——
 
     /// <summary>
