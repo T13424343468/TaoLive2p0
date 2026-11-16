@@ -95,6 +95,171 @@ public class SessionTests
     }
 
     [Fact]
+    public void Light_error_while_picture_alive_does_not_failover()
+    {
+        // vc82 第一刀（老板真机 2026-11-16 实锤：音画正常也被 5 秒连切 3 次）：
+        // 画面在播+库存未干，内核轻错误只记账不切线——音画正常就换源是误杀好线
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer { BufferedMs = 20_000 };
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8");
+        session.ChangeChannel(ch);
+        session.NotifyFirstFrame();
+        Assert.Equal(PlaybackState.Playing, session.State);
+
+        player.RaiseError("NET-1");
+        player.RaiseError("NET-1");
+        player.RaiseError("NET-1");
+        Assert.Equal(PlaybackState.Playing, session.State); // 画面仍是裁判：不进 Failed 不换线
+        Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url);
+        Assert.Equal(0, session.FailoverCount);
+        Assert.Equal(new[] { "https://s/a.m3u8" }, player.PlayedUrls); // 内核只起播一次，无重播
+    }
+
+    [Fact]
+    public void Error_while_playing_with_empty_stock_still_fails_over()
+    {
+        // vc82 对照面：画面虽在播（Playing 态）但库存见底——真断，照原路换源不姑息
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer { BufferedMs = 20_000 };
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8");
+        session.ChangeChannel(ch);
+        session.NotifyFirstFrame();
+        Assert.Equal(PlaybackState.Playing, session.State);
+
+        player.BufferedMs = 0; // 存货耗尽
+        player.RaiseError("NET-1");
+        Assert.Equal(PlaybackState.Buffering, session.State);
+        Assert.Equal("https://s/b.m3u8", session.CurrentEndpoint?.Url);
+        Assert.Equal(1, session.FailoverCount);
+    }
+
+    [Fact]
+    public void Auto_failover_throttle_freezes_after_burst()
+    {
+        // vc82 第二刀（老板令「连环限速」）：滚动窗内自动换源满 3 次即冻结不切——
+        // 把「5 秒连环快切烧线」变成「定点慢试」；冻结走空态+自愈慢轮，不再继续烧线
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer();
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8", "https://s/c.m3u8", "https://s/d.m3u8", "https://s/e.m3u8");
+        session.ChangeChannel(ch);
+
+        player.RaiseError("E1"); // →b（1）
+        player.RaiseError("E2"); // →c（2）
+        player.RaiseError("E3"); // →d（3，满额）
+        Assert.Equal("https://s/d.m3u8", session.CurrentEndpoint?.Url);
+        Assert.Equal(3, session.FailoverCount);
+
+        AllSourcesFailedEventArgs? args = null;
+        session.AllSourcesFailed += (_, e) => args = e;
+        player.RaiseError("E4"); // 窗内满 3 次：冻结不切 e
+        Assert.Equal(PlaybackState.Failed, session.State);
+        Assert.Equal(3, session.FailoverCount); // 没有第 4 次快切
+        Assert.Equal(new[] { "https://s/a.m3u8", "https://s/b.m3u8", "https://s/c.m3u8", "https://s/d.m3u8" }, player.PlayedUrls);
+        Assert.NotNull(args); // 冻结走空态口径
+    }
+
+    [Fact]
+    public void Throttled_freeze_schedules_self_heal_slow_retry()
+    {
+        // vc82 冻结不装死：限速冻结后按自愈退避节奏自动慢试，不静默挂起
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer();
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8", "https://s/c.m3u8", "https://s/d.m3u8", "https://s/e.m3u8");
+        session.ChangeChannel(ch);
+
+        player.RaiseError("E1");
+        player.RaiseError("E2");
+        player.RaiseError("E3");
+        player.RaiseError("E4"); // 冻结
+        Assert.Equal(PlaybackState.Failed, session.State);
+
+        clock.Advance(PlaybackSession.SelfHealFirstDelay);
+        Assert.True(session.CheckWatchdog()); // 到点自愈：从头慢轮
+        Assert.Equal(PlaybackState.Buffering, session.State);
+        Assert.Equal("https://s/a.m3u8", player.PlayedUrls[^1]); // 回首线慢试，不烧 e
+    }
+
+    [Fact]
+    public void Self_heal_gives_up_after_cap_and_keeps_empty_state()
+    {
+        // vc82：自愈退避满 6 次仍全断即收摊——保持空态等按键，不无限烧
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer();
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8");
+        session.ChangeChannel(ch);
+
+        player.RaiseError("E1"); // 耗尽 → 自愈第 1 档 5s
+        int plays = 1;
+        var delays = new[] { 5, 5, 10, 20, 40, 60, 60 }; // 首排 5s + 每次重试后 5/10/20/40/60/60
+        for (int i = 0; i < PlaybackSession.SelfHealMaxAttempts; i++)
+        {
+            clock.Advance(TimeSpan.FromSeconds(delays[i]));
+            Assert.True(session.CheckWatchdog());
+            Assert.Equal(PlaybackState.Buffering, session.State);
+            player.RaiseError("E-again"); // 每次重试又耗尽（单线台）
+            plays++;
+        }
+        Assert.Equal(PlaybackSession.SelfHealMaxAttempts + 1, player.PlayedUrls.Count); // 初播 1 + 自愈 6
+        clock.Advance(TimeSpan.FromSeconds(delays[^1]));
+        Assert.False(session.CheckWatchdog()); // 满额收摊：不再自动重试
+        Assert.Equal(PlaybackState.Failed, session.State);
+        Assert.Equal(plays, player.PlayedUrls.Count);
+    }
+
+    [Fact]
+    public void Self_heal_resets_when_picture_recovers()
+    {
+        // vc82：画面恢复即全愈，退避账清零——下次全断从第一档重新起算，不背旧账
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer();
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8");
+        session.ChangeChannel(ch);
+
+        player.RaiseError("E1"); // 耗尽
+        clock.Advance(TimeSpan.FromSeconds(5));
+        Assert.True(session.CheckWatchdog()); // 自愈第 1 次
+        session.NotifyFirstFrame(); // 画面恢复
+        Assert.Equal(PlaybackState.Playing, session.State);
+
+        player.BufferedMs = 0; // 再断（库存见底=真断）
+        player.RaiseError("E2"); // 耗尽，重新排自愈
+        clock.Advance(TimeSpan.FromSeconds(5)); // 若账未清，下一档是 10s，此处泵不到
+        Assert.True(session.CheckWatchdog()); // 清了账：5s 首档即到
+        Assert.Equal(PlaybackState.Buffering, session.State);
+    }
+
+    [Fact]
+    public void Light_error_account_clears_on_real_failover()
+    {
+        // vc82：轻错账只记本线——真断切线后账清零，不跟去新线
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer { BufferedMs = 20_000 };
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8");
+        session.ChangeChannel(ch);
+        session.NotifyFirstFrame();
+
+        player.RaiseError("NET-1"); // 轻错入账
+        clock.Advance(TimeSpan.FromSeconds(2));
+        player.BufferedMs = 0; // 真断
+        player.RaiseError("NET-1"); // 切线（轻错账随清）
+        Assert.Equal(1, session.FailoverCount);
+
+        session.NotifyFirstFrame(); // 新线回播放
+        player.BufferedMs = 20_000;
+        clock.Advance(TimeSpan.FromSeconds(31)); // 首线轻错账即使保留也已滑出窗
+        player.RaiseError("NET-1"); // 新线轻错：新账第 1 条（若旧账未清则计为 2，打点口径即错）
+        Assert.Equal(PlaybackState.Playing, session.State);
+        Assert.Equal(1, session.FailoverCount); // 仍不切线
+    }
+
+    [Fact]
     public void Proactive_failover_on_repeated_stall_churn()
     {
         // 老板令 #26：滚动窗内短卡流满 3 次即预防性换线（库存充足也切），不等下一次卡死 15 秒
@@ -287,6 +452,7 @@ public class SessionTests
         session.ChangeChannel(multi);
         session.NotifyFirstFrame();
         clock.Advance(TimeSpan.FromSeconds(70));
+        player.BufferedMs = 0; // vc82 画面裁判令：真断（库存见底）才切线，先干库存再报错
         player.RaiseError("NET-1"); // 真实换线，冷却账起算
         session.NotifyFirstFrame(); // 新线回 Playing
         player.BufferedMs = 20_000;

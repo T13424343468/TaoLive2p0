@@ -224,6 +224,9 @@ public sealed class PlaybackSession
             // vc69 坏票重试收账：换新票成功出画，宽限窗与每线路重试机会一并复位（后续卡流另有预算）
             _ticketRetrySinceMs = null;
             _freshTicketRetried = false;
+            // vc82 自愈收账：画面恢复即全愈，退避账清零（下次全断从第一档重新起算）
+            _selfHealDueAtMs = null;
+            _selfHealAttempts = 0;
         }
         var fromState = _state;
         _state = next;
@@ -291,6 +294,9 @@ public sealed class PlaybackSession
         }
         _active = true;
         _channel = channel;
+        _selfHealDueAtMs = null; // vc82：用户主动换台即接管，自愈慢轮收摊，不背着旧台的全断账
+        _selfHealAttempts = 0;
+        _autoFailoverTimes.Clear(); // 限速账同口径：换台重开一轮
         _queue = channel.Sources.Where(s => s.IsValid).ToList();
         if (_queue.Count == 0)
         {
@@ -475,6 +481,35 @@ public sealed class PlaybackSession
     {
         long nowMs = _clock.NowMs;
         SampleBufferProgress(nowMs);
+        // vc82 第三刀「全断不装死」（老板真机实锤：半分钟整个信号中断挂起，装死等按键）：
+        // Failed 态且自愈慢轮到点——退避节奏自动重试（从头慢轮整条队列），不静默挂起。
+        if (_state == PlaybackState.Failed
+            && _selfHealDueAtMs is { } due && nowMs >= due)
+        {
+            if (_selfHealAttempts >= SelfHealMaxAttempts)
+            {
+                _selfHealDueAtMs = null; // 满额收摊：保持空态等按键，不无限烧
+                return false;
+            }
+            _selfHealAttempts++;
+            var nextDelay = SelfHealDelay(_selfHealAttempts);
+            _selfHealDueAtMs = nowMs + (long)nextDelay.TotalMilliseconds;
+            SessionTrace.Emit($"[自愈] {DescribeChannel()} 全断退避重试第 {_selfHealAttempts}/{SelfHealMaxAttempts} 次（下一档 {nextDelay.TotalSeconds:0}s 节奏），从头慢轮");
+            _stallTimes.Clear();
+            _smoothnessTimes.Clear();
+            _lightErrorTimes.Clear();
+            _autoFailoverTimes.Clear(); // 自愈慢轮重开一轮限速账，慢试不受旧窗拖累
+            _endpointIndex = 0; // 从头慢轮：整条队列重试，源头可能已缓过来
+            _freshTicketRetried = false; // 坏票重试机会重记
+            _ticketRetrySinceMs = null;
+            Transition(PlaybackState.Buffering, $"self-heal retry #{_selfHealAttempts}");
+            if (_channel is { } healChannel && _queue.Count > 0)
+            {
+                _player.Play(new PlaybackParams(healChannel, _queue[0], _preferLowLatency));
+                ReattachSurface();
+            }
+            return true;
+        }
         if (_state == PlaybackState.Buffering
             && _bufferingSinceMs is { } started)
         {
@@ -549,6 +584,40 @@ public sealed class PlaybackSession
 
     /// <summary>预防性换源冷却窗：切换后冷却期内不再预防性介入（防坏线连切横跳）；卡流看门狗自救不受限。</summary>
     public static readonly TimeSpan ProactiveCooldown = TimeSpan.FromSeconds(60);
+
+    // ---- vc82 第二刀/第三刀：连环限速 + 全断自愈（老板 2026-11-16 真机实锤三条账）----
+
+    /// <summary>连环限速滚动窗：窗内自动换源（真断/坏票/预防介终路）次数封顶，防连环快切烧线。</summary>
+    public static readonly TimeSpan FailoverThrottleWindow = TimeSpan.FromSeconds(60);
+
+    /// <summary>连环限速封顶：滚动窗内自动换源满 3 次即冻结，转自愈慢轮（把连环快切变定点慢试）。</summary>
+    public const int FailoverThrottleCap = 3;
+
+    /// <summary>自愈首档退避：全断后 5 秒起慢轮重试。</summary>
+    public static readonly TimeSpan SelfHealFirstDelay = TimeSpan.FromSeconds(5);
+
+    /// <summary>自愈退避封顶：再久也不超过 60 秒一档。</summary>
+    public static readonly TimeSpan SelfHealMaxDelay = TimeSpan.FromSeconds(60);
+
+    /// <summary>自愈重试封顶次数：退避重试满 6 次仍全断即停止自动重试，保持空态等按键（不无限烧）。</summary>
+    public const int SelfHealMaxAttempts = 6;
+
+    private readonly List<long> _autoFailoverTimes = new();
+    private long? _selfHealDueAtMs;
+    private int _selfHealAttempts;
+
+    /// <summary>自愈退避节奏：5/10/20/40/60/60 秒（指数翻倍，封顶 60 秒）。</summary>
+    private static TimeSpan SelfHealDelay(int attempt) =>
+        TimeSpan.FromSeconds(Math.Min(SelfHealMaxDelay.TotalSeconds, SelfHealFirstDelay.TotalSeconds * Math.Pow(2, attempt - 1)));
+
+    /// <summary>排一次自愈慢轮（vc82）：全断/限速冻结后按退避节奏自动重试，绝不静默挂起。</summary>
+    private void ScheduleSelfHeal()
+    {
+        if (!_selfHealDueAtMs.HasValue)
+        {
+            _selfHealDueAtMs = _clock.NowMs + (long)SelfHealFirstDelay.TotalMilliseconds;
+        }
+    }
 
     /// <summary>
     /// 预防性介入泵（老板令 #24/#26：主动预防，不做「出了问题再处理问题」）：
@@ -691,9 +760,35 @@ public sealed class PlaybackSession
             ReattachSurface();
             return;
         }
+        // vc82 第一刀（老板真机 2026-11-16 实锤：音画正常也被 5 秒连切 3 次）：换源前先判「画面还活着吗」——
+        // Playing（画面在播）且库存未干（BufferedMs>0）时，内核轻错误一律只记账不切线，让内核自己重试续拉；
+        // 真断（无画面/库存见底/看门狗超时无起色）走下方原路换源。画面是唯一裁判：画面在播即好线。
+        if (_state == PlaybackState.Playing && _player.BufferedMs > 0)
+        {
+            RecordLightError(code);
+            return;
+        }
         Transition(PlaybackState.Failed, $"player error {code}");
         // 换源账随真实码（真机诊断 11-15）：诊断页换源行能看到具体错误码，不再只剩裸词
         TryFailover($"player error {code}");
+    }
+
+    /// <summary>vc82 轻错误记账窗：同线连续轻错误只滚动计数，不升级不切线（切不切由画面与看门狗说话）。</summary>
+    public static readonly TimeSpan LightErrorTraceWindow = TimeSpan.FromSeconds(30);
+
+    private readonly List<long> _lightErrorTimes = new();
+
+    /// <summary>轻错误记账（vc82）：滚动窗计数，首条与每满 5 条打点一次——真机日志可查「误杀嫌疑对账」，
+    /// 同时防刷屏。账不触发任何切线；内核报错后画面若真断，看门狗（NotifyStalled→Reconnecting→超时）照常兜底。</summary>
+    private void RecordLightError(string code)
+    {
+        long nowMs = _clock.NowMs;
+        _lightErrorTimes.RemoveAll(t => nowMs - t >= LightErrorTraceWindow.TotalMilliseconds);
+        _lightErrorTimes.Add(nowMs);
+        if (_lightErrorTimes.Count == 1 || _lightErrorTimes.Count % 5 == 0)
+        {
+            SessionTrace.Emit($"[轻错] {DescribeChannel()} 线路{CurrentLineIndex + 1} 报 {code}，画面在播+存货 {_player.BufferedMs}ms，只记账不切线（近窗第 {_lightErrorTimes.Count} 次）");
+        }
     }
 
     private void TryFailover(string reason)
@@ -705,13 +800,28 @@ public sealed class PlaybackSession
             // 壳层出空态——但此前的守卫只进 Failed 不停内核，最后一颗内核的音频照放。
             // 停机幂等，OK 重试从 Failed 再起播不受影响。
             _player.Stop();
+            ScheduleSelfHeal(); // vc82 全断不装死：耗尽即排自愈慢轮，不再只等按键
             AllSourcesFailed?.Invoke(this, new AllSourcesFailedEventArgs(_channel?.Id ?? string.Empty, reason));
             return;
         }
+        // vc82 第二刀（老板令「连环限速」）：滚动窗内自动换源满 3 次即冻结——不再继续烧线，
+        // 转空态排自愈慢轮（退避节奏定点慢试），把「连环快切」变成「慢试不烧线」。
+        var nowMs = _clock.NowMs;
+        _autoFailoverTimes.RemoveAll(t => nowMs - t >= FailoverThrottleWindow.TotalMilliseconds);
+        if (_autoFailoverTimes.Count >= FailoverThrottleCap)
+        {
+            SessionTrace.Emit($"[限速] {DescribeChannel()} {FailoverThrottleWindow.TotalSeconds:0} 秒内自动换源已满 {FailoverThrottleCap} 次，冻结不切（{reason}），转自愈慢轮");
+            _player.Stop();
+            ScheduleSelfHeal();
+            AllSourcesFailed?.Invoke(this, new AllSourcesFailedEventArgs(_channel.Id, $"throttled: {reason}"));
+            return;
+        }
+        _autoFailoverTimes.Add(nowMs);
         var from = _queue[_endpointIndex];
         _endpointIndex = next;
         _stallTimes.Clear(); // vc72 审查清零 P1：自救路径同换台/换线/预防介入口径清账（账只记本线，不跟去新线）
         _smoothnessTimes.Clear();
+        _lightErrorTimes.Clear(); // vc82：轻错账同口径只记本线，切线清账
         FailoverCount++;
         _freshTicketRetried = false; // vc69：坏票重试机会每线路一次，切线重记
         _ticketRetrySinceMs = null;
