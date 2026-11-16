@@ -188,17 +188,22 @@ public sealed class ExoPlayerPlayer : IPlayer
             {
                 builder.SetMimeType(AndroidX.Media3.Common.MimeTypes.ApplicationM3u8);
                 // 落后边缘留水（老板 2026-11-16 22:5x 拍板「能多久之前就多久之前」）：
-                // 目标落后=水位旋钮（默认 60 秒），实际落后由源清单窗口自然封顶——窗口给多深就落后多深，
+                // 目标落后=进阶设置「播放落后」旋钮（默认 60 秒，5 秒一档），实际落后由源清单窗口自然封顶——
+                // 设定值大于源真实窗口取真实最大值、真实窗口更深取设定值（min 口径），窗口给多深就落后多深，
                 // 播放点前面常备存量，治「贴边播→存货只剩一片→4 秒循环到卡死再拿」。
                 // 起播门槛不变（5 秒即出画），仅起播定位与直播追赶目标后移，首帧速度不受影响。
-                var lagMs = (long)TaoLive.Foundation.AdvancedTuning.PrefetchWindowSec * 1000;
-                // Builder 起、属性补口（绑定缺 fluent 设定器，5 参构造弃用走不了）：
-                // 目标落后=水位旋钮；min/max 留未设（内核按清单窗口自钳），起播定位=直播边缘-目标落后，
-                // 窗口给多深就落后多深。
-                var liveConfig = new MediaItemLiveConfiguration.Builder().Build()
-                    ?? throw new InvalidOperationException("LiveConfiguration build returned null");
-                liveConfig.TargetOffsetMs = lagMs;
-                builder.SetLiveConfiguration(liveConfig);
+                // 设 0=贴边缘播（留水改动前口径），不挂 LiveConfiguration 原语义直出。
+                var lagMs = (long)TaoLive.Foundation.AdvancedTuning.LiveLagSec * 1000;
+                if (lagMs > 0)
+                {
+                    // Builder 起、属性补口（绑定缺 fluent 设定器，5 参构造弃用走不了）：
+                    // 目标落后=播放落后旋钮；min/max 留未设（内核按清单窗口自钳=min 口径），
+                    // 窗口给多深就落后多深。
+                    var liveConfig = new MediaItemLiveConfiguration.Builder().Build()
+                        ?? throw new InvalidOperationException("LiveConfiguration build returned null");
+                    liveConfig.TargetOffsetMs = lagMs;
+                    builder.SetLiveConfiguration(liveConfig);
+                }
             }
             var mediaItem = builder.Build() ?? throw new InvalidOperationException("MediaItem build returned null");
             EnsureWarmVideoSink(); // vc66 哑面预热：无真面起播（热备攒流）也把视频解码器初始化到位，热切接管零解码器冷启
