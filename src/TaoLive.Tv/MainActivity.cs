@@ -938,11 +938,34 @@ public partial class MainActivity : Activity
             Tier = TaoLive.Scheduler.BackgroundScheduler.ScheduleTier.Scout,
             Work = async _ =>
             {
-                try { await _precheck.RunAsync(_channels, ct, keepKnownState: true).ConfigureAwait(false); }
+                try { await _precheck.RunAsync(PrecheckQueue(), ct, keepKnownState: true).ConfigureAwait(false); }
                 catch (System.OperationCanceledException) { /* 停预检：在途轮收场 */ }
                 catch { /* 单轮失败下轮再来 */ }
             },
         });
+    }
+
+    /// <summary>预检轮次序（老板批 2026-11-16 第③条：体检顺序重排）——默认台与收藏台排最前、其余原序垫后：
+    /// 装上后第一批绿点先落在用户马上要看的台上，不再陪全表慢慢排队。同台变体由 RunAsync 按首现位置归组，
+    /// 健康账按 SourceId:EpgKey 记账，归并重复变体不重复计账。</summary>
+    private List<Channel> PrecheckQueue()
+    {
+        var rest = new List<Channel>(_channels.Count);
+        var favorites = new List<Channel>();
+        Channel? def = null;
+        int defIdx = DefaultChannelIndex();
+        for (int i = 0; i < _channels.Count; i++)
+        {
+            var ch = _channels[i];
+            if (i == defIdx) def = ch; // 默认台（收藏第一个/列表首位）置顶
+            else if (_favorites.Contains(ch.Id)) favorites.Add(ch); // 收藏台次之
+            else rest.Add(ch);
+        }
+        var ordered = new List<Channel>(_channels.Count);
+        if (def is { } d) ordered.Add(d);
+        ordered.AddRange(favorites);
+        ordered.AddRange(rest);
+        return ordered;
     }
 
     private void StopPrecheckLoop()
