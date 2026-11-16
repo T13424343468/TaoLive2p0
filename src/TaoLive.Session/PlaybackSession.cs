@@ -578,9 +578,14 @@ public sealed class PlaybackSession
         return windowMs;
     }
 
-    /// <summary>预防性换源库存线（老板令 #24）：Playing 期库存跌破起播下限（BufferInventory.TargetMs=7 秒）
-    /// 连续两拍即主动切备线——卡顿前动手，不等卡流 15 秒看门狗。终值随真机定标。</summary>
-    public static readonly TimeSpan ProactiveInventoryFloor = TimeSpan.FromMilliseconds(BufferInventory.TargetMs);
+    /// <summary>预防性换源库存线（老板令 #24）：Playing 期库存跌破起播下限连续两拍即主动切备线——
+    /// 卡顿前动手，不等卡流 15 秒看门狗。终值随真机定标。</summary>
+    /// <summary>触发线随落后旋钮联动（老板 2026-11-17 拍板：触发线 = min(7 秒，落后目标 ÷ 2)）：
+    /// 落后 60/30 秒档=原 7 秒不变；10 秒档 5 秒、5 秒档 2.5 秒；贴边 0 档「水位&lt;0」不可能=绝对线自然失效，
+    /// 只认外推预测跌停（外推降档入 v2.5 蓝本，触发前提=水位 ≥ max(1.5 秒，落后 ÷ 4)，低于此归微卡修法管辖）。
+    /// 每拍现取门面值=快照语义，改档不打断进行中的判据账，下一拍起按新线判。</summary>
+    public static TimeSpan ProactiveInventoryFloor => TimeSpan.FromMilliseconds(
+        Math.Min(BufferInventory.TargetMs, AdvancedTuning.LiveLagSec * 500));
 
     /// <summary>预防性换源冷却窗：切换后冷却期内不再预防性介入（防坏线连切横跳）；卡流看门狗自救不受限。</summary>
     public static readonly TimeSpan ProactiveCooldown = TimeSpan.FromSeconds(60);
@@ -622,7 +627,7 @@ public sealed class PlaybackSession
     /// <summary>
     /// 预防性介入泵（老板令 #24/#26：主动预防，不做「出了问题再处理问题」）：
     /// Playing 期两条判据，命中其一且有备线、不在冷却窗 → 预防性切下一路线：
-    /// ① 库存线（#24）：内核库存（BufferedMs）跌破线（&gt;0 且 &lt;7 秒）连续两拍（间隔≥1 秒，单次网络抖动不切）；
+    /// ① 库存线（#24，触发线随落后旋钮联动=min(7 秒，落后÷2)）：内核库存（BufferedMs）跌破线（&gt;0 且低于触发线）连续两拍（间隔≥1 秒，单次网络抖动不切）；
     /// ② 欠载线（#26）：滚动窗内短卡流满 3 次——反复饿也算坏线，不等下一次卡死 15 秒。
     /// 0 读数按「无读数」不判趋势（IPlayer 契约：直播源无数≠见底）；真见底（内核进卡流态）走既有看门狗。
     /// 生产由管理器 Tick 驱动，与 CheckWatchdog 同泵；测试注入 FixedClock 后手动泵。

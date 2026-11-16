@@ -308,6 +308,72 @@ public class SessionFailoverTests
     }
 
     [Fact]
+    public void Inventory_floor_couples_to_lag_knob_10s_lag_gives_5s_line()
+    {
+        // 老板 2026-11-17 拍板：触发线 = min(7 秒，落后目标 ÷ 2)。落后 10 秒档线=5 秒——
+        // 库存 6 秒（旧 7 秒线必命中）不切，跌破 5 秒线才按两拍坐实，防贴边档降档横跳。
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer();
+        AdvancedTuning.Apply(AdvancedTuning.DefaultFailGate, AdvancedTuning.DefaultReprobeMs,
+            AdvancedTuning.DefaultListCacheSec, AdvancedTuning.DefaultRetryBaseMs,
+            AdvancedTuning.DefaultRetryMaxMs, AdvancedTuning.DefaultPrefetchWindowSec, 10);
+        try
+        {
+            var session = new PlaybackSession(player, clock);
+            var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8");
+            session.ChangeChannel(ch);
+            player.RaiseFirstFrame(); // 回 Playing 才进预防泵
+
+            player.BufferedMs = 6_000; // 低于旧 7 秒线、高于新 5 秒线
+            session.CheckProactiveFailover();
+            clock.Advance(TimeSpan.FromSeconds(2));
+            session.CheckProactiveFailover();
+            Assert.Equal(0, session.FailoverCount); // 线上不坐实，不预防介入
+
+            player.BufferedMs = 4_000; // 跌破 5 秒线
+            session.CheckProactiveFailover(); // 第 1 拍
+            clock.Advance(TimeSpan.FromSeconds(2));
+            session.CheckProactiveFailover(); // 第 2 拍坐实 → 切线
+            Assert.Equal(1, session.FailoverCount);
+            Assert.Equal("https://s/b.m3u8", session.CurrentEndpoint?.Url);
+        }
+        finally
+        {
+            AdvancedTuning.ResetToDefaults();
+        }
+    }
+
+    [Fact]
+    public void Inventory_line_naturally_disabled_at_edge_lag_zero()
+    {
+        // 落后 0 档（贴边）：触发线=min(7,0)=0，「水位<0」不可能=绝对线永不命中；
+        // 贴边只认外推预测跌停（v2.5 蓝本）与微卡修法/看门狗，绝对线不再天天命中横跳。
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer { BufferedMs = 500 };
+        AdvancedTuning.Apply(AdvancedTuning.DefaultFailGate, AdvancedTuning.DefaultReprobeMs,
+            AdvancedTuning.DefaultListCacheSec, AdvancedTuning.DefaultRetryBaseMs,
+            AdvancedTuning.DefaultRetryMaxMs, AdvancedTuning.DefaultPrefetchWindowSec, 0);
+        try
+        {
+            var session = new PlaybackSession(player, clock);
+            var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8");
+            session.ChangeChannel(ch);
+            player.RaiseFirstFrame();
+            for (int i = 0; i < 5; i++)
+            {
+                clock.Advance(TimeSpan.FromSeconds(2));
+                Assert.False(session.CheckProactiveFailover());
+            }
+            Assert.Equal(0, session.FailoverCount);
+            Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url);
+        }
+        finally
+        {
+            AdvancedTuning.ResetToDefaults();
+        }
+    }
+
+    [Fact]
     public void Late_error_after_exhaustion_is_ignored_until_retry()
     {
         var player = new LoggingPlayer();
