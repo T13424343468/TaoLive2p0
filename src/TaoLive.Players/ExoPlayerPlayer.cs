@@ -27,6 +27,7 @@ public sealed class ExoPlayerPlayer : IPlayer
     private Func<TaoLive.Model.SourceEndpoint, Task<string?>>? _streamResolver;
     private bool _firstFrameRaisedThisPlay;
     private int _playGeneration; // 播放代次（闪退镜红② 11-15）：迟到 resolver 回调对不上代次即弃，不碰已释放内核
+    private volatile bool _released; // vc74 P3⑧：释放旗——Dispose 摘听→Release 窗口期在途回调即弃
     private IntPtr _surfaceHandle;
     private bool _hasSurface;
     private readonly Android.Content.Context _context;
@@ -315,6 +316,7 @@ public sealed class ExoPlayerPlayer : IPlayer
     public void Dispose()
     {
         _playGeneration++; // 释放后作废一切在途回调（闪退镜红②）
+        _released = true;  // vc74 P3⑧：监听摘除→Release 与内核/渲染线程在途回调有窗口，三个回调桥入口先查旗即弃
         ReleaseWarmupSink();
         _player.RemoveListener(_forwarder);
         _player.RemoveAnalyticsListener(_diagForwarder);
@@ -346,9 +348,11 @@ public sealed class ExoPlayerPlayer : IPlayer
     /// <summary>
     /// 帧回调上报（10Hz 节流，方案书 v76）：渲染线程高频回调按 100ms 拍合并，
     /// 订阅方（壳层埋点）拿到的节拍即采样点；TimeSpan 判断免锁（单渲染线程顺序回调）。
+    /// vc74 P3⑧：释放后渲染线程在途回调即弃。
     /// </summary>
     internal void HandleFrameAboutToBeRendered()
     {
+        if (_released) return;
         var now = DateTimeOffset.UtcNow;
         if (_lastTickRaised != default && now - _lastTickRaised < TimeSpan.FromMilliseconds(100)) return;
         _lastTickRaised = now;
@@ -391,20 +395,29 @@ public sealed class ExoPlayerPlayer : IPlayer
 
         private void Report(string message) => ExoPlayerPlayer.Reporter?.Invoke(message);
 
+        // vc74 P3⑧：释放旗——Dispose 摘听→Release 与内核/渲染线程在途回调有窗口，
+        // 各回调入口先查旗即弃，不再向已释放会话层递进（诊断账/故障递进均属旧实例噪声）。
+        private bool Alive => !_owner._released;
+
         public void OnVideoCodecError(AndroidX.Media3.ExoPlayer.Analytics.AnalyticsListenerEventTime? eventTime,
             Java.Lang.Exception? videoCodecError)
         {
+            if (!Alive) return;
             Report($"[解码] 视频解码器报错（{Ch()}）：{videoCodecError?.Message}");
             _owner.HandleVideoFault($"视频解码器报错：{videoCodecError?.Message}"); // vc66：只出声守卫快速递进信号
         }
 
         public void OnAudioCodecError(AndroidX.Media3.ExoPlayer.Analytics.AnalyticsListenerEventTime? eventTime,
             Exception audioCodecError)
-            => Report($"[解码] 音频解码器报错（{Ch()}）：{audioCodecError?.Message}");
+        {
+            if (!Alive) return;
+            Report($"[解码] 音频解码器报错（{Ch()}）：{audioCodecError?.Message}");
+        }
 
         public void OnDroppedVideoFrames(AndroidX.Media3.ExoPlayer.Analytics.AnalyticsListenerEventTime? eventTime,
             int droppedFrames, long elapsedMs)
         {
+            if (!Alive) return;
             // vc71：不再按单次 ≥5 帧过滤（慢解瓶颈每账期只丢 1~2 帧会被吞，2.0.13 真机复发旧病时证据缺位）。
             // 改 10 秒累积窗口落账：攒到的帧全量上报，解码慢无处可藏。
             _droppedAccum += Math.Max(0, droppedFrames);
@@ -417,6 +430,7 @@ public sealed class ExoPlayerPlayer : IPlayer
         public void OnVideoDisabled(AndroidX.Media3.ExoPlayer.Analytics.AnalyticsListenerEventTime? eventTime,
             AndroidX.Media3.ExoPlayer.DecoderCounters? decoderCounters)
         {
+            if (!Alive) return;
             // vc73 审查清零 P2：解码器停用即尾巴出账——最后一批丢帧若之后不再有丢帧事件，
             // 10 秒窗账会滞留到下一台/下一次出账才出现，证据错台错线；停用是账期终点，立即落账。
             FlushDroppedAccum(false);
@@ -437,11 +451,15 @@ public sealed class ExoPlayerPlayer : IPlayer
 
         public void OnAudioUnderrun(AndroidX.Media3.ExoPlayer.Analytics.AnalyticsListenerEventTime? eventTime,
             int bufferSize, long bufferSizeMs, long elapsedSinceLastFeedMs)
-            => Report($"[解码] 音频欠载 {elapsedSinceLastFeedMs}ms（{Ch()}，buffer {bufferSize}B/{bufferSizeMs}ms，只出声卡顿证据）");
+        {
+            if (!Alive) return;
+            Report($"[解码] 音频欠载 {elapsedSinceLastFeedMs}ms（{Ch()}，buffer {bufferSize}B/{bufferSizeMs}ms，只出声卡顿证据）");
+        }
 
         public void OnBandwidthEstimate(AndroidX.Media3.ExoPlayer.Analytics.AnalyticsListenerEventTime? eventTime,
             int totalLoadTimeMs, long totalBytesLoaded, long bitrateEstimate)
         {
+            if (!Alive) return;
             var now = Android.OS.SystemClock.ElapsedRealtime();
             bool bigMove = _lastBwBitrate > 0
                 && (bitrateEstimate >= _lastBwBitrate * 2 || bitrateEstimate <= _lastBwBitrate / 2);
@@ -473,6 +491,7 @@ public sealed class ExoPlayerPlayer : IPlayer
 
         public void OnPlaybackStateChanged(int playbackState)
         {
+            if (_owner._released) return; // vc74 P3⑧：释放后在途回调即弃
             switch (playbackState)
             {
                 case AndroidX.Media3.Common.BasePlayer.InterfaceConsts.StateBuffering:
@@ -493,6 +512,7 @@ public sealed class ExoPlayerPlayer : IPlayer
 
         public void OnPlayerError(AndroidX.Media3.Common.PlaybackException? error)
         {
+            if (_owner._released) return; // vc74 P3⑧：释放后在途回调即弃
             var code = error?.ErrorCodeName ?? "UNKNOWN";
             // 真机诊断口径（11-15 老板镜）：诊断页只看到「player error」查不到因，
             // 补内核原始码+根因链，一键清理页可见（ErrorCodeName/Cause 链全落）。

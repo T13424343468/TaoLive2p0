@@ -56,10 +56,10 @@ public sealed class SourceProfileStore
     /// <summary>打点委托（BLL 不反引 UI，口径同诊断打点通道）：UI 启动注入，未注入时静默。</summary>
     public static Action<string>? Reporter { get; set; }
     private readonly object _gate = new();
+    private readonly object _ioGate = new(); // vc74 P3⑤：落盘互斥——timer Flush 与退出 FlushNow 并撞同一 tmp 不再互吞
     private readonly ConcurrentDictionary<string, SourceProfile> _profiles = new(StringComparer.Ordinal);
     private string _path = "";
     private Timer? _flushTimer;
-    private bool _dirty;
 
     // ---- 出厂名册（= 现有点名册原值搬家，出处见 StreamResolver/WarmupPolicy 原注释） ----
     private static readonly SourceProfile[] FactoryProfiles =
@@ -103,32 +103,65 @@ public sealed class SourceProfileStore
 
     public bool IsRotating(string sourceId) => ProfileOf(sourceId).Rotating;
 
-    /// <summary>新源入库自动定档：按 URL 形状初判（纯 IP→IPDirect；签名参数→ShortSign）；其后两次取样定行为。</summary>
+    /// <summary>新源入库自动定档：按 URL 形状初判（纯 IP→IPDirect；签名参数→ShortSign）；其后两次取样定行为。
+    /// vc74 P3⑤：写档改复制-发布（clone→改→TryUpdate），发布后档案不可变——与落盘序列化并发不再脏快照。</summary>
     public void Register(string sourceId, string sampleUrl, long nowMs)
     {
-        var p = _profiles.TryAdd(sourceId, new SourceProfile { SourceId = sourceId })
-            ? _profiles[sourceId]
-            : _profiles[sourceId];
-        if (p.Kind == SourceArchiveKind.Unknown.ToString())
-            p.Kind = ClassifyUrl(sampleUrl).ToString();
+        var kind = ClassifyUrl(sampleUrl).ToString();
+        while (true)
+        {
+            var cur = _profiles.GetOrAdd(sourceId, id => new SourceProfile { SourceId = id });
+            var next = CloneProfile(cur);
+            if (next.Kind == SourceArchiveKind.Unknown.ToString()) next.Kind = kind;
+            if (_profiles.TryUpdate(sourceId, next, cur)) break; // CAS 失败=并发改档，重取重判
+        }
         MarkDirty();
     }
 
-    /// <summary>取样回报（换票/取流成功后调用）：两次指纹比对定行为——变了记 Rotating，恒定升 Constant（仅 Unknown 源）。</summary>
+    /// <summary>取样回报（换票/取流成功后调用）：两次指纹比对定行为——变了记 Rotating，恒定升 Constant（仅 Unknown 源）。
+    /// vc74 P3⑤：写档改复制-发布——旧版在原对象上改字段，与 FlushNow 序列化并发可脏一版快照；
+    /// 发布后的档案对象不再被改，序列化只见不可变档案。</summary>
     public void ObserveSample(string sourceId, string url, long nowMs)
     {
         if (string.IsNullOrEmpty(url)) return;
-        var p = _profiles.GetOrAdd(sourceId ?? "", id => new SourceProfile { SourceId = id }); // 未登记源入库即建档案（自动定档起点）
+        var key = sourceId ?? "";
         var hash = UrlFingerprint(url);
-        var prev = p.LastUrlHash;
-        bool same = prev == hash && prev != "";
-        p.LastUrlHash = hash;
-        p.SampledUtcMs = nowMs;
-        if (p.Kind != SourceArchiveKind.Unknown.ToString()) return; // 已定档：指纹照记（稳定度可查），类型不被学习覆盖
-        if (same) { p.Kind = SourceArchiveKind.Constant.ToString(); MarkDirty(); }          // 两次同指纹→恒定
-        else if (!same && prev != "") { p.Rotating = true; MarkDirty(); }            // 两次异指纹→轮换
-        // 首次取样（prev 为空）：只记指纹，等下一次定档
+        while (true)
+        {
+            var cur = _profiles.GetOrAdd(key, id => new SourceProfile { SourceId = id }); // 未登记源入库即建档案（自动定档起点）
+            var next = CloneProfile(cur);
+            next.LastUrlHash = hash;
+            next.SampledUtcMs = nowMs;
+            var kindChanged = false;
+            if (next.Kind == SourceArchiveKind.Unknown.ToString())
+            {
+                var same = cur.LastUrlHash == hash && cur.LastUrlHash != "";
+                if (same) { next.Kind = SourceArchiveKind.Constant.ToString(); kindChanged = true; } // 两次同指纹→恒定
+                else if (cur.LastUrlHash != "") { next.Rotating = true; kindChanged = true; }        // 两次异指纹→轮换
+            }
+            if (_profiles.TryUpdate(key, next, cur))
+            {
+                if (kindChanged) MarkDirty(); // 已定档：指纹照记（稳定度可查），类型不被学习覆盖，不额外标脏
+                return;
+            }
+            // CAS 失败=并发改档：丢失更新封死，重取重判
+        }
     }
+
+    /// <summary>档案复制（vc74 P3⑤ 写档复制-发布共用）：逐字段拷贝，不改引用共享对象。</summary>
+    private static SourceProfile CloneProfile(SourceProfile p) => new()
+    {
+        SourceId = p.SourceId,
+        Kind = p.Kind,
+        Rotating = p.Rotating,
+        RefreshIntervalMs = p.RefreshIntervalMs,
+        MinGapMs = p.MinGapMs,
+        IpBound = p.IpBound,
+        BatchAggregation = p.BatchAggregation,
+        UaOverride = p.UaOverride,
+        LastUrlHash = p.LastUrlHash,
+        SampledUtcMs = p.SampledUtcMs,
+    };
 
     /// <summary>URL 形状判别（纯逻辑可测）：纯 IP 主机→IPDirect；带签名/票据参数→ShortSign；其余 Unknown 待行为探测。</summary>
     public static SourceArchiveKind ClassifyUrl(string url)
@@ -151,27 +184,42 @@ public sealed class SourceProfileStore
         return Convert.ToHexString(MD5.HashData(Encoding.UTF8.GetBytes(raw)));
     }
 
-    /// <summary>脏标记 + 3 秒节流后台落盘（写入绝不阻塞播放线程，口径同 SourceHealthStore）。</summary>
+    /// <summary>脏标记 + 3 秒节流后台落盘（写入绝不阻塞播放线程，口径同 SourceHealthStore）。
+    /// vc74 P3⑤修：回调先锁内摘 timer 再锁外落盘——落盘期间新到的脏账立即可建新 timer，不再吞
+    /// （vc73 SourceHealthStore ⑩ 同款；_dirty 死状态随同款一并删除，FlushNow 无条件全量写出）。</summary>
     private void MarkDirty()
     {
         lock (_gate)
         {
-            _dirty = true;
             if (_flushTimer != null) return;
-            _flushTimer = new Timer(_ => { lock (_gate) { if (_dirty) { _dirty = false; FlushNow(); } } }, null, FlushDebounceMs, Timeout.Infinite);
+            _flushTimer = new Timer(_ =>
+            {
+                Timer? fired;
+                lock (_gate)
+                {
+                    fired = _flushTimer;
+                    _flushTimer = null; // 先摘：此后 MarkDirty 立即可建新 timer
+                }
+                FlushNow(); // 锁外落盘：快照即覆盖截至摘牌时刻的全部脏账
+                fired?.Dispose();
+            }, null, FlushDebounceMs, Timeout.Infinite);
         }
     }
 
-    /// <summary>立即原子落盘（tmp+move 家法；退出/暂停时调用）。</summary>
+    /// <summary>立即原子落盘（tmp+move 家法；退出/暂停时调用）。
+    /// vc74 P3⑤：_ioGate 串行化落盘者，与 timer Flush 并发不再互撞同一 tmp（IOException 互吞）；IO 在 _gate 外，播放线程零阻塞口径兑现。</summary>
     public void FlushNow()
     {
         if (string.IsNullOrEmpty(_path)) return;
-        try
+        lock (_ioGate)
         {
-            var tmp = _path + ".tmp";
-            File.WriteAllText(tmp, JsonSerializer.Serialize(_profiles.Values.ToArray()));
-            File.Move(tmp, _path, overwrite: true);
+            try
+            {
+                var tmp = _path + ".tmp";
+                File.WriteAllText(tmp, JsonSerializer.Serialize(_profiles.Values.ToArray()));
+                File.Move(tmp, _path, overwrite: true);
+            }
+            catch (Exception ex) { Reporter?.Invoke($"[源档案] 落盘失败：{ex.Message}"); }
         }
-        catch (Exception ex) { Reporter?.Invoke($"[源档案] 落盘失败：{ex.Message}"); }
     }
 }

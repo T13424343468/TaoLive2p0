@@ -285,24 +285,41 @@ public sealed class TicketResolver
         catch { return null; }
     }
 
-    // 整表源级聚合（v25 修法六 1a 口径）：TTL 内同源只发 1 次
+    // 整表源级聚合（v25 修法六 1a 口径）：TTL 内同源只发 1 次。
+    // vc74 审查清零 P3③：并发 miss 单飞——TTL 过期瞬间多个并发调用此前各自发网（双发多耗）；
+    // 时间戳改落网后取（旧版取前，实际新鲜窗被拉网时长吃掉，整表提前过期）。
     private readonly Dictionary<string, (string Json, long FetchedAt)> _tableCache = new();
+    private readonly Dictionary<string, Task<string?>> _tableInflight = new();
     private static readonly TimeSpan TableTtl = TimeSpan.FromSeconds(60);
 
-    private async Task<string?> FetchTableCachedAsync(string sourceKey, Func<Task<string?>> fetch)
+    internal async Task<string?> FetchTableCachedAsync(string sourceKey, Func<Task<string?>> fetch)
     {
+        Task<string?> flight;
         var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         lock (_cacheGate)
         {
             if (_tableCache.TryGetValue(sourceKey, out var t)
                 && now - t.FetchedAt < (long)TableTtl.TotalSeconds) return t.Json;
+            if (!_tableInflight.TryGetValue(sourceKey, out flight!))
+            {
+                flight = fetch(); // 单飞：锁内登记即共享，并发首查共用同一次网络
+                _tableInflight[sourceKey] = flight;
+            }
         }
-        var json = await fetch().ConfigureAwait(false);
-        if (!string.IsNullOrEmpty(json))
+        try
         {
-            lock (_cacheGate) { _tableCache[sourceKey] = (json, now); }
+            var json = await flight.ConfigureAwait(false);
+            lock (_cacheGate)
+            {
+                if (!string.IsNullOrEmpty(json))
+                    _tableCache[sourceKey] = (json, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+            }
+            return json;
         }
-        return json;
+        finally
+        {
+            lock (_cacheGate) _tableInflight.Remove(sourceKey); // 首查人收账：飞完必摘牌（含失败），防毒任务滞留
+        }
     }
 
     // ---- 江苏 jstv：txSecret 短效 180s，播放时重签 --------------------------------

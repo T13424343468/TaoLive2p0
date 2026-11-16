@@ -24,6 +24,7 @@ public class WatchTimeLedger
     private bool _dirty;
     private long? _lastFlushMs;
     private readonly object _gate = new();
+    private readonly object _ioGate = new(); // vc74 P3④：落盘互斥——锁外 IO 并发不再互撞同一 tmp
 
     public WatchTimeLedger(string? dir) => _dir = dir;
 
@@ -78,28 +79,43 @@ public class WatchTimeLedger
                 .Select(kv => (kv.Key, kv.Value)).ToList();
     }
 
-    /// <summary>节流落盘：3 秒窗口内重复写只落一次盘；tmp+move 原子替换（防断电整本清零）。</summary>
+    /// <summary>节流落盘：3 秒窗口内重复写只落一次盘；tmp+move 原子替换（防断电整本清零）。
+    /// vc74 P3④修：immediate（long.MaxValue）只越节流、不再把 _lastFlushMs 写成长眠值——
+    /// 旧版 FlushNow 落一次后 nowMs-last 恒为 0<节流窗，此后所有节流 Flush 与再次 FlushNow
+    /// 全被压死，落盘从此静默停摆（立落「退出/关键点」第二次起失效，账滞留内存不落盘）。</summary>
     public void Flush(long nowMs)
     {
-        string body;
+        var immediate = nowMs == long.MaxValue;
         lock (_gate)
         {
-            if (!_dirty || (_lastFlushMs is long last && nowMs - last < ThrottleMs)) return;
+            if (!_dirty) return;
+            if (!immediate && _lastFlushMs is long last && nowMs - last < ThrottleMs) return;
             _dirty = false;
-            _lastFlushMs = nowMs;
-            body = JsonSerializer.Serialize(_totals);
+            if (!immediate) _lastFlushMs = nowMs;
         }
-        if (string.IsNullOrEmpty(_dir)) return;
-        try
-        {
-            Directory.CreateDirectory(_dir!);
-            var tmp = PathOf(_dir!) + ".tmp";
-            File.WriteAllText(tmp, body);
-            File.Move(tmp, PathOf(_dir!), overwrite: true);
-        }
-        catch { /* 落盘失败不挡播放：画像只加速 */ }
+        WriteThrough();
     }
 
     /// <summary>立落（退出/关键点）：无视节流窗口，有脏必落盘（防进程先死文件没写完）。</summary>
     public void FlushNow() => Flush(long.MaxValue);
+
+    /// <summary>落盘执行体（vc74 P3④）：_ioGate 串行化所有写盘者，且账在 _ioGate 内现取——
+    /// 并发 Flush 时后进锁者必持最新账，旧账不再覆盖新账；节流决账仍在 _gate 内。</summary>
+    private void WriteThrough()
+    {
+        if (string.IsNullOrEmpty(_dir)) return;
+        lock (_ioGate)
+        {
+            string body;
+            lock (_gate) body = JsonSerializer.Serialize(_totals);
+            try
+            {
+                Directory.CreateDirectory(_dir!);
+                var tmp = PathOf(_dir!) + ".tmp";
+                File.WriteAllText(tmp, body);
+                File.Move(tmp, PathOf(_dir!), overwrite: true);
+            }
+            catch { /* 落盘失败不挡播放：画像只加速 */ }
+        }
+    }
 }

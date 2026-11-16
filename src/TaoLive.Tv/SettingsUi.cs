@@ -721,7 +721,10 @@ public partial class MainActivity
         // 时钟：当前墙钟 + 应用进程已运行时长 + 时区偏移
         // 真机反馈批#13 修（2026-11-15 真机照片归因）：原用 Environment.TickCount64（机器开机时长），
         // 盒子 2.5 天没重启就被报成「已运行 61h02m」实锤；改按进程起始时刻算应用真实运行时长。
-        var up = DateTime.Now - System.Diagnostics.Process.GetCurrentProcess().StartTime;
+        // vc74 P3①：Process 句柄改 using 显式释放（原一次性表达式未 Dispose，句柄滞留到 GC；
+        // 诊断页每次打开多一个泄漏点，低配 TV 上 GC 慢，句柄堆积放大）。
+        using var proc = System.Diagnostics.Process.GetCurrentProcess();
+        var up = DateTime.Now - proc.StartTime;
         var clockLine = $"时钟：{DateTime.Now:yyyy-MM-dd HH:mm:ss} · 已运行 {(int)up.TotalHours}h{up.Minutes:D2}m · " +
                         $"时区 UTC{TimeZoneInfo.Local.BaseUtcOffset:hh\\:mm}";
 
