@@ -873,7 +873,7 @@ public partial class MainActivity
                 Refresh();
             }
 
-            // 4 个旋钮（每项下挂一行人话作用说明）：写入 AdvancedTuning 即时生效（播放链读门面）
+            // 7 个旋钮（每项下挂一行人话作用说明）：写入 AdvancedTuning 即时生效（播放链读门面）
             AddKnob("网络解析出毛病时，撑几次失败才启动自救判别——调低自救快但易误伤，调高稳但自救慢",
                 AdvGateSteps,
                 () => $"自愈门槛：连败 {AdvancedTuning.SelfHealFailGate} 次（默认 3）",
