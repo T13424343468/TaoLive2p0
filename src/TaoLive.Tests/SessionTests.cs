@@ -33,7 +33,7 @@ public class SessionTests
     }
 
     [Fact]
-    public void Channel_switch_follows_detach_stop_play_order()
+    public void Channel_switch_keeps_surface_attached_stop_then_play()
     {
         var clock = new FixedClock(T0);
         var player = new LoggingPlayer();
@@ -47,12 +47,31 @@ public class SessionTests
         session.ChangeChannel(ch);
         Assert.Equal(PlaybackState.Buffering, session.State);
         var log = player.Log;
-        var detach = log.IndexOf("Detach");
-        var stop = log.IndexOf("Stop", detach);
-        var play = stop >= 0
-            ? log.FindIndex(stop + 1, e => e.StartsWith("Play:", StringComparison.Ordinal))
-            : -1;
-        Assert.True(detach >= 0 && stop >= 0 && play >= 0, $"detach/stop/play order broken: {string.Join(",", log)}");
+        // 面账归一（2026-11-16 冻帧方案 A）：换台不再摘面——Stop 旧源后直接起播并重挂真面，全程无 Detach
+        Assert.DoesNotContain("Detach", log);
+        var stop = log.IndexOf("Stop");
+        Assert.True(stop >= 0, $"stop order broken: {string.Join(",", log)}");
+        var play = log.FindIndex(stop + 1, e => e.StartsWith("Play:", StringComparison.Ordinal));
+        Assert.True(play >= 0, $"play order broken: {string.Join(",", log)}");
+        // 重挂真面：第二次换台后内核再次收到 Attach（哑面无机可乘，冻帧根因断路）
+        Assert.Contains("Attach", log[(play + 1)..]);
+    }
+
+    [Fact]
+    public void Detach_clears_account_so_replay_never_reattaches_dead_surface()
+    {
+        var player = new LoggingPlayer();
+        var session = new PlaybackSession(player, new FixedClock(T0));
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8");
+        session.ChangeChannel(ch);
+        session.AttachSurface(new IntPtr(1));
+        session.NotifyFirstFrame();
+
+        session.DetachSurface(); // 壳层纹理销毁路径：清面账（句柄清零）
+        var attachCountAtDetach = player.Log.Count(e => e == "Attach");
+        session.ChangeChannel(ch); // 重起播（换台同链路）
+        // 死面防复活：面账已清，重起播不得再挂已销毁的纹理
+        Assert.Equal(attachCountAtDetach, player.Log.Count(e => e == "Attach"));
     }
 
     [Fact]

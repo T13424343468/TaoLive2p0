@@ -7,7 +7,8 @@ namespace TaoLive.Session;
 /// 单个播放会话：一个频道一个会话，会话内一个状态机，
 /// 状态只能经 Transition 改变，外部只读不写（封装口径，tao-code-standard 〇·八.1）。
 /// 时钟注入可测（Tests 快拍不真等）。
-/// 换台顺序（契约）：DetachSurface → Stop 旧源 → 状态归 Idle → 选新源 → 起播 → 重挂 Surface。
+/// 换台顺序（契约，面账归一 2026-11-16 修订）：Stop 旧源 → 状态归 Idle → 选新源 → 起播 → 重挂 Surface。
+/// 面账归一：换台/换线/自救不再摘面（真面跨重起播保持挂接），摘面仅壳层纹理销毁/让位/退场调用。
 /// 断流自救：内核 OnError 或起播超时 → 依频道备源列表顺序切下一路重起播，不崩；
 /// 全部备源耗尽则停在 Failed 并发 AllSourcesFailed 事件，由上层决定重试或放弃。
 /// 被换下的会话（Supersede）不再响应内核事件，避免共享内核时旧会话抢自救。
@@ -272,7 +273,8 @@ public sealed class PlaybackSession
     }
 
     /// <summary>
-    /// 换台：一个频道一个会话的入口。顺序按类注释契约；
+    /// 换台：一个频道一个会话的入口。顺序按类注释契约（面账归一 2026-11-16：换台不再摘面，
+    /// 真面跨换台保持挂接——摘面会让重挂判空走哑面，自动换源后画面永久冻帧）；
     /// 频道无任何合法源则抛参数异常，会话状态不变。
     /// </summary>
     public void ChangeChannel(Channel channel)
@@ -282,7 +284,6 @@ public sealed class PlaybackSession
         {
             throw new ArgumentException($"Channel {channel.Id} has no valid sources", nameof(channel));
         }
-        DetachSurface();
         if (_state is not PlaybackState.Idle)
         {
             _player.Stop(); // vc68：含 Failed 态一律停（同 Supersede 口径），旧台音画必死
@@ -356,13 +357,21 @@ public sealed class PlaybackSession
         _player.AttachSurface(surfaceHandle);
     }
 
-    /// <summary>摘输出面：换源/换台/退出前必调，重复调用无害。</summary>
-    public void DetachSurface()
+    /// <summary>摘输出面（面账归一 2026-11-16）：仅壳层纹理销毁/让位/退场路径调用——
+    /// 换台/换线/自救不再摘面（真面热切不闪黑）。清账无条件执行（重复调用无害），
+    /// 清后 ReattachSurface 不再重挂，防死面复活。
+    /// clearHandle 仅壳层纹理销毁传 true（默认）：句柄随真面销毁归零；
+    /// 让位（Supersede）摘面传 false 保留句柄——热切接管要按句柄把真面移交热备，不能清。</summary>
+    public void DetachSurface(bool clearHandle = true)
     {
         if (_hasSurface)
         {
             _player.DetachSurface();
-            _hasSurface = false;
+        }
+        _hasSurface = false;
+        if (clearHandle)
+        {
+            _surfaceHandle = IntPtr.Zero;
         }
     }
 
@@ -630,7 +639,7 @@ public sealed class PlaybackSession
     {
         _active = false;
         IsForeground = false; // vc69 让道修：让位即失前台，门控从此不碰（热备/让位会话不翻全局车道门）
-        DetachSurface();
+        DetachSurface(clearHandle: false); // 让位摘面保留句柄：热切接管按句柄移交真面（面账归一 2026-11-16）
         if (_state is not PlaybackState.Idle)
         {
             _player.Stop(); // vc68：含 Failed 态一律停，旧台音画必死
@@ -715,7 +724,9 @@ public sealed class PlaybackSession
 
     private void ReattachSurface()
     {
-        if (_hasSurface)
+        // 面账归一（2026-11-16 换源冻帧方案 A）：以会话句柄账为准——换台/换线/自救不再清面账，
+        // 只要壳层真面仍在（句柄非零），重起播后必重挂真面；句柄为零（壳层纹理已销毁）才不挂，防死面复活。
+        if (_surfaceHandle != IntPtr.Zero)
         {
             _player.AttachSurface(_surfaceHandle);
         }

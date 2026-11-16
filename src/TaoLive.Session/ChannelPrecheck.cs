@@ -124,18 +124,28 @@ public class ChannelPrecheck
     public const int MarkGreenMinConsecutiveOks = 3;
 
     /// <summary>
-    /// 列表健康点三态（方案书收口批②）：近 3 轮探活全通=绿（Alive）、部分通/检测中/未探=灰（Checking）、
-    /// 全败=红（Dead）。只读健康账展示，不写账（v33 条款）。
+    /// 列表健康点三态（方案书收口批②；绿门槛频道级语义 2026-11-16 老板拍板）：
+    /// 近 3 轮探活全通=绿（Alive）、部分通/检测中/未探=灰（Checking）、全败=红（Dead）。
+    /// 绿判据改频道级：同台组（同 EPG 键）内任一来源连续探活达标即整台绿——播放只给正在播的
+    /// 来源记活账，列表行绑定的可能是同台另一变体，按行内单源判绿会漏亮（断点一修复）。
+    /// 只读健康账展示，不写账（v33 条款）。
     /// </summary>
     public ChannelHealth MarkOf(Channel ch)
     {
         var state = Of(ch);
         if (state == ChannelHealth.Dead) return ChannelHealth.Dead;
         if (state == ChannelHealth.Alive)
-            return SourceHealthOf(ch) is { ConsecutiveOks: >= MarkGreenMinConsecutiveOks }
-                ? ChannelHealth.Alive : ChannelHealth.Checking;
+        {
+            return AnyGroupSourceGreen(ch.EpgKey) ? ChannelHealth.Alive : ChannelHealth.Checking;
+        }
         return ChannelHealth.Checking;
     }
+
+    /// <summary>同台组（同 EPG 键）内任一来源连续探活达标即绿（绿点频道级语义，2026-11-16）。</summary>
+    private bool AnyGroupSourceGreen(string epgKey) =>
+        _sourceHealth.Any(kv => kv.Value.EpgKey == epgKey
+            && kv.Value.State == ChannelHealth.Alive
+            && kv.Value.ConsecutiveOks >= MarkGreenMinConsecutiveOks);
 
     /// <summary>
     /// 该台在健康表里最近验证可用的来源变体（v1.0.9 第⑬项）：
@@ -198,6 +208,7 @@ public class ChannelPrecheck
         entry.CheckedAtMs = nowMs > 0 ? nowMs : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         entry.ConsecutiveFails = ok ? 0 : entry.ConsecutiveFails + 1;
         // 播放实测=强证据（#4 修）：真画面在手，绿点判据直接达标；预检轻探照旧逐轮累计
+        var prevOks = entry.ConsecutiveOks;
         entry.ConsecutiveOks = ok
             ? (playback ? MarkGreenMinConsecutiveOks : entry.ConsecutiveOks + 1)
             : 0;
@@ -208,6 +219,13 @@ public class ChannelPrecheck
             return;
         }
         HealthStore?.MarkDirty();
+        // 绿门槛跨越补发刷新（断点二 2026-11-16 拍板）：来源账从不足额跨到足额时，频道级状态可能
+        // 未翻转（MarkState 仅翻转发事件），列表绿点会干等下次翻转——此处补发一次事件，刷新节流在壳层。
+        if (ok && prevOks < MarkGreenMinConsecutiveOks && entry.ConsecutiveOks >= MarkGreenMinConsecutiveOks)
+        {
+            try { StateChanged?.Invoke(ch.EpgKey, ChannelHealth.Alive); }
+            catch (Exception ex) { Report($"状态事件订阅方异常（不影响状态账本）：{ex.Message}"); }
+        }
         if (ok) MarkState(ch, ChannelHealth.Alive);
     }
 

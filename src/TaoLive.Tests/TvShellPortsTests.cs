@@ -123,4 +123,34 @@ public class TvShellPortsTests
         dead.MarkState(ch, ChannelHealth.Dead);
         Assert.Equal(ChannelHealth.Dead, dead.MarkOf(ch)); // 全败=红
     }
+
+    [Fact]
+    public async Task Health_mark_green_when_any_group_source_reaches_threshold()
+    {
+        // 绿门槛频道级语义（2026-11-16 断点一修复）：同台两个来源变体（同 EPG 键、不同 SourceId），
+        // 播放只给正在播的变体记活账——列表行绑定的另一个变体也要读到达标账=整台绿
+        var row = Ch("a", "CCTV-1", ChannelCategory.Cctv);        // 列表行绑定的变体
+        var playing = Ch("a2", "CCTV-1", ChannelCategory.Cctv);   // 正在播的变体（同 EPG 键）
+        playing.EpgKey = row.EpgKey;
+        var precheck = await PrecheckAfterRoundsAsync(3, playing);
+        precheck.MarkState(row, ChannelHealth.Alive); // 台级账已是 Alive（播放回写同路）
+        Assert.Equal(ChannelHealth.Alive, precheck.MarkOf(row)); // 任一来源达标=整台绿
+    }
+
+    [Fact]
+    public async Task Green_threshold_crossing_fires_state_changed()
+    {
+        // 绿门槛跨越补发刷新（2026-11-16 断点二修复）：第 3 轮探通跨过门槛时，
+        // 频道级状态可能未翻转（上轮已 Alive），须补发一次事件让列表立即重绘
+        var ch = Ch("a", "CCTV-1", ChannelCategory.Cctv);
+        var precheck = new ChannelPrecheck(_ => Task.FromResult(true), intervalMs: 0);
+        var events = new List<string>();
+        precheck.StateChanged += (epgKey, state) => events.Add($"{epgKey}:{state}");
+        long baseMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        precheck.ReportSourceResult(ch, ok: true, nowMs: baseMs);      // 首通：频道 Unknown→Alive 翻转发事件
+        precheck.ReportSourceResult(ch, ok: true, nowMs: baseMs + 1);  // 第 2 轮：无翻转无跨越，不发
+        precheck.ReportSourceResult(ch, ok: true, nowMs: baseMs + 2);  // 第 3 轮：跨绿门槛，补发事件
+        Assert.Equal(2, events.Count);
+        Assert.Equal($"{ch.EpgKey}:{ChannelHealth.Alive}", events[1]);
+    }
 }
