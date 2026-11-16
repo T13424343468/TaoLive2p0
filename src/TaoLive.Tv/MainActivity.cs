@@ -2084,6 +2084,9 @@ public partial class MainActivity : Activity
             }
 
             var ch = row.Channel!;
+            // vc75 审查清零 P1：ViewHolder 复用回置——频道行分支此前不收分组标题，
+            // header 行复用进频道行时残留上一行标题叠字（旧实现逐行重建无此病，vc73 重构引入）。
+            h.Header.Visibility = ViewStates.Gone;
             // B 包第 12 项：行首真实台标（vc53 同源内置资源）；无内置台标→首字占位；无信号行不放台标
             var logoRes = ChannelLogoMap.ResourceName(ch.Name);
             bool logoResolved = false;
