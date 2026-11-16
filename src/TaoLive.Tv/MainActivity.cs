@@ -66,6 +66,9 @@ public partial class MainActivity : Activity
     private Java.Lang.Runnable _toastHide = default!;
     private readonly CntvEpgClient _epg = new();
     private HashSet<string> _favorites = new();
+    // 收藏账跨线程快照（vc84 首轮交叉审查修）：PrecheckQueue 在调度泵线程读收藏，
+    // HashSet 非线程安全——主线程变更后重发布不可变快照，泵线程只读快照引用，不碰工作集。
+    private volatile HashSet<string> _favoritesView = new();
     private readonly FavoriteStore _favStore = new(); // 收藏顺序（vc53 排序模式口径）
     private bool _sortMode;      // 收藏排序状态机（v1.0.8 第14项）：列表内长按确认进入，退出恢复默认键位
     private Channel? _sortChannel;
@@ -349,6 +352,7 @@ public partial class MainActivity : Activity
         _manager.RetainedCapacity = PlaybackSessionManager.CapacityFor(activityManager?.MemoryClass ?? 0);
         _favorites = GetSharedPreferences("favorites", FileCreationMode.Private)!
             .GetStringSet("ids", new List<string>())!.ToHashSet();
+        _favoritesView = new HashSet<string>(_favorites); // 发布快照（跨线程读者只读此份）
         // 收藏顺序（vc53 v1.0.8 第14项：顺序跨启动记忆；逗号编号串，坏段忽略）
         _favStore.Restore(GetSharedPreferences("favorites", FileCreationMode.Private)!.GetString("order", null));
         // 开机预热（W8：取票口预取进 5 分钟缓存，换台零等待；退避账挂账不烧请求）
@@ -575,10 +579,13 @@ public partial class MainActivity : Activity
 
     /// <summary>默认台来源（老板令 2026-11-15 #17）：开机进收藏第一个（按频道表顺序取最先收藏的台）；
     /// 无收藏=全表第一个。断点台口径废止。</summary>
-    private int DefaultChannelIndex()
+    private int DefaultChannelIndex() => DefaultChannelIndex(_favorites);
+
+    /// <summary>带收藏集合入参：供泵线程快照口径复用（主线程读者用工作集重载即可）。</summary>
+    private int DefaultChannelIndex(HashSet<string> favorites)
     {
         for (int i = 0; i < _channels.Count; i++)
-            if (_favorites.Contains(_channels[i].Id)) return i;
+            if (favorites.Contains(_channels[i].Id)) return i;
         return 0; // 无收藏=列表首位
     }
 
@@ -963,18 +970,21 @@ public partial class MainActivity : Activity
 
     /// <summary>预检轮次序（老板批 2026-11-16 第③条：体检顺序重排）——默认台与收藏台排最前、其余原序垫后：
     /// 装上后第一批绿点先落在用户马上要看的台上，不再陪全表慢慢排队。同台变体由 RunAsync 按首现位置归组，
-    /// 健康账按 SourceId:EpgKey 记账，归并重复变体不重复计账。</summary>
+    /// 健康账按 SourceId:EpgKey 记账，归并重复变体不重复计账。
+    /// 收藏走快照 _favoritesView（vc84 首轮交叉审查修）：本方法跑在调度泵线程，
+    /// HashSet 工作集只许主线程摸——这里只读快照，不碰工作集。</summary>
     private List<Channel> PrecheckQueue()
     {
         var rest = new List<Channel>(_channels.Count);
         var favorites = new List<Channel>();
         Channel? def = null;
-        int defIdx = DefaultChannelIndex();
+        var fav = _favoritesView; // 取一次快照引用，整轮口径一致
+        int defIdx = DefaultChannelIndex(fav);
         for (int i = 0; i < _channels.Count; i++)
         {
             var ch = _channels[i];
             if (i == defIdx) def = ch; // 默认台（收藏第一个/列表首位）置顶
-            else if (_favorites.Contains(ch.Id)) favorites.Add(ch); // 收藏台次之
+            else if (fav.Contains(ch.Id)) favorites.Add(ch); // 收藏台次之
             else rest.Add(ch);
         }
         var ordered = new List<Channel>(_channels.Count);
@@ -1694,6 +1704,7 @@ public partial class MainActivity : Activity
             nowFav = false;
         }
         else nowFav = true;
+        _favoritesView = new HashSet<string>(_favorites); // 变更后重发布快照（跨线程读者只读此份）
         if (_favStore.IsFavorite(ch.Number) != nowFav) _favStore.Toggle(ch.Number);
     }
 
