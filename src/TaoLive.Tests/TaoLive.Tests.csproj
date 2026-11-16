@@ -12,6 +12,7 @@
     <ProjectReference Include="../TaoLive.Foundation/TaoLive.Foundation.csproj" />
     <ProjectReference Include="../TaoLive.Session/TaoLive.Session.csproj" />
     <ProjectReference Include="../TaoLive.Catalog/TaoLive.Catalog.csproj" />
+    <ProjectReference Include="../TaoLive.Scheduler/TaoLive.Scheduler.csproj" />
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />

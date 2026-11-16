@@ -83,9 +83,14 @@ public partial class MainActivity : Activity
     private static IServiceProvider? _processServices;
     private static TicketResolver? _processResolver;
     private static int _prefetchSeq;                        // 邻台预取代数：换台即换代（进程级：预取任务可能跨 Recreate 存活）
+    private static Channel? _prefetchPending;               // 邻台预取待办台：换台即换代换台，Work 执行时读最新（快速连切只取最后一代）
     internal static MainActivity? Shell;                    // 进程级壳引用：内核/会话回调统一指向当前实例
     private static EventHandler<FailoverEventArgs>? _failoverRelay; // 换源回调转接器：进程级唯一（幂等 -=/+=），换壳不双收
     private static readonly HttpClient PrecheckHttp = new() { Timeout = TimeSpan.FromSeconds(5) };
+
+    // ---- vc82 统一调度器（方案三，老板拍板单开工程）：后台各路活全部登记排班，自跑循环退役 ----
+    // 排班归调度器（谁先谁后、轮次串行），车道纪律由各路活内部逐请求自过（绝不并发）——两层职责正交互为保险。
+    private static TaoLive.Scheduler.BackgroundScheduler? _scheduler;
 
     // ---- vc53 界面搬运：亮牌 / 底部节目单 / 水墨退出弹窗 ----
     private FrameLayout _loadingPanel = default!;
@@ -100,6 +105,7 @@ public partial class MainActivity : Activity
     private LinearLayout? _epgPanel;
     private TextView? _epgNow;
     private TextView? _epgNext;
+    private TextView? _waterLevelText;       // 老板令 2026-11-16：列表页头「实时水位:XX秒」——当前会话内核攒着还没播的量
     private bool _epgHasData;                // 当前台拉到过节目单（抽屉收起后据此重新亮出）
     private Action? _epgHidePending;         // 7 秒自动收起任务
     private int _epgSeq;                     // 节目单代数：换台即作废旧拉取
@@ -261,6 +267,27 @@ public partial class MainActivity : Activity
         // #15：换台预取闭包是进程级一次性的，频道表用静态快照（ChannelTable.Build 静态数据无状态），
         // 不引用实例 _channels——否则闭包把第一个壳连整个视图树钉死到进程结束（内存泄漏）
         var channels = ChannelTable.Build();
+        // vc82 收编②：邻台预取自起 Task.Run 圈外飞退役，登记进统一调度器（常规档一次性活，跑完即退役）。
+        // 15 秒起播稳定窗+换代校验留在 Work 内（外层不占车道，内层逐邻台自过车道）；再换台先重登记重置一次性旗标再触发
+        var neighborPrefetchJob = new TaoLive.Scheduler.BackgroundScheduler.Job
+        {
+            Name = "neighbor-prefetch",
+            Interval = TimeSpan.Zero,
+            OneShot = true,
+            Tier = TaoLive.Scheduler.BackgroundScheduler.ScheduleTier.Standard,
+            Work = async _ =>
+            {
+                try
+                {
+                    var target = _prefetchPending;
+                    int seq = System.Threading.Volatile.Read(ref _prefetchSeq);
+                    await Task.Delay(TimeSpan.FromSeconds(15));
+                    if (seq != System.Threading.Volatile.Read(ref _prefetchSeq)) return; // 已换台：旧代预取作废
+                    if (target is not null) await prefetcher.PrefetchNeighborsAsync(target, channels);
+                }
+                catch { /* 预取失败不影响播放 */ }
+            },
+        };
         _services = _processServices = new ServiceCollection()
             .AddSingleton<IClock, global::TaoLive.Session.SystemClock>()
             .AddSingleton<IMainThreadDispatcher>(new AndroidMainThreadDispatcher(_main))
@@ -270,23 +297,23 @@ public partial class MainActivity : Activity
                 // 真机反馈批#12 修 2026-11-15：预取原在首帧落地即排队上路——出画后内核正要抢带宽把
                 // 水位从起播线填满，预取插队即抢网，起播期卡顿实锤之一。改延后 15 秒（起播稳定窗）
                 // 再上路，换代作废旧延迟（快速连切只取最后一代）；预热随预检开关同起同停（收口批④开关合流）
+                // vc82 收编②：这里只换代+触发，排班全归调度器
                 if (_precheckEnabled)
                 {
-                    int seq = ++_prefetchSeq;
-                    _ = Task.Run(async () =>
-                    {
-                        try
-                        {
-                            await Task.Delay(TimeSpan.FromSeconds(15));
-                            if (seq != _prefetchSeq) return; // 已换台：旧代预取作废
-                            await prefetcher.PrefetchNeighborsAsync(ch, channels);
-                        }
-                        catch { /* 预取失败不影响播放 */ }
-                    });
+                    System.Threading.Volatile.Write(ref _prefetchPending, ch);
+                    System.Threading.Interlocked.Increment(ref _prefetchSeq);
+                    _scheduler?.Register(neighborPrefetchJob); // 重置一次性旗标（跑完即退役，再换台先重登记）
+                    _scheduler?.TriggerNow("neighbor-prefetch");
                 }
             })
             .BuildServiceProvider();
         _manager = _services.GetRequiredService<PlaybackSessionManager>();
+        // vc82 统一调度器接线：执行口子=直调（调度器只管排班先后——档位升序、同档最久未跑优先、轮次串行）；
+        // 车道纪律在每路活内部逐请求自过（预检探活/预热取票/邻台预取全如此），执行口子绝不再包一层——
+        // 整轮过闸=整轮占住全局并发1（播放链救助全堵死），且内部再进车道=嵌套等自己死锁。
+        // 调度器进程级一个脑子，各路活 Register 登记，StopPrecheckLoop 等负责退役旧路
+        _scheduler = new TaoLive.Scheduler.BackgroundScheduler((tier, work, ct) => work(ct));
+        _ = Task.Run(() => _scheduler!.RunAsync(CancellationToken.None)); // 进程级常驻：随进程生死
         // 内核回调异常出口（闪退镜黄⑤）：矩阵外跳转不掀回调链，落运行台账
         TaoLive.Session.PlaybackSession.KernelCallbackFailed += (_, msg) => CrashNet.Record($"[KernelCallback] {msg}");
         // 埋点补充（真机反馈批 2026-11-15）：会话/管理器/取票/预热/内核各层台账出口统一接 CrashNet——
@@ -325,11 +352,16 @@ public partial class MainActivity : Activity
         // 预热随预检开关同起同停（收口批④开关合流，不再单设开关）；#15：每壳重跑无妨——取票缓存进程级共享，焐热幂等
         if (_precheckEnabled)
         {
-            _ = Task.Run(async () =>
+            // vc82 收编①：开机全表备货登记进统一调度器（常规档一次性）——不再自起 Task.Run 圈外飞
+            _scheduler?.Register(new TaoLive.Scheduler.BackgroundScheduler.Job
             {
-                try { await new ChannelWarmer(resolver).WarmAllAsync(ChannelTable.Build()); }
-                catch { /* 预热失败不影响播放 */ }
+                Name = "boot-warm-all",
+                Interval = TimeSpan.FromHours(1),
+                OneShot = true,
+                Tier = TaoLive.Scheduler.BackgroundScheduler.ScheduleTier.Standard,
+                Work = async _ => { await new ChannelWarmer(resolver).WarmAllAsync(ChannelTable.Build()).ConfigureAwait(false); },
             });
+            _scheduler?.TriggerNow("boot-warm-all");
         }
 
         // 开机预检握手（vc53 v1.0.8 一比一，常驻后台轮）：全台按序轻探——Web 取票口换票成功=服务器可达
@@ -695,6 +727,13 @@ public partial class MainActivity : Activity
         count.SetTextColor(Color.ParseColor(InkTranslucency.TextSecondary));
         InkTranslucency.ApplyReadabilityShadow(count);
         header.AddView(count);
+        // 老板令 2026-11-16：共N路后面挂「实时水位:XX秒」——内核当前攒着还没播的库存（BufferedMs 实时读数），
+        // 随看门狗泵 3 秒一拍跟刷，抽屉开着数字一直新鲜
+        _waterLevelText = new TextView(this) { TextSize = UiScale.Caption };
+        _waterLevelText.SetTextColor(Color.ParseColor(InkTranslucency.TextSecondary));
+        InkTranslucency.ApplyReadabilityShadow(_waterLevelText);
+        UpdateWaterLevel();
+        header.AddView(_waterLevelText);
         _listPage.AddView(header);
 
         // 五分类标签行（vc53：页签内容自适应宽度，首页签 LeftMargin=0 与页头文字严格对齐；
@@ -746,6 +785,7 @@ public partial class MainActivity : Activity
         _playerPage.Visibility = ViewStates.Visible;
         _listPage.Visibility = ViewStates.Visible;
         _onPlayerPage = false;
+        UpdateWaterLevel(); // 老板令 2026-11-16：呼出即刷实时水位，不等下一拍
         SuppressEpgForDrawer(); // v22 第 13 项：抽屉打开先收节目单条，叠字从根上清掉
         if (_list.Adapter is ChannelListAdapter adapter)
         {
@@ -883,22 +923,25 @@ public partial class MainActivity : Activity
         });
     }
 
-    /// <summary>常驻循环预检（vc53 口径）：保态复测列表不闪烁；轮间歇 20 秒；单轮失败下一轮再来。</summary>
+    /// <summary>常驻循环预检（vc53 口径）：保态复测列表不闪烁；轮间歇 20 秒；单轮失败下一轮再来。
+    /// vc82 收编③：自跑 while 循环退役，登记进统一调度器（慢探档、20 秒一轮、轮次串行）——
+    /// 探活仍逐台自过全局单车道（ChannelPrecheck 内部口径不变），取消账（CTS）保留：停预检即在途轮收场。</summary>
     private void StartPrecheckLoop()
     {
         StopPrecheckLoop();
         _precheckCts = new System.Threading.CancellationTokenSource();
         var ct = _precheckCts.Token;
-        _ = Task.Run(async () =>
+        _scheduler?.Register(new TaoLive.Scheduler.BackgroundScheduler.Job
         {
-            while (!ct.IsCancellationRequested)
+            Name = "precheck-round",
+            Interval = TimeSpan.FromSeconds(20),
+            Tier = TaoLive.Scheduler.BackgroundScheduler.ScheduleTier.Scout,
+            Work = async _ =>
             {
                 try { await _precheck.RunAsync(_channels, ct, keepKnownState: true).ConfigureAwait(false); }
-                catch (System.OperationCanceledException) { return; }
-                catch { /* 单轮失败不掀循环 */ }
-                try { await Task.Delay(20_000, ct).ConfigureAwait(false); }
-                catch (System.OperationCanceledException) { return; }
-            }
+                catch (System.OperationCanceledException) { /* 停预检：在途轮收场 */ }
+                catch { /* 单轮失败下轮再来 */ }
+            },
         });
     }
 
@@ -906,6 +949,7 @@ public partial class MainActivity : Activity
     {
         _precheckCts?.Cancel();
         _precheckCts = null;
+        _scheduler?.Unregister("precheck-round"); // 收编③：登记路一并退役（调度器跑完当前轮自然收口）
     }
 
     /// <summary>备援候选健康提示（收口批①轻排序只读账，不写账）：
@@ -1029,7 +1073,10 @@ public partial class MainActivity : Activity
     // —— 底部节目单（vc53 B 包第 14 项：官方接口，没数据不硬造） ———
 
     /// <summary>换台即刷新：先清空+隐藏旧节目单条，后台拉官方节目单，有数据才亮底部节目区并按 7 秒计时收起；
-    /// 失败/映射外/无数据静默隐藏（vc53 RefreshEpg 同口径）。</summary>
+    /// 失败/映射外/无数据静默隐藏（vc53 RefreshEpg 同口径）。
+    /// vc82 收编评估（2026-11-16）：不进调度器不过车道——节目单是换台即显的界面直拉路（当前壳序号作废旧账、
+    /// 结果回主线程泵），进调度器会被长轮次（预检轮 10 分钟级）压住晚到不可接受；请求自带 6 秒超时、
+    /// 失败静默、单请求低频，不构成抢网面。开机默认台焐热同理保持内联（开机链路顺序定死，不是后台路）。</summary>
     private void RefreshEpg(Channel ch)
     {
         int seq = ++_epgSeq;
@@ -1184,6 +1231,15 @@ public partial class MainActivity : Activity
         }
     }
 
+    /// <summary>列表页头实时水位（老板令 2026-11-16）：当前会话内核攒着还没播的量（BufferedMs 实时读数），
+    /// 无会话按 0 秒计；随看门狗泵 3 秒一拍跟刷，呼出抽屉即刷不等下一拍。</summary>
+    private void UpdateWaterLevel()
+    {
+        if (_waterLevelText is null) return;
+        long bufferedMs = _manager.Current?.Kernel.BufferedMs ?? 0;
+        _waterLevelText.Text = $"  实时水位:{(int)Math.Round(bufferedMs / 1000.0)}秒";
+    }
+
     private void EnsureWatchdog()
     {
         if (_watchdogRunning) return;
@@ -1197,6 +1253,7 @@ public partial class MainActivity : Activity
                 if (_watchdogStopped) return; // OnDestroy 后停泵（闪退镜黄⑦）：不泄漏 Activity
                 // 抽屉开着画面也在播：自救泵跟会话走，不跟面板键位走（vc53 画面常驻口径）
                 if (_manager.Current is not null) _manager.Tick();
+                if (_listOpen) UpdateWaterLevel(); // 老板令 2026-11-16：抽屉开着实时水位跟刷，数字一直新鲜
                 PumpAudioOnlyGuard(); // #75 音画同出兜底：播放中 5 秒零视频帧即介入（内核 READY 态看门狗覆盖不到）
                 Pump();
             }, 3000);
