@@ -161,6 +161,10 @@ public partial class MainActivity : Activity
         // vc69 坏票不自焚：会话层报 HTTP 状态错（坏票）时作废该端点票据缓存，原地换新票重试一次
         TaoLive.Session.PlaybackSession.TicketCacheInvalidator = (channelId, endpoint) =>
             resolver.Invalidate(channelId, endpoint.Url);
+        // vc87 票据热轮换（内核级，老板拍板「三方案一次到位」）：播放内核 4xx 即刻按失败 URL 反查
+        // 票据缓存换新票同偏移重开，不等会话层自救链——坏票 6 秒循环病灶的另一刀。静态委托进程级单份，
+        // 取票缓存进程级共享（_processResolver），once-block 接线幂等（重复赋值同值）
+        TaoLive.Players.RacingDataSourceFactory.TicketReissuer = url => resolver.ReissueAsync(url);
 
         // 服务图进程级只建一次：会话管理器/内核跨 Recreate 存活（#15 原地换皮的核心——
         // 换档旧路径 Recreate 把播放会话连带销毁，重新取流=真机「切尺寸重连」）
@@ -259,6 +263,7 @@ public partial class MainActivity : Activity
                 if (p95 is not { } ms)
                 {
                     CrashNet.Record("[视频停滞] 出画中 10 秒无视频帧（白屏只出声排查锚点）");
+                    c.NotifyVideoStall(); // vc87 停滞信号接入：记账归会话预防泵，窗内满 2 次预防换线
                     return;
                 }
                 // vc70 慢帧流接线：平稳疑点交会话记账（画面平稳优先令：壳层只埋点，攒满判线归预防泵）——

@@ -117,6 +117,39 @@ public sealed class TicketResolver
         lock (_cacheGate) { _cache.Remove($"{channelKey}|{endpointUrl}"); }
     }
 
+    /// <summary>
+    /// vc87 坏票热轮换（内核级）：播放内核 4xx 时按失败 URL 反查票据缓存——命中即作废旧票
+    /// 并走既有解析链重取新票（key={channelKey}|{endpointUrl}，resolved url=可反查映射的落点）；
+    /// 未命中（直连源无缓存票/已过期被清）返回 null，由内核原样上抛交会话自救。
+    /// channelName 缺失用 channelKey 顶替（ysp/jstv/kankan/cztv 分支不用 channelName，
+    /// nmtv/gxtv 行级匹配对台名单匹配整表行，频道 Id 与行名不保证一致——反查场景宁缺勿错）。
+    /// </summary>
+    public async Task<string?> ReissueAsync(string failingUrl)
+    {
+        string? channelKey = null, endpointUrl = null;
+        lock (_cacheGate)
+        {
+            foreach (var kv in _cache)
+            {
+                if (!string.Equals(kv.Value.Url, failingUrl, StringComparison.Ordinal)) continue;
+                var sep = kv.Key.IndexOf('|');
+                if (sep <= 0) continue;
+                channelKey = kv.Key[..sep];
+                endpointUrl = kv.Key[(sep + 1)..];
+                _cache.Remove(kv.Key); // 作废旧票（ResolveAsync 首查即落缓存，重取无需再清）
+                break;
+            }
+        }
+        if (channelKey is null || endpointUrl is null)
+        {
+            Reporter?.Invoke("[坏票轮换] 播放内核 4xx，票据缓存反查未命中，交会话层自救");
+            return null;
+        }
+        Reporter?.Invoke($"[坏票轮换] {channelKey} 播放内核 4xx，反查票据缓存命中，换新票重开");
+        var endpoint = new SourceEndpoint(endpointUrl, SourceKind.Web, 0);
+        return await ResolveAsync(endpoint, channelKey, channelKey).ConfigureAwait(false);
+    }
+
     // ---- 央视频：cKey 取票（iretcode=0 → playurl；缓存+403 冷却走 YspTicketService） ----
 
     private async Task<string?> ResolveYspAsync(string entryUrl)

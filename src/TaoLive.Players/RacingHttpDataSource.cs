@@ -143,10 +143,20 @@ public sealed class RacingDataSource : Java.Lang.Object, AndroidX.Media3.DataSou
         => _listeners.Add(transferListener!);
 }
 
-/// <summary>竞速数据源工厂：内层即 ExoPlayer 默认 HTTP 工厂口径（默认超时/头纪律原样），创建时包一层竞速壳。</summary>
+/// <summary>竞速数据源工厂：内层即 ExoPlayer 默认 HTTP 工厂口径（默认超时/头纪律原样），创建时包一层竞速壳。
+/// vc87 票据热轮换（内核级）：再包一层换票壳——分片/清单 4xx 即刻换新票同偏移重开，不等会话层自救链
+/// （真机台账：央视频坏票 6 秒即被源端拒→循环主因；内核换票比「报错→换源→重取票」整链快一个数量级）。</summary>
 public sealed class RacingDataSourceFactory : Java.Lang.Object, AndroidX.Media3.DataSource.IDataSourceFactory
 {
-    public AndroidX.Media3.DataSource.IDataSource CreateDataSource() => new RacingDataSource(CreateInner);
+    /// <summary>换票委托（vc87）：参数=失败 URL，返回新票 URL（null=不换，原样上抛交会话自救）。
+    /// 进程级单份，壳层 once-block 接 TicketResolver.ReissueAsync；未接线=不启用（既有契约不变）。</summary>
+    public static Func<string, Task<string?>>? TicketReissuer;
+
+    /// <summary>一片换票封顶（vc87）：同一分片最多换 2 次新票，仍拒即原样上抛——防死票无限重开烧线。</summary>
+    public const int TicketReissueMaxPerOpen = 2;
+
+    public AndroidX.Media3.DataSource.IDataSource CreateDataSource() =>
+        new TicketSwapDataSource(() => new RacingDataSource(CreateInner));
 
     private static AndroidX.Media3.DataSource.IDataSource CreateInner()
     {
@@ -158,4 +168,84 @@ public sealed class RacingDataSourceFactory : Java.Lang.Object, AndroidX.Media3.
         factory.SetReadTimeoutMs(15_000);
         return factory.CreateDataSource()!;
     }
+}
+
+/// <summary>
+/// 换票数据源壳（vc87 票据热轮换，内核级）：包竞速壳工厂，Open 捕获 4xx 级
+/// <see cref="AndroidX.Media3.DataSource.HttpDataSourceInvalidResponseCodeException"/> 即调换票委托取新票，
+/// 同偏移（Position/Length 不变）重开继续拉——坏票不死循环，封顶 <see cref="RacingDataSourceFactory.TicketReissueMaxPerOpen"/>
+/// 次后原样上抛交会话层既有自救（坏票重试/换源）兜底。loader 线程同 RaceInner 口径同步等票。
+/// </summary>
+public sealed class TicketSwapDataSource : Java.Lang.Object, AndroidX.Media3.DataSource.IDataSource
+{
+    private readonly Func<AndroidX.Media3.DataSource.IDataSource> _innerFactory;
+    private readonly List<AndroidX.Media3.DataSource.ITransferListener> _listeners = new();
+    private AndroidX.Media3.DataSource.IDataSource? _inner;
+
+    public TicketSwapDataSource(Func<AndroidX.Media3.DataSource.IDataSource> innerFactory)
+    {
+        _innerFactory = innerFactory ?? throw new ArgumentNullException(nameof(innerFactory));
+    }
+
+    public long Open(AndroidX.Media3.DataSource.DataSpec? dataSpec)
+    {
+        var inner = _innerFactory();
+        _inner = inner;
+        foreach (var l in _listeners) inner.AddTransferListener(l);
+        try
+        {
+            return inner.Open(dataSpec);
+        }
+        catch (AndroidX.Media3.DataSource.HttpDataSourceInvalidResponseCodeException ex)
+            when (ex.ResponseCode is >= 400 and < 500)
+        {
+            var failingUrl = dataSpec?.Uri?.ToString() ?? inner.Uri?.ToString();
+            if (string.IsNullOrEmpty(failingUrl))
+            {
+                throw; // 无失败 URL 可查：无从换票，原样上抛
+            }
+            for (var attempt = 0; attempt < RacingDataSourceFactory.TicketReissueMaxPerOpen; attempt++)
+            {
+                var reissuer = RacingDataSourceFactory.TicketReissuer;
+                if (reissuer is null) throw;
+                // loader 线程同步等票（竞速壳 RaceInner 同口径）：换票是短耗时 HTTP（壳层超时 5s 管着）
+                var fresh = reissuer(failingUrl!).GetAwaiter().GetResult();
+                if (string.IsNullOrEmpty(fresh)) throw; // 未命中/换票失败：原样上抛交会话自救
+                if (dataSpec is not { } spec) throw;
+                // 同偏移重开：Uri 换新票，Position/Length 原样（换缝字节对齐，与竞速壳换缝同纪律）；
+                // 绑定空性标注下链式 setter 触发 CS8602，拆步落局部变量（CreateInner 同款）
+                var builder = new AndroidX.Media3.DataSource.DataSpec.Builder();
+                builder.SetUri(Android.Net.Uri.Parse(fresh));
+                builder.SetPosition(spec.Position);
+                builder.SetLength(spec.Length);
+                var rebased = builder.Build();
+                try
+                {
+                    return inner.Open(rebased);
+                }
+                catch (AndroidX.Media3.DataSource.HttpDataSourceInvalidResponseCodeException ex2)
+                    when (ex2.ResponseCode is >= 400 and < 500)
+                {
+                    // 新票也被拒：封顶内再试一次（票据源侧可能刚发的新票同样短命），耗尽即上抛
+                    failingUrl = fresh; // 封顶内第二次按新票反查（旧票缓存已作废，按旧 URL 反查会落空）
+                }
+            }
+            throw; // 换票封顶仍拒：原样上抛交会话层自救
+        }
+    }
+
+    public int Read(byte[]? buffer, int offset, int count) => _inner!.Read(buffer, offset, count);
+
+    public void Close()
+    {
+        try { _inner?.Close(); } catch { /* 关闭期异常无害 */ }
+        _inner = null;
+    }
+
+    public Android.Net.Uri? Uri => _inner?.Uri;
+
+    public IDictionary<string, IList<string>>? ResponseHeaders => _inner?.ResponseHeaders;
+
+    public void AddTransferListener(AndroidX.Media3.DataSource.ITransferListener? transferListener)
+        => _listeners.Add(transferListener!);
 }
