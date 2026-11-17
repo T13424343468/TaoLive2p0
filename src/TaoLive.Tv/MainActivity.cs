@@ -780,7 +780,9 @@ public partial class MainActivity : Activity
         // 抽屉页头（vc85 施工包5：横排三段挤一行改上下两排——第一行大标题「TaoLive 频道 共N路」，
         // 第二行小字「实时水位：XX秒 · 画面时刻：XX:XX:XX」；横向一个像素不动，外层宽度仍由 ApplyListWidth 钳制）
         var header = new LinearLayout(this) { Orientation = Orientation.Vertical };
-        header.SetPadding(UiScale.Px(48), UiScale.Px(40), UiScale.Px(48), UiScale.Px(8)); // #15 尺寸令
+        // 老板令 2026-11-17：列表整体上移让出台标——顶 padding 40→12，页头两行升到台标上方，
+        // 台标横条不再与水位小字叠字；横向一个像素不动，宽度仍由 ApplyListWidth 钳制
+        header.SetPadding(UiScale.Px(48), UiScale.Px(12), UiScale.Px(48), UiScale.Px(8)); // #15 尺寸令
         var titleRow = new LinearLayout(this) { Orientation = Orientation.Horizontal };
         var title = new TextView(this) { Text = "TaoLive 频道", TextSize = UiScale.Title };
         title.SetTextColor(InkTranslucency.TextPrimary(this));
