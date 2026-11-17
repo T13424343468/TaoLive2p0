@@ -48,6 +48,17 @@ public static class BackgroundLane
     /// 列表抽屉开着压 5 秒（正盯绿点等变绿，快最有价值）、收着列表 0=回 10 秒护画面平稳；0/负值按默认计。</summary>
     public static int PlayingGapOverrideMs { get; set; } = 0;
 
+    /// <summary>水位稳闸（老板 2026-11-17 放行口径定稿）：播放水位连续 15 秒 &gt;15 秒线才判稳；
+    /// 不稳时后台不放行（偷拉主源时主源池同尺）。volatile 读多写一；初值 1=空闲/开机档放行。</summary>
+    private static int _waterStable = 1;
+    public static bool WaterStable => Volatile.Read(ref _waterStable) != 0;
+    public static void SetWaterStable(bool v) => Volatile.Write(ref _waterStable, v ? 1 : 0);
+
+    /// <summary>列表抽屉开着（老板放行口径边界③）：单开一档，不受水位稳全停约束，仍受首帧门控，间隔压 5 秒。</summary>
+    private static int _drawerOpen;
+    public static bool DrawerOpen => Volatile.Read(ref _drawerOpen) != 0;
+    public static void SetDrawerOpen(bool v) => Volatile.Write(ref _drawerOpen, v ? 1 : 0);
+
     /// <summary>空闲档后台单请求最小间隔（毫秒）：至少给 600ms——防极端调用方零节拍打穿车道。</summary>
     public const int IdleGapMs = 600;
 
@@ -64,6 +75,9 @@ public static class BackgroundLane
     public static int PendingWaitMs()
     {
         if (!FirstFrameLanded) return int.MaxValue; // 首帧未落地：无限等（直到 UI 置位）
+        // 水位稳闸（老板放行口径 2026-11-17）：画面在播但水位未稳、抽屉也没开 → 后台全停（无限等）；
+        // 开机/失败档无画面在播天然放行（Playing=false 不进此支）；抽屉开单开一档不受全停。
+        if (Playing && !WaterStable && !DrawerOpen) return int.MaxValue;
         int gap = Playing
             ? (PlayingGapOverrideMs > 0 ? PlayingGapOverrideMs : PlayingGapMs)
             : Math.Max(0, IdleGapOverrideMs);
@@ -112,6 +126,11 @@ public static class BackgroundLane
             }
             // 首帧门控：未落地时零后台网络（含排队中的也不放行）
             while (!FirstFrameLanded)
+            {
+                await Task.Delay(500, ct).ConfigureAwait(false);
+            }
+            // 水位稳闸（vc86 放行口径）：同 PendingWaitMs——画面在播水位未稳、抽屉没开，全停等待
+            while (Playing && !WaterStable && !DrawerOpen)
             {
                 await Task.Delay(500, ct).ConfigureAwait(false);
             }

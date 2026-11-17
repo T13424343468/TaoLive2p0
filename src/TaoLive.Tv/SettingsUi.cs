@@ -57,6 +57,14 @@ public partial class MainActivity
         }
     }
 
+    /// <summary>慢连宽限提示（vc86 F7 老板令）：宽限窗挂「正在换信号」OSD——用户知道在原地等慢源，不是死机；
+    /// 仅前台会话亮条，热备/让位会话不弹（文案单点 SwitchHud.Connecting，自动消隐 ≤2 秒语义同致）。</summary>
+    private void OnSessionSlowGrace(object? sender)
+    {
+        if (sender is PlaybackSession s && ReferenceEquals(s, _manager.Current))
+            ShowToast(TaoLive.Session.SwitchHud.Connecting);
+    }
+
     // —— ⑨「去系统设置」三级跳（v1.0.9 拍板口径）：对口设置页 → 系统设置总入口 → 文字指引 ——
 
     private void OpenSystemSettings()

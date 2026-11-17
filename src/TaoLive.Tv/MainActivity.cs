@@ -97,7 +97,10 @@ public partial class MainActivity : Activity
     private static Channel? _prefetchPending;               // 邻台预取待办台：换台即换代换台，Work 执行时读最新（快速连切只取最后一代）
     internal static MainActivity? Shell;                    // 进程级壳引用：内核/会话回调统一指向当前实例
     private static EventHandler<FailoverEventArgs>? _failoverRelay; // 换源回调转接器：进程级唯一（幂等 -=/+=），换壳不双收
-    private static readonly HttpClient PrecheckHttp = new() { Timeout = TimeSpan.FromSeconds(5) };
+    private static EventHandler? _slowGraceRelay; // 慢连宽限回调转接器（vc86 F7）：宽限窗挂「正在换信号」提示，换壳不双收
+    // vc86 C 预检对齐（老板令 F4 拍板）：5s→8s——内核连接超时 12s/读超时 15s 已放宽，预检先行超时
+    // 会把「慢而通」的源探成死票错标；8s 与死循环方案 F4 预检超时对齐，慢源不再被预检抢杀
+    private static readonly HttpClient PrecheckHttp = new() { Timeout = TimeSpan.FromSeconds(8) };
 
     // ---- vc82 统一调度器（方案三，老板拍板单开工程）：后台各路活全部登记排班，自跑循环退役 ----
     // 排班归调度器（谁先谁后、轮次串行），车道纪律由各路活内部逐请求自过（绝不并发）——两层职责正交互为保险。
@@ -464,6 +467,10 @@ public partial class MainActivity : Activity
         _failoverRelay ??= (s, e2) => Shell?.OnSessionFailover(s, e2);
         e.Session.Failover -= _failoverRelay;
         e.Session.Failover += _failoverRelay;
+        // vc86 F7：慢连宽限窗亮「正在换信号」——宽限期如实告知，不让用户误判黑屏死机（仅前台会话亮）
+        _slowGraceRelay ??= (s, _) => Shell?.OnSessionSlowGrace(s);
+        e.Session.SlowGraceStarted -= _slowGraceRelay;
+        e.Session.SlowGraceStarted += _slowGraceRelay;
         if (e.Session != _manager.Current) return;
         if (e.State == PlaybackState.Failed)
         {
@@ -856,6 +863,7 @@ public partial class MainActivity : Activity
         EnforceSingleWindow(); // #64 窗口唯一令：开新先关旧（抽屉与设置/弹窗/子页面板互斥）
         _listOpen = true;
         BackgroundLane.PlayingGapOverrideMs = 5000; // 老板令 2026-11-16 让路间隔：抽屉开着正盯绿点，压到 5 秒快变绿
+        BackgroundLane.SetDrawerOpen(true); // vc86 放行口径边界③：抽屉开着单开一档，不受水位稳全停（仍受首帧门控+5 秒间隔）
         _playerPage.Visibility = ViewStates.Visible;
         _listPage.Visibility = ViewStates.Visible;
         _onPlayerPage = false;
@@ -878,6 +886,7 @@ public partial class MainActivity : Activity
     {
         _listOpen = false;
         BackgroundLane.PlayingGapOverrideMs = 0; // 抽屉收起回默认 10 秒：没人盯绿点，画面平稳优先
+        BackgroundLane.SetDrawerOpen(false); // vc86：抽屉档随收起撤销，水位稳闸恢复全口径
         _listPage.Visibility = ViewStates.Gone;
         _playerPage.Visibility = ViewStates.Visible;
         _onPlayerPage = true;
@@ -967,7 +976,25 @@ public partial class MainActivity : Activity
                     using var req = new HttpRequestMessage(HttpMethod.Get, ep.Url);
                     req.Headers.Range = new System.Net.Http.Headers.RangeHeaderValue(0, 8191);
                     using var res = await PrecheckHttp.SendAsync(req).ConfigureAwait(false);
-                    if ((int)res.StatusCode < 400) return true;
+                    if ((int)res.StatusCode < 400)
+                    {
+                        // vc86 老板令·广告源剔除（央六慢连跳广告源实锤）：内容校验——读分片首字节，
+                        // 首个非空白字节是 '<' 即 HTML 广告壳（真源是 #EXTM3U/0x47 二进制），判死落下一源
+                        var head = await res.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
+                        byte first = 0;
+                        foreach (var b in head)
+                        {
+                            if (!char.IsWhiteSpace((char)b)) { first = b; break; }
+                        }
+                        if (first == (byte)'<')
+                        {
+                            CrashNet.Record($"[探活] {ch.Name} 直连探活命中 HTML 广告壳（{HostOf(ep)}），判死");
+                        }
+                        else
+                        {
+                            return true;
+                        }
+                    }
                     CrashNet.Record($"[探活] {ch.Name} 直连探活 HTTP {(int)res.StatusCode}（{HostOf(ep)}）");
                 }
             }
@@ -1396,9 +1423,42 @@ public partial class MainActivity : Activity
     private string EpgNowLine(string clock) => (_epgNowTitle is { } title ? $"{title}  ·  " : "") + $"画面时刻：{clock}";
 
     private bool _waterPumpRunning;
+    private long? _stableSinceMs; // 水位连续高于 15 秒线的起算点（TickCount64 口径）
+
+    /// <summary>水位稳判据（老板放行口径 2026-11-17 定稿）：连续 15 秒 &gt; 15 秒线——线与窗都是 15 秒，一把尺。</summary>
+    private const long WaterStableLineMs = 15_000;
+    private const long WaterStableWindowMs = 15_000;
+
+    /// <summary>水位稳驱动（vc86 放行口径，秒泵每拍驱动）：会话不在播=开机/空闲/失败档放行（边界①）并清账；
+    /// 在播但读数不可靠=判稳窗冻结（边界④：不推进不清零）；读数连续 15 秒&gt;15 秒线才判稳，掉线即清账。
+    /// 判稳期间偷拉主源由 StealthPipeline 让路闸同尺暂停（F3 修：防 15s 线振荡活锁）。</summary>
+    private void UpdateWaterStable()
+    {
+        var session = _manager.Current;
+        if (session is null || session.State != PlaybackState.Playing)
+        {
+            _stableSinceMs = null;
+            BackgroundLane.SetWaterStable(true); // 无画面在播：后台不憋，开机档放行
+            return;
+        }
+        long? bufferedMs = BufferedMsNow();
+        if (bufferedMs is null) return; // 判稳窗冻结：读数不可靠，不推进不清零
+        if (bufferedMs.Value > WaterStableLineMs)
+        {
+            _stableSinceMs ??= System.Environment.TickCount64;
+            if (System.Environment.TickCount64 - _stableSinceMs.Value >= WaterStableWindowMs)
+                BackgroundLane.SetWaterStable(true); // 满窗判稳：放行
+        }
+        else
+        {
+            _stableSinceMs = null;
+            BackgroundLane.SetWaterStable(false); // 未稳：后台全停（抽屉档另行单开）
+        }
+    }
 
     /// <summary>水位独立秒泵（vc85 水位跟手令，老板拍板「每秒都能看到最新变化」）：
     /// 从 3 秒自救泵摘出，1 秒一拍跟刷水位；只在抽屉开着时干活，收抽屉空转一拍即歇。
+    /// vc86：同一拍驱动水位稳闸（放行口径），UI 与车道读同一把尺。
     /// 停泵跟自救泵同一旗（OnDestroy 后不泄漏）。</summary>
     private void EnsureWaterPump()
     {
@@ -1410,6 +1470,7 @@ public partial class MainActivity : Activity
             _main.PostDelayed(() =>
             {
                 if (_watchdogStopped) return; // OnDestroy 后停泵：不泄漏 Activity
+                UpdateWaterStable(); // vc86：每拍驱动放行闸（在 UI 刷数之前，车道先知稳不稳）
                 if (_listOpen) UpdateWaterLevel();
                 else UpdateEpgClock(); // EPG 播放页联动令：抽屉关着时节目单条画面时刻秒级跟刷（抽屉开着节目单条已收起，无需刷）
                 PumpWater();

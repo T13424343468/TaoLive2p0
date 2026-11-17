@@ -229,8 +229,11 @@ public sealed class StealthPipeline
                     }
                 }
             }
-            // 起下一发：闸门全开（前台水位足 + 余量因子非零）且池未满才偷
-            bool gateOpen = _gateStockMs >= GatherGateMs && _allowFactor > 0;
+            // 起下一发：闸门全开（前台水位足 + 余量因子非零）且池未满才偷；
+            // vc86 F3 让路闸（放行口径同尺）：前台画面在播但水位未稳时偷拉暂停——判稳窗不抽水，
+            // 防 15s 线振荡活锁（偷拉压低前台读数→永不判稳→偷拉又停→读数回升→循环）
+            bool gateOpen = _gateStockMs >= GatherGateMs && _allowFactor > 0
+                && (!BackgroundLane.Playing || BackgroundLane.WaterStable);
             long depthCap = Math.Min((long)(MaxPoolDepthMs * _allowFactor), (long)MaxPoolDepthMs);
             if (gateOpen && _inFlight is null && _pooledMs + SegmentPeriodMs <= depthCap)
             {
