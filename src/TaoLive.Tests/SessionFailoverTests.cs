@@ -63,8 +63,10 @@ public class SessionFailoverTests
     [Fact]
     public void Open_timeout_on_last_endpoint_fires_all_failed_with_reason()
     {
+        // vc87 进度闸：零进度看门狗超时=真死，不再吃慢连宽限，直接切线——
+        // 两路全零进度时两拍内即全耗尽（坏票 6 秒循环病灶根修后的快切口径）。
         var clock = new FixedClock(T0);
-        var player = new LoggingPlayer();
+        var player = new LoggingPlayer(); // 零增长：真死
         var session = new PlaybackSession(player, clock) { OpenTimeout = TimeSpan.FromSeconds(5) };
         var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8");
         session.ChangeChannel(ch);
@@ -72,19 +74,11 @@ public class SessionFailoverTests
         AllSourcesFailedEventArgs? args = null;
         session.AllSourcesFailed += (_, e) => args = e;
         clock.Advance(TimeSpan.FromSeconds(5));
-        Assert.True(session.CheckWatchdog()); // 第一路 open 超时 → vc86 慢源宽限 B 先原地重试
-        Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url); // 宽限 1/2
-
-        clock.Advance(TimeSpan.FromSeconds(5));
-        Assert.True(session.CheckWatchdog());
-        Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url); // 宽限 2/2
-
-        clock.Advance(TimeSpan.FromSeconds(5));
-        Assert.True(session.CheckWatchdog()); // 预算耗尽 → 切第二路
+        Assert.True(session.CheckWatchdog()); // 第一路 open 超时：零进度不进宽限（vc87 进度闸）
         Assert.Equal("https://s/b.m3u8", session.CurrentEndpoint?.Url);
 
         clock.Advance(TimeSpan.FromSeconds(5));
-        Assert.True(session.CheckWatchdog()); // 第二路也超时（预算不跨端点重记）→ 全耗尽
+        Assert.True(session.CheckWatchdog()); // 第二路也超时（不重记宽限机会）→ 全耗尽
         Assert.Equal(PlaybackState.Failed, session.State);
         Assert.NotNull(args);
         Assert.Equal("cctv1", args!.ChannelId);
@@ -164,14 +158,11 @@ public class SessionFailoverTests
         clock.Advance(TimeSpan.FromSeconds(11));
         Assert.False(session.CheckWatchdog()); // 11 秒不切（旧 3 秒窗这里已经误杀慢热源）
         clock.Advance(TimeSpan.FromSeconds(1));
-        Assert.True(session.CheckWatchdog()); // 满 12 秒判死窗到点：vc86 慢源宽限 B，先原地宽限重试
-        Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url); // 宽限 1/2
-        clock.Advance(TimeSpan.FromSeconds(12));
-        Assert.True(session.CheckWatchdog());
-        Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url); // 宽限 2/2
-        clock.Advance(TimeSpan.FromSeconds(12));
-        Assert.True(session.CheckWatchdog()); // 预算耗尽：真死照常判死切线
+        Assert.True(session.CheckWatchdog()); // 满 12 秒判死窗到点：零进度不进宽限（vc87 进度闸），直接切线
         Assert.Equal("https://s/b.m3u8", session.CurrentEndpoint?.Url);
+        clock.Advance(TimeSpan.FromSeconds(12));
+        Assert.True(session.CheckWatchdog()); // 第二路同样零进度真死 → 全耗尽
+        Assert.Equal(PlaybackState.Failed, session.State);
     }
 
     [Fact]
@@ -235,6 +226,7 @@ public class SessionFailoverTests
     public void Ticket_retry_grace_keeps_watchdog_off_until_grace_ends()
     {
         // vc69 宽限窗定标：取票 5s+内核连接 8s+余量 3s=16 秒；期满了仍零增长才是真死。
+        // vc87 进度闸：期满零进度不再吃慢连宽限预算（零进度=真死快切），照旧判死切线。
         var clock = new FixedClock(T0);
         var player = new LoggingPlayer(); // 零增长
         var session = new PlaybackSession(player, clock);
@@ -250,16 +242,9 @@ public class SessionFailoverTests
             Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url);
 
             clock.Advance(TimeSpan.FromSeconds(1));
-            Assert.True(session.CheckWatchdog()); // 16 秒期满：仍零增长先原地宽限重试（vc86 慢源宽限 B，同账同口径）
-            Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url); // 宽限 1/2
-
-            clock.Advance(TimeSpan.FromSeconds(12));
-            Assert.True(session.CheckWatchdog());
-            Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url); // 宽限 2/2
-
-            clock.Advance(TimeSpan.FromSeconds(12));
-            Assert.True(session.CheckWatchdog()); // 预算耗尽：真死照常判死切线
+            Assert.True(session.CheckWatchdog()); // 16 秒期满：零进度不进慢连宽限（vc87 进度闸），照旧判死切线
             Assert.Equal("https://s/b.m3u8", session.CurrentEndpoint?.Url);
+            Assert.Equal(1, session.FailoverCount);
         }
         finally { PlaybackSession.TicketCacheInvalidator = null; }
     }
@@ -307,8 +292,10 @@ public class SessionFailoverTests
     {
         // vc86 慢源宽限 B（老板令）：内核超时类报错先原地宽限重试，预算封顶 2 次；耗尽走既有换源，
         // 真死不无限原地打转（F2 预算闸）。慢连宽限触发同步挂 SlowGraceStarted（F7「正在换信号」提示源）。
+        // vc87 进度闸：宽限的前提=内核仍有进度（存货>0 或在灌）——本用例给 2s 存货模拟「慢而通」；
+        // 零进度快切契约见 Zero_progress_timeout_error_skips_grace_and_fails_over。
         var clock = new FixedClock(T0);
-        var player = new LoggingPlayer();
+        var player = new LoggingPlayer { BufferedMs = 2_000 }; // 有进度：慢而通，准进宽限
         var session = new PlaybackSession(player, clock);
         var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8");
         session.ChangeChannel(ch);
@@ -327,6 +314,80 @@ public class SessionFailoverTests
         Assert.Equal("https://s/b.m3u8", session.CurrentEndpoint?.Url);
         Assert.Equal(1, session.FailoverCount);
         Assert.Equal(2, graceCount); // F7：宽限触发即提示位信号，耗尽切线不再触发
+    }
+
+    [Fact]
+    public void Zero_progress_timeout_error_skips_grace_and_fails_over()
+    {
+        // vc87 进度闸（老板拍板「三方案一次到位」，坏票 6 秒循环病灶根修）：
+        // 零进度（零存货+3 秒内零增长）的超时类错误=真死，不进慢连宽限白等 2×24s，直接换源快切。
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer(); // 零增长：源端即拒
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8");
+        session.ChangeChannel(ch);
+        var graceCount = 0;
+        session.SlowGraceStarted += (_, _) => graceCount++;
+
+        player.RaiseError("ERROR_CODE_IO_NETWORK_TIMEOUT"); // 零进度：宽限闸不放行
+        Assert.Equal("https://s/b.m3u8", session.CurrentEndpoint?.Url); // 直接换源
+        Assert.Equal(1, session.FailoverCount);
+        Assert.Equal(0, graceCount); // 全程零宽限
+    }
+
+    [Fact]
+    public void Video_stall_signal_trips_proactive_failover()
+    {
+        // vc87 停滞信号接入（老板拍板「三方案一次到位」）：壳层「出画中 10 秒零视频帧」锚点
+        // 交会话记账，滚动窗内满 2 次即预防换线（判据④），与库存/欠载/慢帧并列。
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer { BufferedMs = 30_000 }; // 库存足：排除其余三判据
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8");
+        session.ChangeChannel(ch);
+        player.RaiseFirstFrame();
+
+        session.NotifyVideoStall(); // 第 1 次停滞：不切
+        Assert.False(session.CheckProactiveFailover());
+        clock.Advance(TimeSpan.FromSeconds(10));
+        session.NotifyVideoStall(); // 第 2 次停滞：坐实坏线
+        Assert.True(session.CheckProactiveFailover());
+        Assert.Equal(1, session.FailoverCount);
+        Assert.Equal("https://s/b.m3u8", session.CurrentEndpoint?.Url);
+
+        // 介入后账清零：新线重新起账，老账不跟去新线
+        clock.Advance(TimeSpan.FromSeconds(10));
+        Assert.False(session.CheckProactiveFailover());
+    }
+
+    [Fact]
+    public void Short_ticket_error_enters_quality_ledger_and_downweights_sort()
+    {
+        // vc87 票账降权（老板拍板「三方案一次到位」）：端点起播 15 秒内即报 HTTP 错=短命坏票，
+        // 实测账上账（封顶 4 条每条 +250，拟口径待老板复核），排序降权不给头名。
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer();
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8");
+        session.ChangeChannel(ch);
+        var book = new QualityHealthStore();
+        session.QualityBook = book;
+        PlaybackSession.TicketCacheInvalidator = (_, _) => { };
+        try
+        {
+            clock.Advance(TimeSpan.FromSeconds(6)); // 坏票 6 秒即被源端拒（真机台账口径）
+            player.RaiseError("ERROR_CODE_IO_BAD_HTTP_STATUS");
+
+            var entry = book.Peek("", "cctv1", "https://s/a.m3u8"); // 账键序=EpgKey|SourceId|endpointUrl（实测账三级键口径）
+            Assert.NotNull(entry);
+            Assert.Equal(1, entry!.ShortTicketCount);
+
+            // 短命票降权可见：同底账下带短票的端点排序分高于干净端点
+            long dirty = QualityHealthStore.SortScore(entry, probeDead: false);
+            long clean = QualityHealthStore.SortScore(book.Peek("", "cctv1", "https://s/b.m3u8"), probeDead: false);
+            Assert.Equal(250, dirty - clean);
+        }
+        finally { PlaybackSession.TicketCacheInvalidator = null; }
     }
 
     [Fact]

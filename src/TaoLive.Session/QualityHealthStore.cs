@@ -21,6 +21,7 @@ public sealed class QualityHealthEntry
     public bool BlindZone;       // 盲区标记：非 .m3u8 直流/事后判定无时间锚的源「天然贴边」（微卡修法三条③）
     public long MicrolagLastMs;  // 最近一次微卡记账（单调毫秒，衰减基准）
     public long BadFrames;       // 累计坏帧（六项优化⑥：内核视频故障/慢帧疑点折算，只记不判，排序降权口径归 SortScore）
+    public long ShortTicketCount; // 短命票计数（vc87 票账降权：起播短窗内即报 HTTP 错的坏票，排序降权口径归 SortScore）
 }
 
 /// <summary>
@@ -103,6 +104,14 @@ public sealed class QualityHealthStore
         lock (e) e.BadFrames += count;
     }
 
+    /// <summary>短命票上账（vc87 票账降权）：端点起播短窗内即报 HTTP 状态错=短命坏票
+    /// （真机台账：央视频坏票 6 秒即被源端拒），只记不判，择路降权归排序合成。</summary>
+    public void ReportShortTicket(string epgKey, string sourceId, string endpointUrl)
+    {
+        var e = _entries.GetOrAdd(Key(epgKey, sourceId, endpointUrl), k => new QualityHealthEntry { K = k });
+        lock (e) e.ShortTicketCount++;
+    }
+
     /// <summary>是否盲区源（蓝本口径：URL 不含 .m3u8 即直流盲区；时间锚事后判定由播放侧补记）。</summary>
     public static bool IsBlindZoneUrl(string url) =>
         !string.IsNullOrWhiteSpace(url) && !url.Contains(".m3u8", StringComparison.OrdinalIgnoreCase);
@@ -111,6 +120,8 @@ public sealed class QualityHealthStore
     /// 排序分（纯函数，越小越优先）。合成口径（README 需求记档 95 行待细化③）：
     /// 最近实测成功优先（-80）&gt; 微卡降权（每坐实 +120）&gt; 坏帧降权（每帧 +2，封顶 +240=两张微卡，
     /// 出厂理由：坏帧是画面级证据但单事件有噪声，上限防一次解码炸账压过多次微卡）&gt;
+    /// 短命票降权（vc87：每条 +250，封顶 4 条=+1000——坏票是取流层硬证据但单事件有噪声，
+    /// 拟口径待老板复核，封顶防一次坏票风暴压过盲区档）&gt;
     /// 盲区天然贴边（+500，排序不给头名）；
     /// 探活账 Dead 由调用方再叠加沉底项。观察档（共族垫底）沿用注册表先例，由源序在稳定序兜底。
     /// </summary>
@@ -122,6 +133,7 @@ public sealed class QualityHealthStore
         if (e.BlindZone) score += 500;
         score += e.MicrolagCount * 120;
         score += Math.Min(e.BadFrames, 120) * 2;
+        score += Math.Min(e.ShortTicketCount, 4) * 250; // vc87 短命票降权：封顶 4 条（拟口径待老板复核）
         if (e.LastGoodUtcMs > 0
             && DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - e.LastGoodUtcMs <= (long)RecentGoodBonus.TotalMilliseconds)
         {

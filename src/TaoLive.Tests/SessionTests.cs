@@ -592,16 +592,12 @@ public class SessionTests
         clock.Advance(TimeSpan.FromSeconds(14));
         Assert.False(session.CheckWatchdog());
         clock.Advance(TimeSpan.FromSeconds(2));
-        Assert.True(session.CheckWatchdog()); // 判死窗到点：vc86 慢源宽限 B 先原地重试，不崩
-        Assert.Equal(PlaybackState.Buffering, session.State);
-        Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url); // 宽限 1/2
-        clock.Advance(TimeSpan.FromSeconds(15));
-        Assert.True(session.CheckWatchdog());
-        Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url); // 宽限 2/2
-        clock.Advance(TimeSpan.FromSeconds(15));
-        Assert.True(session.CheckWatchdog()); // 预算耗尽切线
+        Assert.True(session.CheckWatchdog()); // 判死窗到点：零进度不进宽限（vc87 进度闸），直接切线不崩
         Assert.Equal(PlaybackState.Buffering, session.State);
         Assert.Equal("https://s/b.m3u8", session.CurrentEndpoint?.Url);
+        clock.Advance(TimeSpan.FromSeconds(15));
+        Assert.True(session.CheckWatchdog()); // 第二路同样零进度真死 → 全耗尽
+        Assert.Equal(PlaybackState.Failed, session.State);
     }
 
     [Fact]
@@ -785,17 +781,14 @@ public class SessionTests
         manager.SwitchTo(ch2);
 
         clock.Advance(TimeSpan.FromSeconds(30));
-        manager.Tick(); // 判死窗到点：vc86 慢源宽限 B 先原地重试
+        manager.Tick(); // 判死窗到点：零进度不进宽限（vc87 进度闸），直接切线
         Assert.Equal(PlaybackState.Buffering, manager.Current!.State);
-        Assert.Equal("https://s/b.m3u8", manager.Current.CurrentEndpoint?.Url); // 宽限 1/2
-
-        clock.Advance(TimeSpan.FromSeconds(12));
-        manager.Tick();
-        Assert.Equal("https://s/b.m3u8", manager.Current.CurrentEndpoint?.Url); // 宽限 2/2
-
-        clock.Advance(TimeSpan.FromSeconds(12));
-        manager.Tick(); // 预算耗尽切线
         Assert.Equal("https://s/b2.m3u8", manager.Current.CurrentEndpoint?.Url);
+
+        clock.Advance(TimeSpan.FromSeconds(12));
+        manager.Tick(); // 末路同样零进度真死 → 全耗尽
+        Assert.Equal(PlaybackState.Failed, manager.Current.State);
+        Assert.Equal("https://s/b2.m3u8", manager.Current.CurrentEndpoint?.Url); // 耗尽路径不改线路账（空态交壳层）
         Assert.Equal(PlaybackState.Idle, manager.TryGet("cctv1")!.State);
     }
 

@@ -55,6 +55,16 @@ public sealed class PlaybackSession
     private bool _freshTicketRetried;
     private long? _ticketRetrySinceMs;
 
+    // vc87 票账降权（老板拍板「三方案一次到位」）：端点起播时刻账——起播后 ShortTicketGraceMs 内
+    // 即报 HTTP 状态错=短命票（拿到票 6 秒就被源端拒的坏票循环病灶），实测账降权不给头名。
+    private long? _endpointStartedAtMs;
+
+    /// <summary>短命票判据窗（vc87，拟口径待老板复核）：端点起播后 15 秒内报 HTTP 错即记短命票降权。</summary>
+    public const int ShortTicketGraceMs = 15_000;
+
+    /// <summary>端点起播打点（vc87 票账降权）：全部播放点统一调用，记当前线路起播时刻（单调钟）。</summary>
+    private void MarkEndpointStarted() => _endpointStartedAtMs = _clock.NowMs;
+
     /// <summary>坏票重试宽限窗（vc69）：零增长判死账在此窗内让路——换新票全程=取票 HttpClient 超时
     /// 最长 5 秒 + 内核连接超时 8 秒 + 余量 3 秒=16 秒（期满了还在零增长才是真死，照常判死切线）。</summary>
     public static readonly TimeSpan TicketRetryGrace = TimeSpan.FromSeconds(16);
@@ -316,12 +326,14 @@ public sealed class PlaybackSession
         _proactiveCount = 0; // vc67：新一轮起播（含 OK 重试）重给预防介入预算
         _stallTimes.Clear(); // vc73 审查清零 P2：新一轮起播重新起账（含 OK 重试），同线重试不背旧疑点账——与换台/换线/自救清账同口径
         _smoothnessTimes.Clear();
+        _videoStallTimes.Clear(); // vc87：停滞账同口径清零
         _freshTicketRetried = false; // vc69：新一轮起播重记坏票重试机会
         _ticketRetrySinceMs = null;
         _slowGraceCount = 0; // vc86：新一轮起播慢连宽限重新给满（不背旧台旧轮账）
         _microlagSeekAtMs = null; // 微卡回退防振铃账随新起播清零（同欠载账口径）
         Transition(PlaybackState.Buffering, "start requested");
         MarkBlindZoneIfAny(p.Endpoint); // 盲区标记（微卡修法三条③）：非 .m3u8 直流源天然贴边，实测账降权不给头名
+        MarkEndpointStarted(); // vc87 票账降权：端点起播打点
         _player.Play(p);
         ReattachSurface();
     }
@@ -366,9 +378,11 @@ public sealed class PlaybackSession
         _proactiveCount = 0; // vc67：换台重给预防介入预算
         _stallTimes.Clear(); // 欠载趋势账随换台清零（老板令 #26）：账只记本台画质，不跟人走
         _smoothnessTimes.Clear(); // vc70：平稳疑点账同口径，换台清零不跟人走
+        _videoStallTimes.Clear(); // vc87：停滞账同口径清零
         _microlagSeekAtMs = null; // 微卡回退防振铃账随换台清零（同口径）
         Transition(PlaybackState.Buffering, "change channel");
         MarkBlindZoneIfAny(_queue[0]); // 盲区标记（微卡修法三条③）：同口径，换台起播首路即标
+        MarkEndpointStarted(); // vc87 票账降权：端点起播打点
         _player.Play(new PlaybackParams(channel, _queue[0], _preferLowLatency));
         ReattachSurface();
     }
@@ -448,8 +462,10 @@ public sealed class PlaybackSession
         _proactiveCount = 0; // vc67：手动换线=老板意图，重给预防介入预算
         _stallTimes.Clear(); // 手动换线：欠载账随线清零
         _smoothnessTimes.Clear(); // vc70：平稳账随线清零
+        _videoStallTimes.Clear(); // vc87：停滞账同口径清零
         _microlagSeekAtMs = null; // 微卡回退防振铃账随线清零（同口径）
         Transition(PlaybackState.Buffering, bufferingTag);
+        MarkEndpointStarted(); // vc87 票账降权：端点起播打点
         _player.Play(new PlaybackParams(startedChannel, _queue[endpointIndex], _preferLowLatency));
         ReattachSurface();
     }
@@ -594,6 +610,21 @@ public sealed class PlaybackSession
         _smoothnessTimes.Add(nowMs);
     }
 
+    /// <summary>视频停滞信号窗（vc87 老板拍板「停滞信号接入」）：与欠载账同窗（StallChurnWindow 5min）。</summary>
+    public const int VideoStallThreshold = 2; // 窗内停滞满 2 次即坐实坏线（比欠载账严：真停滞比短卡流更毒）
+
+    private readonly List<long> _videoStallTimes = new();
+
+    /// <summary>视频停滞记账（vc87）：壳层「出画中 10 秒零视频帧」锚点上报，只记账不决策——
+    /// 滚动窗内攒满即交预防泵换线（判据④），与库存/欠载/慢帧三判据并列。</summary>
+    public void NotifyVideoStall()
+    {
+        if (!_active || _state != PlaybackState.Playing) return; // 停滞锚点只在出画期有意义
+        var nowMs = _clock.NowMs;
+        _videoStallTimes.RemoveAll(t => nowMs - t >= StallChurnWindow.TotalMilliseconds);
+        _videoStallTimes.Add(nowMs);
+    }
+
     /// <summary>
     /// 断流自愈（真机反馈批#5 修 2026-11-15）：Reconnecting 中内核恢复出帧（OnBufferingEnd）即回 Playing，
     /// 看门狗计时账随之清零——好画面不因历史卡流被误杀。Buffering 态（起播期）收 End 走 NotifyFirstFrame 正门，不进此路。
@@ -634,6 +665,7 @@ public sealed class PlaybackSession
                 {
                     // 轻试探活：只重放队首一拍（既有播放重试路径），不重开限速账不重记坏票账
                     Transition(PlaybackState.Buffering, "self-heal reprobe");
+                    MarkEndpointStarted(); // vc87 票账降权：轻试探活也是端点起播
                     _player.Play(new PlaybackParams(probeChannel, _queue[0], _preferLowLatency));
                     ReattachSurface();
                 }
@@ -645,6 +677,7 @@ public sealed class PlaybackSession
             SessionTrace.Emit($"[自愈] {DescribeChannel()} 全断退避重试第 {_selfHealAttempts}/{SelfHealMaxAttempts} 次（下一档 {nextDelay.TotalSeconds:0}s 节奏），从头慢轮");
             _stallTimes.Clear();
             _smoothnessTimes.Clear();
+            _videoStallTimes.Clear(); // vc87：停滞账同口径清零
             _lightErrorTimes.Clear();
             _autoFailoverTimes.Clear(); // 自愈慢轮重开一轮限速账，慢试不受旧窗拖累
             _endpointIndex = 0; // 从头慢轮：整条队列重试，源头可能已缓过来
@@ -653,6 +686,7 @@ public sealed class PlaybackSession
             Transition(PlaybackState.Buffering, $"self-heal retry #{_selfHealAttempts}");
             if (_channel is { } healChannel && _queue.Count > 0)
             {
+                MarkEndpointStarted(); // vc87 票账降权：自愈慢轮重试也是端点起播
                 _player.Play(new PlaybackParams(healChannel, _queue[0], _preferLowLatency));
                 ReattachSurface();
             }
@@ -824,6 +858,11 @@ public sealed class PlaybackSession
         _smoothnessTimes.RemoveAll(t => nowMs - t >= SmoothnessSuspectWindow.TotalMilliseconds);
         bool smoothnessTripped = _smoothnessTimes.Count >= SmoothnessSuspectThreshold;
 
+        // 判据④（vc87 老板拍板「停滞信号接入」）：滚动窗内视频停滞满 2 次——出画中 10 秒零帧，
+        // 音画同源下比短卡流更毒，壳层停滞锚点已接 NotifyVideoStall，此处并入预防判线
+        _videoStallTimes.RemoveAll(t => nowMs - t >= StallChurnWindow.TotalMilliseconds);
+        bool stallTripped = _videoStallTimes.Count >= VideoStallThreshold;
+
         long bufferedMs = _player.BufferedMs;
         bool lowInventory = bufferedMs > 0 && bufferedMs < ProactiveInventoryFloor.TotalMilliseconds;
         if (!lowInventory)
@@ -840,14 +879,16 @@ public sealed class PlaybackSession
             _lowInventoryLastAtMs = nowMs;
         }
         bool inventoryTripped = lowInventory && _inventoryEverFilled && _lowInventoryRounds >= 2;
-        if (!churnTripped && !inventoryTripped && !smoothnessTripped)
+        if (!churnTripped && !inventoryTripped && !smoothnessTripped && !stallTripped)
         {
-            return false; // 三条判据都没坐实：单次抖动不切，等趋势
+            return false; // 四条判据都没坐实：单次抖动不切，等趋势
         }
         _lowInventoryRounds = 0;
         _proactiveCount++; // vc67：预防介入记账，到顶退场（慢网烧线病根）
         // 预防打点（老板令 #24/#26）：主动介入的账面依据——命中哪条判据、账面多少、切前是第几路线
-        string basis = churnTripped
+        string basis = stallTripped
+            ? $"滚动窗 {StallChurnWindow.TotalMinutes:0}min 内视频停滞 {_videoStallTimes.Count} 次（满 {VideoStallThreshold} 次）"
+            : churnTripped
             ? $"滚动窗 {StallChurnWindow.TotalMinutes:0}min 内卡流 {_stallTimes.Count} 次（满 {StallChurnThreshold} 次）"
             : smoothnessTripped
                 ? $"滚动窗 {SmoothnessSuspectWindow.TotalSeconds:0}s 内平稳疑点 {_smoothnessTimes.Count} 次（满 {SmoothnessSuspectThreshold} 次，慢帧流坏线）"
@@ -855,6 +896,7 @@ public sealed class PlaybackSession
         SessionTrace.Emit($"[预防] {DescribeChannel()} {basis}，预防性换源（原线路 {CurrentLineIndex + 1}/{LineCount}，不等卡流超时）");
         _stallTimes.Clear(); // 介入一次清一次账：新线重新起账，老账不跟去新线
         _smoothnessTimes.Clear();
+        _videoStallTimes.Clear(); // vc87：停滞账同口径清零
         if (SoftLandingEnabled)
         {
             // 降档软着陆（vc85 蓝本 v2.5，预防性硬切退役）：对齐切原语落点，不吃故障限速闸（四原则3）；
@@ -865,7 +907,8 @@ public sealed class PlaybackSession
         }
         // 走既有自救口径：先归 Failed 再切线（状态机矩阵 Playing 不直跳 Buffering，与看门狗/报错同路）
         Transition(PlaybackState.Failed, "proactive switch");
-        TryFailover(churnTripped ? "stall churn proactive"
+        TryFailover(stallTripped ? "video stall proactive"
+            : churnTripped ? "stall churn proactive"
             : smoothnessTripped ? "slow-frame proactive"
             : "low inventory proactive");
         return true;
@@ -922,11 +965,17 @@ public sealed class PlaybackSession
             _freshTicketRetried = true;
             _ticketRetrySinceMs = _clock.NowMs;
             invalidate(retryChannel.Id, badEndpoint);
+            // vc87 票账降权：端点起播后短窗内即报 HTTP 状态错=短命坏票，实测账降权不给头名
+            if (_endpointStartedAtMs is { } startedAt && _clock.NowMs - startedAt < ShortTicketGraceMs)
+            {
+                QualityBook?.ReportShortTicket(retryChannel.EpgKey, retryChannel.SourceId, badEndpoint.Url);
+            }
             SessionTrace.Emit($"[坏票] {DescribeChannel()} 线路{CurrentLineIndex + 1} HTTP 状态错（{code}），作废票据原地换新票重试（宽限窗 {TicketRetryGrace.TotalSeconds:0}s）");
             // 迁移次序照 TryFailover 口径：Failed 落账后必须回 Buffering 起新一轮——
             // 不回 Buffering 状态机停在 Failed，看门狗失灵、后续报错被终态守卫吞掉（全测 2 例红实锤）
             Transition(PlaybackState.Failed, $"bad ticket {code}");
             Transition(PlaybackState.Buffering, "bad ticket retry");
+            MarkEndpointStarted(); // vc87 票账降权：换新票重开=新起播时刻
             _player.Play(new PlaybackParams(retryChannel, badEndpoint, _preferLowLatency));
             ReattachSurface();
             return;
@@ -967,6 +1016,14 @@ public sealed class PlaybackSession
     private bool TrySlowConnectGrace(string reason)
     {
         if (_channel is null || CurrentEndpoint is null || _queue.Count == 0) return false;
+        // vc87 进度闸（老板拍板「三方案一次到位」，坏票 6 秒循环病灶根修）：宽限前先补采样进度账——
+        // 零存货且 3 秒内零增长=真死（源端即拒），不白等宽限直接走既有换源；
+        // 有存货或正在灌（慢灌让路口径与 vc67 同账）才准进宽限，慢而通不切线。
+        var nowMs = _clock.NowMs;
+        SampleBufferProgress(nowMs);
+        bool hasProgress = _watchdogLastBufferedMs > 0
+            || (_lastBufferProgressAtMs is { } at && nowMs - at < 3_000);
+        if (!hasProgress) return false; // 零进度=真死快切，不吃宽限预算
         if (_slowGraceCount >= SlowConnectGraceBudget) return false; // vc86 预算闸（方案 v2 F2）：封顶 2 次后放行走既有换源，真死不无限原地打转
         _slowGraceCount++;
         SessionTrace.Emit($"[慢连] {DescribeChannel()} 超时先原地宽限重试（{_slowGraceCount}/{SlowConnectGraceBudget}，线 {CurrentLineIndex + 1}/{LineCount}，{reason}）——慢而通不切线");
@@ -975,6 +1032,7 @@ public sealed class PlaybackSession
             Transition(PlaybackState.Failed, $"slow grace {reason}"); // 看门狗路径：Buffering→Failed 落账再回 Buffering，照坏票宽限骨架
         }
         Transition(PlaybackState.Buffering, "slow connect grace");
+        MarkEndpointStarted(); // vc87 票账降权：宽限重试也算端点起播
         _player.Play(new PlaybackParams(_channel, CurrentEndpoint, _preferLowLatency));
         ReattachSurface();
         SlowGraceStarted?.Invoke(this, EventArgs.Empty);
@@ -1032,12 +1090,14 @@ public sealed class PlaybackSession
         _endpointIndex = next;
         _stallTimes.Clear(); // vc72 审查清零 P1：自救路径同换台/换线/预防介入口径清账（账只记本线，不跟去新线）
         _smoothnessTimes.Clear();
+        _videoStallTimes.Clear(); // vc87：停滞账同口径清零
         _lightErrorTimes.Clear(); // vc82：轻错账同口径只记本线，切线清账
         FailoverCount++;
         _freshTicketRetried = false; // vc69：坏票重试机会每线路一次，切线重记
         _ticketRetrySinceMs = null;
         _lastFailoverAtMs = _clock.NowMs; // 预防性介入冷却账起算（老板令 #24）
         Transition(PlaybackState.Buffering, $"failover after {reason}");
+        MarkEndpointStarted(); // vc87 票账降权：备源起播打点
         _player.Play(new PlaybackParams(_channel, _queue[next], _preferLowLatency));
         ReattachSurface();
         Failover?.Invoke(this, new FailoverEventArgs(from, _queue[next], FailoverCount, reason));
