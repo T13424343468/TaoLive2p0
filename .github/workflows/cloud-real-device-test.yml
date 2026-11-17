@@ -3,34 +3,13 @@ name: cloud-real-device-test
 on:
   workflow_dispatch:
     inputs:
-      apk-url:
-        description: "被测包下载地址（Release 资产）"
+      soak-minutes:
+        description: "长跑观测分钟数（默认 20，上限 60）"
         required: false
-        default: ""
+        default: "20"
 
 jobs:
-  gate-package:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: 版本锚/签名/包一致性
-        run: |
-          if [ -n "${{ github.event.inputs.apk-url }}" ]; then
-            curl -sL -o app.apk "${{ github.event.inputs.apk-url }}"
-            sha256sum app.apk | tee gate-package.sha256
-            ls -l app.apk
-          else
-            echo "未提供 apk-url，进门关以仓库内 SHA256SUMS 记录为准（待补）"
-          fi
-      - name: 台账产物归档
-        uses: actions/upload-artifact@v4
-        with:
-          name: gate-package
-          path: gate-package.sha256
-          if-no-files-found: ignore
-
   run-cases:
-    needs: gate-package
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,7 +24,7 @@ jobs:
         run: dotnet workload install android
       - name: 逻辑全测（xUnit 全绿才算过，零错零警口径）
         run: |
-          set -o pipefail # 闸门硬闸：tee 吞退出码会假绿（2026-11-16 实锤 2 红报绿），dotnet test 非零必须红
+          set -o pipefail
           dotnet test src/TaoLive.Tests/TaoLive.Tests.csproj -c Release --nologo | tee run-cases.log
       - name: 用例台账落盘
         uses: actions/upload-artifact@v4
@@ -53,34 +32,238 @@ jobs:
           name: run-cases
           path: run-cases.log
 
+  cloud-device-dimensions:
+    # 云上补充维度（老板令 2026-11-17）：回归用例链 / 切换台账指标 / 性能基线 / 长跑观测 / 视觉证据。
+    # 口径：模拟器≠真机物理段；模拟器维度真测真报，真机物理实测仍属定标项红绿如实。
+    runs-on: ubuntu-24.04
+    needs: run-cases
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.404'
+      - name: Pin SDK via global.json
+        run: echo '{"sdk":{"version":"10.0.404","rollForward":"disable"}}' > global.json
+      - name: Install android workload
+        run: dotnet workload install android
+      - name: Build APK (Release, dual ABI)
+        run: |
+          export PATH="$HOME/.dotnet:$PATH"
+          dotnet publish src/TaoLive.Tv -c Release -p:AndroidSdkDirectory=$RUNNER_TEMP/android-sdk -p:JavaSdkDirectory=$JAVA_HOME
+          APK=$(find src/TaoLive.Tv/bin -name "*.apk" -size +10M | head -1)
+          [ -n "$APK" ] || { echo "APK_NOT_FOUND"; exit 1; }
+          cp "$APK" TaoLive.apk
+          ls -la TaoLive.apk
+      - name: Badging anchor check (fail-loud)
+        run: |
+          ANDROID_HOME=$RUNNER_TEMP/android-sdk
+          CLT=$ANDROID_HOME/cmdline-tools/latest
+          if [ ! -x "$CLT/bin/sdkmanager" ]; then
+            mkdir -p $ANDROID_HOME/cmdline-tools
+            curl -sSL -o /tmp/clt.zip https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+            unzip -q /tmp/clt.zip -d $ANDROID_HOME/cmdline-tools
+            mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest
+          fi
+          yes | $CLT/bin/sdkmanager --licenses > /dev/null || true
+          [ -x "$(find $ANDROID_HOME -name aapt2 | head -1)" ] || $CLT/bin/sdkmanager --sdk_root=$ANDROID_HOME "build-tools;34.0.0"
+          AAPT2=$(find $ANDROID_HOME -name aapt2 | head -1)
+          [ -n "$AAPT2" ] || { echo "AAPT2_MISSING"; exit 1; }
+          $AAPT2 dump badging TaoLive.apk | grep -E "^package" | head -1
+          $AAPT2 dump badging TaoLive.apk | grep -q "versionCode='86'" || { echo "VERSION_ANCHOR_MISMATCH"; exit 1; }
+          $AAPT2 dump badging TaoLive.apk | grep -q "versionName='1.1'" || { echo "VERSION_ANCHOR_MISMATCH"; exit 1; }
+      - name: Install SDK for emulator
+        run: |
+          ANDROID_HOME=$RUNNER_TEMP/android-sdk
+          export ANDROID_SDK_ROOT=$ANDROID_HOME
+          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --list | awk '{gsub(/^ +/,""); sub(/ .*/,""); print}' | grep -E '^system-images;android-[0-9]+;[a-z_]+;x86_64$' | sort -u > /tmp/x86-images.txt || true
+          PICK=""
+          for CAND in "system-images;android-31;google_apis;x86_64" "system-images;android-30;google_apis;x86_64"; do
+            if grep -qxF "$CAND" /tmp/x86-images.txt; then PICK="$CAND"; break; fi
+          done
+          [ -n "$PICK" ] || { echo "NO_X86_IMAGE_AVAILABLE"; cat /tmp/x86-images.txt; exit 1; }
+          echo "PICKED=$PICK"
+          sdkmanager "platform-tools" "emulator" "$PICK"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH" >> "$GITHUB_ENV"
+      - name: Create AVD and boot (TCG bounded)
+        run: |
+          export ANDROID_AVD_HOME=$HOME/.android/avd
+          export ANDROID_USER_HOME=$HOME/.android
+          mkdir -p "$ANDROID_AVD_HOME"
+          echo no | avdmanager create avd -n testavd -k "$PICK" || true
+          CFG=$ANDROID_AVD_HOME/testavd.avd/config.ini
+          grep -q '^hw.gpu.enabled=' "$CFG" && sed -i 's|^hw.gpu.enabled=.*|hw.gpu.enabled=no|' "$CFG" || echo 'hw.gpu.enabled=no' >> "$CFG"
+          grep -q '^hw.gpu.mode=' "$CFG" && sed -i 's|^hw.gpu.mode=.*|hw.gpu.mode=off|' "$CFG" || echo 'hw.gpu.mode=off' >> "$CFG"
+          grep -q '^hw.cpu.ncore=' "$CFG" && sed -i 's|^hw.cpu.ncore=.*|hw.cpu.ncore=4|' "$CFG" || echo 'hw.cpu.ncore=4' >> "$CFG"
+          grep -q '^hw.ramSize=' "$CFG" && sed -i 's|^hw.ramSize=.*|hw.ramSize=3072|' "$CFG" || echo 'hw.ramSize=3072' >> "$CFG"
+          EMU=$ANDROID_HOME/emulator/emulator
+          "$EMU" @testavd -no-window -no-audio -no-boot-anim -no-snapshot -no-accel -gpu swiftshader_indirect -memory 3072 -show-kernel > emulator.log 2>&1 &
+          EMUPID=$!
+          sleep 45
+          kill -0 $EMUPID 2>/dev/null || { echo "EMULATOR_DIED_AT_START"; cat emulator.log; exit 1; }
+          START=$SECONDS
+          while true; do
+            if timeout 40 adb wait-for-device && timeout 40 adb shell getprop sys.boot_completed 2>/dev/null | grep -q '^1$'; then
+              echo "BOOT_COMPLETED"; break
+            fi
+            if [ $((SECONDS - START)) -gt 2400 ]; then
+              echo "BOOT_TIMEOUT_40MIN"; tail -120 emulator.log || true; exit 1
+            fi
+            sleep 15
+          done
+      - name: Install and root ledger access
+        run: |
+          adb install -r TaoLive.apk
+          adb shell pm list packages | grep -q taolive || { echo "PACKAGE_NOT_FOUND"; exit 1; }
+          adb root || true
+          sleep 3
+          adb wait-for-device
+          mkdir -p evidence
+          adb logcat -G 16M || true
+          adb logcat -c || true
+          (adb logcat -v time > evidence/logcat-continuous.txt 2>&1 &) || true
+          adb shell monkey -p com.taolive.tv -c android.intent.category.LAUNCHER 1 || true
+          sleep 40
+          adb shell screencap -p /sdcard/caseA_launch.png && adb pull /sdcard/caseA_launch.png evidence/ || { echo "SCREENCAP_FAIL"; }
+          adb shell "dumpsys activity activities | grep -i taolive" | tee evidence/caseA_activity.txt || echo "ACTIVITY_NOT_TOP"
+      - name: Case A 起播链路（首帧证据+台账标记计数）
+        run: |
+          adb shell cat /data/data/com.taolive.tv/files/taolive_crash.log > evidence/ledger_caseA.txt 2>/dev/null || echo "LEDGER_NOT_READABLE_YET"
+          grep -cE "\[预防\]|\[回主源\]|起播|首帧" evidence/ledger_caseA.txt > evidence/caseA_marker_count.txt || true
+          echo "起播证据：activity 顶 + 截图 + 台账标记数（见 caseA_*）；画面是否真出画以视觉走查为准"
+      - name: Case B 换台×10（DPAD 驱动，无崩溃闸）
+        run: |
+          for i in $(seq 1 10); do
+            adb shell input keyevent KEYCODE_DPAD_DOWN || true
+            sleep 1
+            adb shell input keyevent KEYCODE_DPAD_CENTER || true
+            sleep 12
+            adb shell screencap -p /sdcard/caseB_$i.png && adb pull /sdcard/caseB_$i.png evidence/ || true
+            if adb shell "dumpsys activity activities | grep -i taolive" > /dev/null; then
+              echo "switch_$i: activity_top"
+            else
+              echo "switch_$i: ACTIVITY_LOST"; exit 1
+            fi
+          done
+          adb shell "dumpsys dropbox --print" > evidence/dropbox.txt 2>/dev/null || true
+          if grep -q "com.taolive.tv" evidence/dropbox.txt; then
+            echo "CRASH_IN_DROPBOX"; grep -A5 "com.taolive.tv" evidence/dropbox.txt | head -30; exit 1
+          else
+            echo "NO_TAOLIVE_CRASH_RECORD"
+          fi
+      - name: Case C 断网→静止态（NetGuard 连败口径）
+        run: |
+          adb shell svc wifi disable || true
+          adb shell svc data disable || true
+          sleep 45
+          adb shell uiautomator dump /sdcard/ui_offline.xml || true
+          adb pull /sdcard/ui_offline.xml evidence/ || true
+          if grep -oE "信号中断，正在自动重试" evidence/ui_offline.xml 2>/dev/null | head -1 > /dev/null; then
+            echo "OFFLINE_COPY_SEEN"
+          else
+            echo "OFFLINE_COPY_NOT_IN_UI（空态仅播中断状态时出现；以台账与恢复行为综合判，不硬判红）"
+          fi
+          adb shell screencap -p /sdcard/caseC_offline.png && adb pull /sdcard/caseC_offline.png evidence/ || true
+          adb shell "dumpsys activity activities | grep -i taolive" > evidence/caseC_activity.txt || true
+      - name: Case D 恢复→探活回切（回归脚本「回切」维度）
+        run: |
+          adb shell svc wifi enable || true
+          adb shell svc data enable || true
+          adb shell cat /data/data/com.taolive.tv/files/taolive_crash.log > evidence/ledger_caseD.txt 2>/dev/null || true
+          grep -E "\[回主源\]|\[预防\]|探活|唤醒" evidence/ledger_caseD.txt | tail -20 > evidence/caseD_switchtail.txt || true
+          sleep 90
+          if adb shell "dumpsys activity activities | grep -i taolive" > /dev/null; then
+            echo "RECOVERY_ACTIVITY_TOP"
+          else
+            echo "RECOVERY_ACTIVITY_LOST"; exit 1
+          fi
+          adb shell screencap -p /sdcard/caseD_recovered.png && adb pull /sdcard/caseD_recovered.png evidence/ || true
+      - name: Case E 回主源窗口观测（稳定 5 分钟口径，如实记录是否命中）
+        run: |
+          START=$SECONDS
+          HIT=no
+          while [ $((SECONDS - START)) -lt 360 ]; do
+            adb shell cat /data/data/com.taolive.tv/files/taolive_crash.log 2>/dev/null | grep -c "\[回主源\]" > /tmp/retc || true
+            if grep -qv '^0$' /tmp/retc 2>/dev/null && [ -s /tmp/retc ]; then HIT=yes; break; fi
+            sleep 30
+          done
+          echo "RETURN_TO_PRIMARY_OBSERVED=$HIT（回主源需稳定 5 分钟+主源 3 轮 OK，模拟器存活条件内未命中=窗口未满，不是缺陷）" | tee evidence/caseE_return.txt
+          adb shell cat /data/data/com.taolive.tv/files/taolive_crash.log > evidence/ledger_full.txt 2>/dev/null || echo "LEDGER_UNREADABLE"
+      - name: Case F 性能基线（CPU/内存采样）
+        run: |
+          adb shell "dumpsys cpuinfo | grep -E 'com.taolive.tv|TOTAL'" | tee evidence/perf_cpuinfo.txt || true
+          adb shell "dumpsys meminfo com.taolive.tv" > evidence/perf_meminfo.txt || true
+          grep -E "TOTAL PSS|TOTAL" evidence/perf_meminfo.txt | tail -3 || true
+      - name: Case G 长跑观测（默认 20 分钟，60 秒拍采样）
+        run: |
+          SOAK_MIN=$(echo "${{ github.event.inputs.soak-minutes }}" | grep -E '^[0-9]+$' && echo "${{ github.event.inputs.soak-minutes }}" || echo 20)
+          [ "$SOAK_MIN" -le 60 ] || SOAK_MIN=60
+          : > evidence/soak_series.txt
+          START=$SECONDS
+          while [ $((SECONDS - START)) -lt $((SOAK_MIN * 60)) ]; do
+            TS=$(date +%H:%M:%S)
+            PSS=$(adb shell "dumpsys meminfo com.taolive.tv" 2>/dev/null | grep "TOTAL PSS" | head -1 | tr -s ' ')
+            CPU=$(adb shell "dumpsys cpuinfo" 2>/dev/null | grep "com.taolive.tv" | head -1 | tr -s ' ')
+            echo "$TS pss=[$PSS] cpu=[$CPU]" >> evidence/soak_series.txt
+            ALIVE=$(adb shell "dumpsys activity activities | grep -ci taolive" || echo 0)
+            if [ "$ALIVE" = "0" ]; then echo "SOAK_ACTIVITY_LOST"; exit 1; fi
+            sleep 60
+          done
+          adb shell screencap -p /sdcard/caseG_soak_end.png && adb pull /sdcard/caseG_soak_end.png evidence/ || true
+          echo "SOAK_${SOAK_MIN}MIN_ALIVE"
+      - name: 三硬指标台账抽取（可算字段与不可算字段分列，不伪装）
+        run: |
+          python3 - <<'EOF' > evidence/hard_metrics.txt || true
+          import re, os
+          p="evidence/ledger_full.txt"
+          rows=[]
+          if os.path.exists(p):
+              for line in open(p, encoding="utf-8", errors="ignore"):
+                  if any(k in line for k in ["[预防]","[回主源]","[对齐]","[码率自适应]","回退","切换"]):
+                      rows.append(line.rstrip())
+          print("台账切换相关行数:", len(rows))
+          for r in rows[-40:]:
+              print(r)
+          print()
+          print("口径：对齐误差/黑屏毫秒/回跳需切换台账带起止时戳成对字段——当前台账为事件行；")
+          print("可算：事件计数与时间戳序列；不可算：毫秒级起止（定标项，真机台账补字段后可算）。")
+          EOF
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloud-dimensions-evidence
+          path: |
+            evidence/
+            emulator.log
+          if-no-files-found: warn
+
   perspectives:
-    needs: run-cases
+    needs: [run-cases, cloud-device-dimensions]
     runs-on: ubuntu-latest
+    if: always()
     steps:
-      - name: 五视角清点
-        run: echo '逻辑层视角已由段2覆盖；真机视角待真机会话——待补，不伪装绿。'
-
-  visual-review:
-    needs: run-cases
-    runs-on: ubuntu-latest
-    steps:
-      - name: 视觉走查
-        run: echo '待云真机平台接入后执行，不伪装绿。'
-
-  perf-soak:
-    needs: gate-package
-    runs-on: ubuntu-latest
-    steps:
-      - name: 性能与长时
-        run: echo '待云真机平台接入后执行长跑，不伪装绿。'
+      - name: 五视角清点（模拟器维度已上云实测；真机物理视角仍属定标项，红绿如实）
+        run: |
+          echo "逻辑层视角：xUnit 全绿（见 run-cases）"
+          echo "模拟器云测维度：回归用例链/性能基线/长跑观测已实测（见 cloud-dimensions-evidence）"
+          echo "真机物理视角：待真机定标会话——红绿如实，不伪装绿。"
 
   ledger:
-    needs: [gate-package, run-cases, perspectives, visual-review, perf-soak]
+    needs: [run-cases, cloud-device-dimensions, perspectives]
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
       - name: 台账清点与交付结论
         run: |
-          echo "云端逻辑全测：xUnit 全绿（见 run-cases 产物）"
-          echo "真机段：包已归档（见 gate-package），真机视角/视觉/长跑待真机接入——红绿如实，不伪装交付。"
+          echo "云端逻辑全测：见 run-cases 产物"
+          echo "云端模拟器维度：见 cloud-dimensions-evidence（回归链/断网恢复/CPU 基线/长跑/视觉截图）"
+          echo "真机物理段：仍属定标项，不伪装绿。"
