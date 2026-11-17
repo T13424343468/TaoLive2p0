@@ -106,12 +106,12 @@ public static class FallbackSourceRegistry
         new("CCTV6电影", "http://124.165.251.82:85/tsfile/live/0006_1.m3u8?key=txiptv&playlive=1&authid=0"),
         new("CCTV8电视剧", "http://124.165.251.82:85/tsfile/live/0008_1.m3u8?key=txiptv&playlive=1&authid=0"),
         new("CCTV5体育", "http://gmxw.7766.org:808/hls/93/index.m3u8"),
-        new("CCTV1综合", "http://63.141.230.178:82/gslb/zbdq5.m3u8?id=cctv1hd"), // applive：入口恒定 302 取票
+        new("CCTV1综合", "http://63.141.230.178:82/gslb/zbdq5.m3u8?id=cctv1hd", ObservationRank: true), // applive：广告壳（分片404网页/目录轮换，老板真机实锤 2026-11-17），整族降观察档
         new("湖北卫视", "http://183.11.239.36:808/hls/46/index.m3u8"),           // gmxw 同族 id46，纯 IP 免解析
         new("湖北卫视", "http://gmxw.7766.org:808/hls/46/index.m3u8"),           // 同族域名备线
         new("广东卫视", "http://183.11.239.36:808/hls/80/index.m3u8"),           // gmxw 同族 id80，纯 IP 免解析
         new("广东卫视", "http://gmxw.7766.org:808/hls/80/index.m3u8"),           // 同族域名备线
-        new("江苏卫视", "http://107.150.60.122/live/jswshd.m3u8"),               // applive 票据家族（jstv 换源 B 主推）
+        new("江苏卫视", "http://107.150.60.122/live/jswshd.m3u8", ObservationRank: true), // applive 同族广告壳（分片404网页，2026-11-17 实锤）
     };
 
     // ---- 第四批·零活兜底台救活（老板 2026-11-13 14:07 令「全收」）----
