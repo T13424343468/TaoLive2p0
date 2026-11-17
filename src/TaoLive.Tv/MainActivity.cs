@@ -116,6 +116,7 @@ public partial class MainActivity : Activity
     private LinearLayout? _epgPanel;
     private TextView? _epgNow;
     private TextView? _epgNext;
+    private TextView? _epgWater; // 老板令 2026-11-17：节目单条挂实时水位（上下排列），与画面时刻同源同拍
     private TextView? _waterLevelText;       // 老板令 2026-11-16：列表页头「实时水位:XX秒」——当前会话内核攒着还没播的量
     private bool _epgHasData;                // 当前台拉到过节目单（抽屉收起后据此重新亮出）
     private Action? _epgHidePending;         // 7 秒自动收起任务
@@ -761,10 +762,16 @@ public partial class MainActivity : Activity
         _epgNow = new TextView(this) { TextSize = UiScale.Item };
         _epgNow.SetTextColor(InkTranslucency.TextPrimary(this));
         InkTranslucency.ApplyReadabilityShadow(_epgNow);
+        // 老板令 2026-11-17：节目单条挂实时水位——上下排列（节目名+画面时刻 / 实时水位 / 接下来），
+        // 与抽屉页头同源同拍（同一 BufferedMsNow 读数），秒泵跟刷
+        _epgWater = new TextView(this) { TextSize = UiScale.Caption };
+        _epgWater.SetTextColor(Color.ParseColor(InkTranslucency.TextSecondary));
+        InkTranslucency.ApplyReadabilityShadow(_epgWater);
         _epgNext = new TextView(this) { TextSize = UiScale.Caption };
         _epgNext.SetTextColor(Color.ParseColor(InkTranslucency.TextSecondary));
         InkTranslucency.ApplyReadabilityShadow(_epgNext);
         _epgPanel.AddView(_epgNow);
+        _epgPanel.AddView(_epgWater);
         _epgPanel.AddView(_epgNext);
         _root.AddView(_epgPanel, new FrameLayout.LayoutParams(-2, -2)
         {
@@ -1180,6 +1187,7 @@ public partial class MainActivity : Activity
         if (_epgPanel != null)
         {
             _epgNow!.Text = "";
+            _epgWater!.Text = ""; // 老板令 2026-11-17：换台清节目单条，水位行一并清
             _epgNext!.Text = "";
             _epgPanel.Visibility = ViewStates.Gone;
         }
@@ -1369,7 +1377,8 @@ public partial class MainActivity : Activity
         $"实时水位：{(int)Math.Round(bufferedMs / 1000.0)}秒 · 画面时刻：{PictureClock(bufferedMs)}";
 
     /// <summary>播放页节目单条跟刷（老板令 2026-11-17 EPG 播放页联动）：当前节目名+画面时刻，
-    /// 官方缺表降级只显时刻；两读数与抽屉页头同源同拍，不错位。</summary>
+    /// 官方缺表降级只显时刻；两读数与抽屉页头同源同拍，不错位。
+    /// 老板令 2026-11-17：节目单条再挂实时水位（上下排列），同一读数同拍跟刷。</summary>
     private void UpdateEpgClock()
     {
         if (_epgNow is null) return;
@@ -1381,6 +1390,7 @@ public partial class MainActivity : Activity
         }
         _lastEpgClock = PictureClock(bufferedMs.Value);
         _epgNow.Text = EpgNowLine(_lastEpgClock);
+        if (_epgWater is { } water) water.Text = $"实时水位：{(int)Math.Round(bufferedMs.Value / 1000.0)}秒";
     }
 
     private string EpgNowLine(string clock) => (_epgNowTitle is { } title ? $"{title}  ·  " : "") + $"画面时刻：{clock}";
