@@ -72,11 +72,19 @@ public class SessionFailoverTests
         AllSourcesFailedEventArgs? args = null;
         session.AllSourcesFailed += (_, e) => args = e;
         clock.Advance(TimeSpan.FromSeconds(5));
-        Assert.True(session.CheckWatchdog()); // 第一路 open 超时 → 切第二路
+        Assert.True(session.CheckWatchdog()); // 第一路 open 超时 → vc86 慢源宽限 B 先原地重试
+        Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url); // 宽限 1/2
+
+        clock.Advance(TimeSpan.FromSeconds(5));
+        Assert.True(session.CheckWatchdog());
+        Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url); // 宽限 2/2
+
+        clock.Advance(TimeSpan.FromSeconds(5));
+        Assert.True(session.CheckWatchdog()); // 预算耗尽 → 切第二路
         Assert.Equal("https://s/b.m3u8", session.CurrentEndpoint?.Url);
 
         clock.Advance(TimeSpan.FromSeconds(5));
-        Assert.True(session.CheckWatchdog()); // 第二路也超时 → 全耗尽
+        Assert.True(session.CheckWatchdog()); // 第二路也超时（预算不跨端点重记）→ 全耗尽
         Assert.Equal(PlaybackState.Failed, session.State);
         Assert.NotNull(args);
         Assert.Equal("cctv1", args!.ChannelId);
@@ -122,7 +130,21 @@ public class SessionFailoverTests
         Assert.False(session.CheckWatchdog());
         Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url);
 
-        clock.Advance(TimeSpan.FromSeconds(6)); // 累计 18s：6 秒无增长→零增长判死窗 12s 到点，该切还得切
+        clock.Advance(TimeSpan.FromSeconds(6)); // 累计 18s：6 秒无增长→零增长判死窗 12s 到点（vc86 宽限 B：先原地重试）
+        Assert.True(session.CheckWatchdog());
+        Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url); // 宽限 1/2：慢灌窗内到不了的源先原地重试
+
+        clock.Advance(TimeSpan.FromSeconds(12)); // 累计 30s：宽限回 Buffering 清进度账，重放存货 2000ms 记新增长→慢灌窗 21s 让路
+        Assert.False(session.CheckWatchdog());
+
+        clock.Advance(TimeSpan.FromSeconds(9)); // 累计 39s：增长账变陈（>3s 无新增长）→零增长窗 12s 到点
+        Assert.True(session.CheckWatchdog());
+        Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url); // 宽限 2/2
+
+        clock.Advance(TimeSpan.FromSeconds(12)); // 累计 51s：同口径回灌让路
+        Assert.False(session.CheckWatchdog());
+
+        clock.Advance(TimeSpan.FromSeconds(9)); // 累计 60s：预算耗尽，该切还得切
         Assert.True(session.CheckWatchdog());
         Assert.Equal("https://s/b.m3u8", session.CurrentEndpoint?.Url);
     }
@@ -142,7 +164,13 @@ public class SessionFailoverTests
         clock.Advance(TimeSpan.FromSeconds(11));
         Assert.False(session.CheckWatchdog()); // 11 秒不切（旧 3 秒窗这里已经误杀慢热源）
         clock.Advance(TimeSpan.FromSeconds(1));
-        Assert.True(session.CheckWatchdog()); // 满 12 秒判死窗即切
+        Assert.True(session.CheckWatchdog()); // 满 12 秒判死窗到点：vc86 慢源宽限 B，先原地宽限重试
+        Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url); // 宽限 1/2
+        clock.Advance(TimeSpan.FromSeconds(12));
+        Assert.True(session.CheckWatchdog());
+        Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url); // 宽限 2/2
+        clock.Advance(TimeSpan.FromSeconds(12));
+        Assert.True(session.CheckWatchdog()); // 预算耗尽：真死照常判死切线
         Assert.Equal("https://s/b.m3u8", session.CurrentEndpoint?.Url);
     }
 
@@ -222,7 +250,15 @@ public class SessionFailoverTests
             Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url);
 
             clock.Advance(TimeSpan.FromSeconds(1));
-            Assert.True(session.CheckWatchdog()); // 16 秒期满：仍零增长=真死，照常判死切线
+            Assert.True(session.CheckWatchdog()); // 16 秒期满：仍零增长先原地宽限重试（vc86 慢源宽限 B，同账同口径）
+            Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url); // 宽限 1/2
+
+            clock.Advance(TimeSpan.FromSeconds(12));
+            Assert.True(session.CheckWatchdog());
+            Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url); // 宽限 2/2
+
+            clock.Advance(TimeSpan.FromSeconds(12));
+            Assert.True(session.CheckWatchdog()); // 预算耗尽：真死照常判死切线
             Assert.Equal("https://s/b.m3u8", session.CurrentEndpoint?.Url);
         }
         finally { PlaybackSession.TicketCacheInvalidator = null; }
@@ -264,6 +300,33 @@ public class SessionFailoverTests
         Assert.Equal("https://s/b.m3u8", session.CurrentEndpoint?.Url);
         Assert.Equal(1, session.FailoverCount);
         Assert.Equal(new[] { "https://s/a.m3u8", "https://s/b.m3u8" }, player.PlayedUrls);
+    }
+
+    [Fact]
+    public void Timeout_class_kernel_error_gets_slow_grace_then_fails_over()
+    {
+        // vc86 慢源宽限 B（老板令）：内核超时类报错先原地宽限重试，预算封顶 2 次；耗尽走既有换源，
+        // 真死不无限原地打转（F2 预算闸）。慢连宽限触发同步挂 SlowGraceStarted（F7「正在换信号」提示源）。
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer();
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8");
+        session.ChangeChannel(ch);
+        var graceCount = 0;
+        session.SlowGraceStarted += (_, _) => graceCount++;
+
+        player.RaiseError("ERROR_CODE_IO_NETWORK_TIMEOUT"); // 超时类：宽限 1/2 原地重试
+        Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url);
+        Assert.Equal(PlaybackState.Buffering, session.State);
+
+        player.RaiseError("ERROR_CODE_IO_NETWORK_TIMEOUT"); // 宽限 2/2
+        Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url);
+        Assert.Equal(PlaybackState.Buffering, session.State);
+
+        player.RaiseError("ERROR_CODE_IO_NETWORK_TIMEOUT"); // 预算耗尽 → 走既有换源，真死不原地打转
+        Assert.Equal("https://s/b.m3u8", session.CurrentEndpoint?.Url);
+        Assert.Equal(1, session.FailoverCount);
+        Assert.Equal(2, graceCount); // F7：宽限触发即提示位信号，耗尽切线不再触发
     }
 
     [Fact]

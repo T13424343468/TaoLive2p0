@@ -149,5 +149,13 @@ public sealed class RacingDataSourceFactory : Java.Lang.Object, AndroidX.Media3.
     public AndroidX.Media3.DataSource.IDataSource CreateDataSource() => new RacingDataSource(CreateInner);
 
     private static AndroidX.Media3.DataSource.IDataSource CreateInner()
-        => new AndroidX.Media3.DataSource.DefaultHttpDataSource.Factory().CreateDataSource()!;
+    {
+        // 老板令 2026-11-17 慢源宽限 A：内核 HTTP 超时放宽——连接 8→12s（与会话起播窗对齐）、
+        // 读 8→15s（连接后慢灌容忍）；真死线（拒绝连接/DNS/404）不受影响照旧快切。
+        // 链式 setter 在 xamarin 绑定空性标注下触发 CS8602，拆步落局部变量消除
+        var factory = new AndroidX.Media3.DataSource.DefaultHttpDataSource.Factory();
+        factory.SetConnectTimeoutMs(12_000);
+        factory.SetReadTimeoutMs(15_000);
+        return factory.CreateDataSource()!;
+    }
 }

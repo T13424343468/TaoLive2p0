@@ -199,6 +199,9 @@ public sealed class PlaybackSession
     /// <summary>备源耗尽：本频道全部源都试败，会话停在 Failed。</summary>
     public event EventHandler<AllSourcesFailedEventArgs>? AllSourcesFailed;
 
+    /// <summary>慢连宽限启用（vc86 F7 老板令）：宽限窗挂「正在换信号」——如实告知原地等慢源，不是黑屏死机。</summary>
+    public event EventHandler? SlowGraceStarted;
+
     /// <summary>受控迁移：仅允许状态机矩阵内的跳转，非法跳转抛异常不静默。</summary>
     public void Transition(PlaybackState next, string? reason = null)
     {
@@ -270,6 +273,8 @@ public sealed class PlaybackSession
             // vc82 自愈收账：画面恢复即全愈，退避账清零（下次全断从第一档重新起算）
             _selfHealDueAtMs = null;
             _selfHealAttempts = 0;
+            // vc86 慢连宽限收账：出画即愈，宽限账复位（新一轮起播重新给满预算，F2 封顶只管本轮起播）
+            _slowGraceCount = 0;
         }
         var fromState = _state;
         _state = next;
@@ -313,6 +318,7 @@ public sealed class PlaybackSession
         _smoothnessTimes.Clear();
         _freshTicketRetried = false; // vc69：新一轮起播重记坏票重试机会
         _ticketRetrySinceMs = null;
+        _slowGraceCount = 0; // vc86：新一轮起播慢连宽限重新给满（不背旧台旧轮账）
         _microlagSeekAtMs = null; // 微卡回退防振铃账随新起播清零（同欠载账口径）
         Transition(PlaybackState.Buffering, "start requested");
         MarkBlindZoneIfAny(p.Endpoint); // 盲区标记（微卡修法三条③）：非 .m3u8 直流源天然贴边，实测账降权不给头名
@@ -356,6 +362,7 @@ public sealed class PlaybackSession
         FailoverCount = 0;
         _freshTicketRetried = false; // vc69：换台重记坏票重试机会
         _ticketRetrySinceMs = null;
+        _slowGraceCount = 0; // vc86：换台慢连宽限重新给满（账只记本台，不跟人走）
         _proactiveCount = 0; // vc67：换台重给预防介入预算
         _stallTimes.Clear(); // 欠载趋势账随换台清零（老板令 #26）：账只记本台画质，不跟人走
         _smoothnessTimes.Clear(); // vc70：平稳疑点账同口径，换台清零不跟人走
@@ -659,7 +666,13 @@ public sealed class PlaybackSession
             {
                 // 看门狗打点（埋点补充 2026-11-15）：此前看门狗触发完全静默，真机只能看到「换源」结果看不到因——
                 // 补触发原因+已等时长，断流自救链路（含误杀嫌疑对账）可查。vc67：带上进度口径（快切/慢灌让路）。
-                SessionTrace.Emit($"[看门狗] {DescribeChannel()} 起播超时 {nowMs - started}ms≥{windowMs}ms，转备源自救（原线路 {CurrentLineIndex + 1}/{LineCount}，{_watchdogLastBufferedMs}ms 存货）");
+                SessionTrace.Emit($"[看门狗] {DescribeChannel()} 起播超时 {nowMs - started}ms≥{windowMs}ms（原线路 {CurrentLineIndex + 1}/{LineCount}，{_watchdogLastBufferedMs}ms 存货）");
+                // 老板令 2026-11-17 慢源宽限 B（vc86）：open-timeout 与内核超时同账——预算未满先原地宽限重试，
+                // 12s 内核超时先到时宽限在报错路径吃掉，此处兜住竞速里看门狗先到的另一半（F1 修）
+                if (_state == PlaybackState.Buffering && TrySlowConnectGrace("open timeout"))
+                {
+                    return true;
+                }
                 Transition(PlaybackState.Failed, "open timeout");
                 TryFailover("open timeout");
                 return true;
@@ -926,9 +939,46 @@ public sealed class PlaybackSession
             RecordLightError(code);
             return;
         }
+        // 老板令 2026-11-17 慢源宽限 B（vc86）：起播期超时类错误先原地宽限重试——把「慢而通」和「真死」分家；
+        // 看门狗 open-timeout 同账同口径（TrySlowConnectGrace 单点），真死（拒绝连接/DNS/404）不进宽限照旧快切。
+        // 判定必须在 Transition(Failed) 之前：落账后 _state 已是 Failed，宽限判 Buffering 永远轮不到（vc86 审查修正）
+        if (_state == PlaybackState.Buffering
+            && IsTimeoutClassError(code)
+            && TrySlowConnectGrace($"player error {code}"))
+        {
+            return;
+        }
         Transition(PlaybackState.Failed, $"player error {code}");
         // 换源账随真实码（真机诊断 11-15）：诊断页换源行能看到具体错误码，不再只剩裸词
         TryFailover($"player error {code}");
+    }
+
+    /// <summary>慢连宽限预算（vc86 老板拍板）：每台封顶 2 次——同族慢源最坏 2×24s 有界，不无限黑屏。</summary>
+    public const int SlowConnectGraceBudget = 2;
+
+    private int _slowGraceCount; // 慢连宽限账：到达 Playing 即复位（新一轮起播重给预算），换台清零
+
+    /// <summary>超时类错误判据（vc86）：内核错误码带 timeout 字样才算慢连；拒绝连接/DNS/状态码不进宽限。</summary>
+    private static bool IsTimeoutClassError(string code) =>
+        !string.IsNullOrEmpty(code) && code.Contains("timeout", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>慢连宽限原语（vc86 老板令）：Failed 落账后回 Buffering 原地重试本线（坏票宽限同骨架），
+    /// 看门狗窗随 Buffering 重计；预算耗尽返回 false 走既有换源。</summary>
+    private bool TrySlowConnectGrace(string reason)
+    {
+        if (_channel is null || CurrentEndpoint is null || _queue.Count == 0) return false;
+        if (_slowGraceCount >= SlowConnectGraceBudget) return false; // vc86 预算闸（方案 v2 F2）：封顶 2 次后放行走既有换源，真死不无限原地打转
+        _slowGraceCount++;
+        SessionTrace.Emit($"[慢连] {DescribeChannel()} 超时先原地宽限重试（{_slowGraceCount}/{SlowConnectGraceBudget}，线 {CurrentLineIndex + 1}/{LineCount}，{reason}）——慢而通不切线");
+        if (_state != PlaybackState.Failed) // 内核报错路径已在 OnPlayerError 落过 Failed，重复落账属非法迁移（矩阵 Failed→Failed）
+        {
+            Transition(PlaybackState.Failed, $"slow grace {reason}"); // 看门狗路径：Buffering→Failed 落账再回 Buffering，照坏票宽限骨架
+        }
+        Transition(PlaybackState.Buffering, "slow connect grace");
+        _player.Play(new PlaybackParams(_channel, CurrentEndpoint, _preferLowLatency));
+        ReattachSurface();
+        SlowGraceStarted?.Invoke(this, EventArgs.Empty);
+        return true;
     }
 
     /// <summary>vc82 轻错误记账窗：同线连续轻错误只滚动计数，不升级不切线（切不切由画面与看门狗说话）。</summary>

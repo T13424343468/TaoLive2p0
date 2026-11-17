@@ -592,7 +592,14 @@ public class SessionTests
         clock.Advance(TimeSpan.FromSeconds(14));
         Assert.False(session.CheckWatchdog());
         clock.Advance(TimeSpan.FromSeconds(2));
+        Assert.True(session.CheckWatchdog()); // 判死窗到点：vc86 慢源宽限 B 先原地重试，不崩
+        Assert.Equal(PlaybackState.Buffering, session.State);
+        Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url); // 宽限 1/2
+        clock.Advance(TimeSpan.FromSeconds(15));
         Assert.True(session.CheckWatchdog());
+        Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url); // 宽限 2/2
+        clock.Advance(TimeSpan.FromSeconds(15));
+        Assert.True(session.CheckWatchdog()); // 预算耗尽切线
         Assert.Equal(PlaybackState.Buffering, session.State);
         Assert.Equal("https://s/b.m3u8", session.CurrentEndpoint?.Url);
     }
@@ -778,8 +785,16 @@ public class SessionTests
         manager.SwitchTo(ch2);
 
         clock.Advance(TimeSpan.FromSeconds(30));
-        manager.Tick();
+        manager.Tick(); // 判死窗到点：vc86 慢源宽限 B 先原地重试
         Assert.Equal(PlaybackState.Buffering, manager.Current!.State);
+        Assert.Equal("https://s/b.m3u8", manager.Current.CurrentEndpoint?.Url); // 宽限 1/2
+
+        clock.Advance(TimeSpan.FromSeconds(12));
+        manager.Tick();
+        Assert.Equal("https://s/b.m3u8", manager.Current.CurrentEndpoint?.Url); // 宽限 2/2
+
+        clock.Advance(TimeSpan.FromSeconds(12));
+        manager.Tick(); // 预算耗尽切线
         Assert.Equal("https://s/b2.m3u8", manager.Current.CurrentEndpoint?.Url);
         Assert.Equal(PlaybackState.Idle, manager.TryGet("cctv1")!.State);
     }
