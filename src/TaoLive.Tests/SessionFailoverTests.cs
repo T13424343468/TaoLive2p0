@@ -169,17 +169,117 @@ public class SessionFailoverTests
     public void Watchdog_windows_stay_consistent_with_gates()
     {
         // vc66/vc67/vc68 三次同款死局的防复发闸：门槛动，窗必须跟着动——推导式+不变量断言双保险。
-        Assert.True(PlaybackSession.DefaultOpenTimeout > PrefetchCurve.FirstFrameGate * 2,
-            "判死窗必须>首帧门槛×2：窗≤门槛是数学死局（vc67 真机实锤）");
+        Assert.True(PlaybackSession.DefaultOpenTimeout > PrefetchCurve.FirstFrameGate,
+            "判死窗必须>首帧门槛：窗≤门槛起播必被误杀（vc89 门槛 7 秒，判死窗 12 秒仍盖住）");
         Assert.True(PlaybackSession.DefaultOpenTimeout >= TimeSpan.FromSeconds(8),
             "判死窗必须盖过内核 Media3 默认连接超时 8 秒，报错快刀才有机会先出手（vc68 真机实锤）");
         Assert.True(PlaybackSession.SlowStartWindow > PlaybackSession.DefaultOpenTimeout,
             "慢灌窗必须>判死窗：慢热源要有证明时间");
         Assert.True(PlaybackSession.SlowRecoveryWindow > PlaybackSession.SlowStartWindow,
             "重灌窗必须>慢灌窗：重灌要满 12 秒媒体，比首帧更久");
-        Assert.Equal(PrefetchCurve.FirstFrameGate.TotalMilliseconds * 7,
-            PlaybackSession.SlowStartWindow.TotalMilliseconds); // ×5=15s 盖不住 vc66 基线 16s，×7=21s
+        Assert.Equal(PrefetchCurve.FirstFrameGate.TotalMilliseconds * 3,
+            PlaybackSession.SlowStartWindow.TotalMilliseconds); // vc89：门槛 7s×3=21s 口径平移（原 3s×7 同值），三窗次序不打架
         Assert.Equal(PrefetchCurve.StartupThreshold, PlaybackSession.DefaultOpenTimeout);
+    }
+
+    [Fact]
+    public void Fast_drain_weak_line_cuts_in_three_seconds_on_reconnect()
+    {
+        // vc89 干库秒切（老板拍板「一次平稳」）：起播头几秒就干库的弱线（从没攒满过库存）重灌期
+        // 零进度 3 秒即快切备线——不撞 12 秒判死钟，「黑十来秒」病根拔除。
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer();
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8");
+        session.ChangeChannel(ch);
+        player.RaiseFirstFrame();  // 出画（内核桩不拦）
+        player.RaiseBufferingStart(); // 干库进重灌：画面已播过
+        Assert.Equal(PlaybackState.Reconnecting, session.State);
+
+        clock.Advance(TimeSpan.FromSeconds(2));
+        Assert.False(session.CheckWatchdog()); // 2 秒：窗内不切（画面还有 7 秒存货在播）
+        clock.Advance(TimeSpan.FromSeconds(1));
+        Assert.True(session.CheckWatchdog());  // 3 秒整：秒切备线，不等 12 秒
+        Assert.Equal("https://s/b.m3u8", session.CurrentEndpoint?.Url);
+        Assert.Equal(1, session.FailoverCount);
+    }
+
+    [Fact]
+    public void Filled_line_keeps_slow_recovery_window_on_reconnect()
+    {
+        // vc89 干库秒切不误伤好线：攒满过库存的线（_inventoryEverFilled=true）重灌期照原窗 24 秒，
+        // 瞬时断流有自愈证明时间，3 秒快刀只打「从没灌动过」的弱线。
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer();
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8");
+        session.ChangeChannel(ch);
+        player.RaiseFirstFrame(); // 先出画（预防泵只认 Playing 态）
+        player.BufferedMs = BufferInventory.TargetMs; // 攒满库存档下限（7 秒）
+        session.CheckProactiveFailover(); // 预防泵过账：本线路取得「攒满资格」
+        player.BufferedMs = 0; // 之后真干库：零进度读数（不吃秒切刀的唯一变量=攒满资格）
+        player.RaiseBufferingStart(); // 干库进重灌
+        Assert.Equal(PlaybackState.Reconnecting, session.State);
+
+        clock.Advance(TimeSpan.FromSeconds(3));
+        Assert.False(session.CheckWatchdog()); // 好线不秒切，走原重灌窗 24 秒
+        Assert.Equal("https://s/a.m3u8", session.CurrentEndpoint?.Url);
+        clock.Advance(TimeSpan.FromSeconds(21));
+        Assert.True(session.CheckWatchdog()); // 满 24 秒窗照旧切
+        Assert.Equal("https://s/b.m3u8", session.CurrentEndpoint?.Url);
+    }
+
+    [Fact]
+    public void Weak_fill_probe_prewarms_next_line_ticket()
+    {
+        // vc89 灌速探针（老板拍板「一次平稳」）：起播期灌速 0.1×实时（< 0.25×阈值）坐实弱线，
+        // 发一次预热信号（参数=下一条备线）；同线不重发，灌速达标的线不发。
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer();
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8", "https://s/c.m3u8");
+        session.ChangeChannel(ch);
+        var prewarmed = new List<SourceEndpoint>();
+        session.WeakFillDetected += (_, ep) => prewarmed.Add(ep);
+
+        session.CheckWatchdog(); // 起拍泵：开采样窗（探针最短采样 2 秒，窗从首拍起算）
+        player.BufferedMs = 200; // 2 秒采样窗只灌进 200ms 存货=0.1×实时
+        clock.Advance(TimeSpan.FromSeconds(2));
+        session.CheckWatchdog();
+        Assert.Single(prewarmed);
+        Assert.Equal("https://s/b.m3u8", prewarmed[0].Url);
+
+        clock.Advance(TimeSpan.FromSeconds(3));
+        session.CheckWatchdog();
+        Assert.Single(prewarmed); // 同线重试不重发（每线路一次）
+
+        // 换线重记机会：切到 b 线（c 备援）后弱灌再发一次，参数跟线走
+        session.SwitchLine(1);
+        session.CheckWatchdog(); // 新线起拍：重开采样窗
+        player.BufferedMs = 100;
+        clock.Advance(TimeSpan.FromSeconds(2));
+        session.CheckWatchdog();
+        Assert.Equal(2, prewarmed.Count);
+        Assert.Equal("https://s/c.m3u8", prewarmed[1].Url);
+    }
+
+    [Fact]
+    public void Healthy_fill_probe_stays_silent()
+    {
+        // vc89 灌速探针不误报：灌速 2.5×实时（达标线）不发预热信号——好线不该有额外动作。
+        var clock = new FixedClock(T0);
+        var player = new LoggingPlayer();
+        var session = new PlaybackSession(player, clock);
+        var ch = MakeChannel("cctv1", "https://s/a.m3u8", "https://s/b.m3u8");
+        session.ChangeChannel(ch);
+        SourceEndpoint? prewarmed = null;
+        session.WeakFillDetected += (_, ep) => prewarmed = ep;
+
+        session.CheckWatchdog(); // 起拍泵：开采样窗（与弱线例同口径，防虚跑）
+        player.BufferedMs = 5_000; // 2 秒采样窗灌进 5 秒存货=2.5×实时，达标线
+        clock.Advance(TimeSpan.FromSeconds(2));
+        session.CheckWatchdog();
+        Assert.Null(prewarmed);
     }
 
     [Fact]

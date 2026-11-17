@@ -98,6 +98,7 @@ public partial class MainActivity : Activity
     internal static MainActivity? Shell;                    // 进程级壳引用：内核/会话回调统一指向当前实例
     private static EventHandler<FailoverEventArgs>? _failoverRelay; // 换源回调转接器：进程级唯一（幂等 -=/+=），换壳不双收
     private static EventHandler? _slowGraceRelay; // 慢连宽限回调转接器（vc86 F7）：宽限窗挂「正在换信号」提示，换壳不双收
+    private static EventHandler<SourceEndpoint>? _weakFillRelay; // 灌速探针转接器（vc89）：弱线起播期后台焐热备线票，换壳不双收
     // vc86 C 预检对齐（老板令 F4 拍板）：5s→8s——内核连接超时 12s/读超时 15s 已放宽，预检先行超时
     // 会把「慢而通」的源探成死票错标；8s 与死循环方案 F4 预检超时对齐，慢源不再被预检抢杀
     private static readonly HttpClient PrecheckHttp = new() { Timeout = TimeSpan.FromSeconds(8) };
@@ -476,6 +477,10 @@ public partial class MainActivity : Activity
         _slowGraceRelay ??= (s, _) => Shell?.OnSessionSlowGrace(s);
         e.Session.SlowGraceStarted -= _slowGraceRelay;
         e.Session.SlowGraceStarted += _slowGraceRelay;
+        // vc89 灌速探针：弱线起播期后台焐热备线票（不切线不动画面，干库秒切零取票等待）
+        _weakFillRelay ??= (s, ep) => Shell?.OnSessionWeakFill(s, ep);
+        e.Session.WeakFillDetected -= _weakFillRelay;
+        e.Session.WeakFillDetected += _weakFillRelay;
         if (e.Session != _manager.Current) return;
         if (e.State == PlaybackState.Failed)
         {
@@ -558,6 +563,13 @@ public partial class MainActivity : Activity
         else
         {
             HideEmptyState();
+            // vc89 换信号提示（老板拍板「一次平稳」③）：干库进入重灌=画面必黑——如实告知「正在换信号」，
+            // 不再纯黑十来秒。仅前台会话且存货见底时亮条（软着陆对齐切/热备攒流不掺；有存货的瞬时抖动
+            // 画面未黑，不弹防打扰）。
+            if (e.Session.IsForeground && e.Session.BufferedStockMs == 0)
+            {
+                ShowToast(TaoLive.Session.SwitchHud.Connecting);
+            }
         }
     }
 

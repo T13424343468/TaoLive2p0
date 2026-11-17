@@ -12,11 +12,12 @@ public static class PrefetchCurve
     /// 卡后重入门槛同用此值（LoadControl 第 3/4 参同源）。</summary>
     public static readonly TimeSpan StartupThreshold = TimeSpan.FromSeconds(12);
 
-    /// <summary>首帧门槛线（vc68 三次定标：12s 原始→0.5s 出画令→3s 老板定值 2026-11-15「把首帧改3秒内」）：
-    /// 起播缓冲到 3 秒即出画——真机实锤 0.5 秒出画后画面落不了屏（热切接管黑屏）且预防烧线，
-    /// 3 秒在「先出画」与「出画能站住」之间取平；出画后内核后台继续填水到预取水位线。
-    /// 卡后重入门槛仍用 StartupThreshold（12 秒），出得快也不掉顺滑（#12 意图保留）。</summary>
-    public static readonly TimeSpan FirstFrameGate = TimeSpan.FromSeconds(3);
+    /// <summary>首帧门槛线（vc89 老板定值 2026-11-17：3 秒→7 秒——首帧与库存档下限对齐，
+    /// 出画那一刻手里正好 7 秒存货，治「切台放几秒就没库存」的起播余量病根；
+    /// 代价=首帧多等约 4 秒，由换台遮罩深底兜住，老板无感知旧帧）。
+    /// 出画后内核后台继续填水到预取水位线；卡后重入门槛仍用 StartupThreshold（12 秒），
+    /// 出得快也不掉顺滑（#12 意图保留）。</summary>
+    public static readonly TimeSpan FirstFrameGate = TimeSpan.FromSeconds(7);
 
     /// <summary>预取水位线：出画后继续填到窗口取满（对应 10~30 秒延迟取舍）。</summary>
     public static readonly TimeSpan PrefillWaterline = TimeSpan.FromSeconds(30);

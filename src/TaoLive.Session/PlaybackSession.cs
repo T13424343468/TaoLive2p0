@@ -48,7 +48,9 @@ public sealed class PlaybackSession
     // 起播头几秒库存读数必然低于 7 秒预防线（0.5s 出画时内核几乎没存货）——预防换源若不看账
     // 立即点火，冷却窗内连烧 3 条线出「全线路不可达」。改为：本线路库存先攒满过线一次才许
     // 按库存线预防介入（说明线是好的、刚才是瞬时欠载）；从没攒满过=线本来就灌不动，宁稳勿烧，
-    // 真卡流交看门狗（进度感知窗）。卡流次数判据（#26）不受限。
+    // 真卡流交看门狗（进度感知窗）。vc89 补口径：预防介入仍守此闸；但看门狗重灌期对「从没攒满过」
+    // 的弱线开干库秒切快刀（FastDrainWindow=3 秒零进度即切）——预防不烧线与弱线快切不冲突。
+    // 卡流次数判据（#26）不受限。
     private bool _inventoryEverFilled;
     // vc69 坏票不自焚账（真机 2026-11-16 00:08 实锤：缓存过期票 URL 4xx → 4 条线数秒烧光 → 全线路不可达）：
     // 本线路已否用过「作废坏票原地换新票」的一次机会（每线路一次，防死循环）；_ticketRetrySinceMs=重试宽限窗起点。
@@ -62,8 +64,18 @@ public sealed class PlaybackSession
     /// <summary>短命票判据窗（vc87，拟口径待老板复核）：端点起播后 15 秒内报 HTTP 错即记短命票降权。</summary>
     public const int ShortTicketGraceMs = 15_000;
 
-    /// <summary>端点起播打点（vc87 票账降权）：全部播放点统一调用，记当前线路起播时刻（单调钟）。</summary>
-    private void MarkEndpointStarted() => _endpointStartedAtMs = _clock.NowMs;
+    /// <summary>端点起播打点（vc87 票账降权）：全部播放点统一调用，记当前线路起播时刻（单调钟）。
+    /// vc89 灌速探针收账：换线重记预热机会（同线宽限重试不重记不重发），每轮起播重开采样窗。</summary>
+    private void MarkEndpointStarted()
+    {
+        _endpointStartedAtMs = _clock.NowMs;
+        _fillProbeSinceMs = null; // 新一轮起播：采样窗重开
+        if (!ReferenceEquals(CurrentEndpoint, _probeEndpoint))
+        {
+            _probeEndpoint = CurrentEndpoint;
+            _fillProbePrewarmed = false; // 换线：预热信号机会重记
+        }
+    }
 
     /// <summary>坏票重试宽限窗（vc69）：零增长判死账在此窗内让路——换新票全程=取票 HttpClient 超时
     /// 最长 5 秒 + 内核连接超时 8 秒 + 余量 3 秒=16 秒（期满了还在零增长才是真死，照常判死切线）。</summary>
@@ -648,6 +660,7 @@ public sealed class PlaybackSession
     {
         long nowMs = _clock.NowMs;
         SampleBufferProgress(nowMs);
+        ProbeFillRate(nowMs); // vc89 灌速探针：起播期采样灌速，弱线提前焐热备线票
         // vc82 第三刀「全断不装死」（老板真机实锤：半分钟整个信号中断挂起，装死等按键）：
         // Failed 态且自愈慢轮到点——退避节奏自动重试（从头慢轮整条队列），不静默挂起。
         if (_state == PlaybackState.Failed
@@ -715,7 +728,7 @@ public sealed class PlaybackSession
         if (_state == PlaybackState.Reconnecting
             && _reconnectingSinceMs is { } stalled)
         {
-            var windowMs = WatchdogWindowMs(nowMs, SlowRecoveryWindow, stalled);
+            var windowMs = WatchdogWindowMs(nowMs, SlowRecoveryWindow, stalled, allowFastDrain: true);
             if (nowMs - stalled >= windowMs)
             {
                 SessionTrace.Emit($"[看门狗] {DescribeChannel()} 卡流超时 {nowMs - stalled}ms≥{windowMs}ms，转备源自救（原线路 {CurrentLineIndex + 1}/{LineCount}，{_watchdogLastBufferedMs}ms 存货）");
@@ -727,16 +740,34 @@ public sealed class PlaybackSession
         return false;
     }
 
-    /// <summary>vc67 慢灌放宽窗（起播）：首帧门槛×7（3×7=21 秒；vc68 三轮改推导式——门槛再定标自动跟随）。
-    /// ×7 定标依据：vc66 真机出画基线 13-16 秒，×5=15 秒盖不住 16 秒尾巴（差 1 秒误杀最慢盒子），
-    /// ×7=21 秒盖住基线留 5 秒余量，仍&lt;慢恢复窗 24 秒，三窗次序不打架。
-    /// 口径：慢灌源带宽 ≥1/3 流码率即灌得到。</summary>
+    /// <summary>vc67 慢灌放宽窗（起播）：首帧门槛×3（7×3=21 秒；vc89 随门槛 7 秒改倍率×3——
+    /// 窗值保持 21 秒不变：vc66 真机出画基线 13-16 秒，×7=21 秒盖住基线留 5 秒余量的口径平移，
+    /// 仍&lt;慢恢复窗 24 秒，三窗次序不打架）。
+    /// ×3 定标依据：基线 16 秒 ÷ 门槛 7 秒 ≈ 2.3，×3 取整留余。</summary>
+    /// <remarks>口径：慢灌源带宽 ≥1/3 流码率即灌得到。</remarks>
     public static readonly TimeSpan SlowStartWindow =
-        TimeSpan.FromMilliseconds(PrefetchCurve.FirstFrameGate.TotalMilliseconds * 7);
+        TimeSpan.FromMilliseconds(PrefetchCurve.FirstFrameGate.TotalMilliseconds * 3);
 
     /// <summary>vc67 慢灌放宽窗（重灌）：卡后重入门槛 12s×2=24 秒——重灌要满 12 秒媒体，带宽 ≥1/2 流码率即灌得到。</summary>
     public static readonly TimeSpan SlowRecoveryWindow =
         TimeSpan.FromMilliseconds(PrefetchCurve.StartupThreshold.TotalMilliseconds * 2);
+
+    /// <summary>vc89 干库秒切窗：重灌期弱线零进度 3 秒即快切备线（不撞 12 秒判死钟）。
+    /// 只对「从没攒满过库存」的线路生效（_inventoryEverFilled=false），好线（攒满过）不受影响走原窗。</summary>
+    public static readonly TimeSpan FastDrainWindow = TimeSpan.FromSeconds(3);
+
+    // ---- vc89 灌速探针（老板拍板「一次平稳」）----
+
+    /// <summary>灌速弱线阈值：起播期采样「每等 1 秒灌进几秒存货」，低于 0.25×实时即弱线
+    /// （1=灌速恰平播放实时；0.25=出画后 7 秒存货只够再撑约 9 秒就见底）。</summary>
+    public const double WeakFillRateThreshold = 0.25;
+
+    /// <summary>灌速探针最短采样时长（毫秒）：不足不给结论，防起播头一拍的抖动读数误判。</summary>
+    public const int FillProbeMinElapsedMs = 2_000;
+
+    /// <summary>灌速探针事件：弱线坐实时触发一次（参数=下一条备线端点），壳层接 TicketResolver
+    /// 后台焐热备线票——不切线不动画面，干库秒切时零取票等待。每线路最多发一次（换线重记）。</summary>
+    public event EventHandler<SourceEndpoint>? WeakFillDetected;
 
     /// <summary>进度采样（vc67）：内核 BufferedMs 读数有增长即记时刻——3 秒内有增长算「慢灌在走」。</summary>
     private void SampleBufferProgress(long nowMs)
@@ -749,12 +780,46 @@ public sealed class PlaybackSession
         }
     }
 
+    // vc89 灌速探针账：_fillProbeSinceMs=本轮起播采样起点（每次进 Buffering 重开）；
+    // _fillProbePrewarmed=本线路预热信号已发（换线才重记，同线宽限重试不重复发）；
+    // _probeEndpoint=预热信号发出时端点身份（MarkEndpointStarted 对账判定换线）。
+    private long? _fillProbeSinceMs;
+    private bool _fillProbePrewarmed;
+    private SourceEndpoint? _probeEndpoint;
+
+    /// <summary>灌速探针（vc89 老板拍板「一次平稳」）：起播期采样「每等 1 秒灌进几秒存货」，
+    /// 灌速长期低于阈值的弱线提前把下一条备线票焐热（发 <see cref="WeakFillDetected"/>，壳层接
+    /// TicketResolver 后台预热）——不切线不动画面，干库秒切时零取票等待。
+    /// 由 CheckWatchdog 泵驱动（Buffering 期生效），测试注入 FixedClock 后手动泵。</summary>
+    private void ProbeFillRate(long nowMs)
+    {
+        if (_state != PlaybackState.Buffering) return;
+        if (_fillProbePrewarmed || _endpointIndex + 1 >= _queue.Count) return; // 无备线无从预热
+        _fillProbeSinceMs ??= nowMs;
+        long elapsedMs = nowMs - _fillProbeSinceMs.Value;
+        if (elapsedMs < FillProbeMinElapsedMs) return; // 采样窗不足不结论
+        double rate = _watchdogLastBufferedMs / (double)elapsedMs; // 每等 1 秒灌进几秒存货
+        if (rate >= WeakFillRateThreshold) return;
+        _fillProbePrewarmed = true;
+        var next = _queue[_endpointIndex + 1];
+        SessionTrace.Emit($"[探针] {DescribeChannel()} 线路{CurrentLineIndex + 1} 灌速 {rate:0.00}×实时（< {WeakFillRateThreshold:0.##}×，{elapsedMs}ms 采样 {_watchdogLastBufferedMs}ms 存货），预热备线{CurrentLineIndex + 2}");
+        WeakFillDetected?.Invoke(this, next);
+    }
+
     /// <summary>vc67 看门狗窗：3 秒内有缓冲增长→放宽窗（慢灌让路）；零增长→判死窗（vc68 三轮改 12 秒推导值）。
-    /// vc69 坏票宽限：换新票期间（取票网络耗时最长 5 秒+余量）宽限窗内不判死，期满恢复原窗。</summary>
-    private long WatchdogWindowMs(long nowMs, TimeSpan slowWindow, long startedMs)
+    /// vc69 坏票宽限：换新票期间（取票网络耗时最长 5 秒+余量）宽限窗内不判死，期满恢复原窗。
+    /// vc89 干库秒切（老板拍板「一次平稳」）：仅重灌期（画面在播后干库，allowFastDrain）且本线路
+    /// 从未攒满过库存、3 秒内零进度——弱线真死不撞满 12 秒钟，3 秒快切备线，黑十来秒病根拔除。
+    /// 起播期（Buffering）不适用：冷连接全程要 12 秒证明时间（vc68 三轮实锤），慢热源不能误杀；
+    /// 坏票宽限窗仍最高优先（票在换，不切）。</summary>
+    private long WatchdogWindowMs(long nowMs, TimeSpan slowWindow, long startedMs, bool allowFastDrain = false)
     {
         bool flowing = _lastBufferProgressAtMs is { } t && nowMs - t < 3_000;
         long windowMs = (long)Math.Max(OpenTimeout.TotalMilliseconds, flowing ? slowWindow.TotalMilliseconds : 0);
+        if (allowFastDrain && !_inventoryEverFilled && !flowing)
+        {
+            windowMs = Math.Min(windowMs, (long)FastDrainWindow.TotalMilliseconds);
+        }
         if (_ticketRetrySinceMs is { } t0)
         {
             long graceEnd = t0 + (long)TicketRetryGrace.TotalMilliseconds;

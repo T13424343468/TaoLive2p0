@@ -6,6 +6,7 @@ using Android.Views;
 using Android.Views.Animations;
 using Android.Widget;
 using TaoLive.Foundation;
+using TaoLive.Model;
 using TaoLive.Session;
 
 namespace TaoLive.Tv;
@@ -63,6 +64,27 @@ public partial class MainActivity
     {
         if (sender is PlaybackSession s && ReferenceEquals(s, _manager.Current))
             ShowToast(TaoLive.Session.SwitchHud.Connecting);
+    }
+
+    /// <summary>灌速探针预热（vc89 老板拍板「一次平稳」）：弱线起播期后台焐热下一条备线的票——
+    /// 走既有 TicketResolver 取票链路落缓存，干库秒切时零取票等待。不切线不动画面；
+    /// 仅前台会话发车，后台线程跑（探针信号在会话泵线程），失败照常走既有自救不碍事。</summary>
+    private void OnSessionWeakFill(object? sender, SourceEndpoint endpoint)
+    {
+        if (sender is not PlaybackSession s || !ReferenceEquals(s, _manager.Current)) return;
+        if (s.CurrentChannel is not { } ch || !endpoint.IsValid) return;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await _resolver.ResolveAsync(endpoint, ch.Id, ch.Name).ConfigureAwait(false);
+                CrashNet.Record($"[预热] {ch.Name} 备线票焐热完成（灌速探针）");
+            }
+            catch (Exception ex)
+            {
+                CrashNet.Record($"[预热] {ch.Name} 备线票焐热未成照常走既有自救：{ex.Message}");
+            }
+        });
     }
 
     // —— ⑨「去系统设置」三级跳（v1.0.9 拍板口径）：对口设置页 → 系统设置总入口 → 文字指引 ——
